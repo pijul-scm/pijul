@@ -7,103 +7,42 @@ use std::ptr;
 use std::slice;
 use std::fmt;
 use std::str;
+extern crate pijul;
+use pijul::mdb::{MDB_env,MDB_txn,mdb_env_create,mdb_reader_check,mdb_env_set_maxdbs,mdb_env_set_mapsize,mdb_env_open,mdb_txn_begin,mdb_txn_commit,mdb_txn_abort,mdb_env_close,mdb_dbi_open,MDB_CREATE,MDB_DUPSORT,MDB_val,MDB_NOTFOUND};
+use pijul::mdb;
 
-
-#[allow(missing_copy_implementations)]
-pub enum MDB_env {}
-pub enum MDB_txn {}
-
-#[repr(C)]
-pub enum MDB_cursor_op {
-    MDB_FIRST,
-    MDB_FIRST_DUP,
-    MDB_GET_BOTH,
-    MDB_GET_BOTH_RANGE,
-    MDB_GET_CURRENT,
-    MDB_GET_MULTIPLE,
-    MDB_LAST,
-    MDB_LAST_DUP,
-    MDB_NEXT,
-    MDB_NEXT_DUP,
-    MDB_NEXT_MULTIPLE,
-    MDB_NEXT_NODUP,
-    MDB_PREV,
-    MDB_PREV_DUP,
-    MDB_PREV_NODUP,
-    MDB_SET,
-    MDB_SET_KEY,
-    MDB_SET_RANGE
-}
-
-
-pub const MDB_REVERSEKEY: c_uint = 0x02;
-pub const MDB_DUPSORT: c_uint = 0x04;
-pub const MDB_INTEGERKEY: c_uint = 0x08;
-pub const MDB_DUPFIXED: c_uint = 0x10;
-pub const MDB_INTEGERDUP: c_uint = 0x20;
-pub const MDB_REVERSEDUP: c_uint =  0x40;
-pub const MDB_CREATE: c_uint = 0x40000;
-
-
-
-#[repr(C)]
-struct MDB_val {
-    mv_size:size_t,
-    mv_data: *const u8
-}
-
-impl fmt::Display for MDB_val {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // The `f` value implements the `Write` trait, which is what the
-        // write! macro is expecting. Note that this formatting ignores the
-        // various flags provided to format strings.
+fn with_repository<T,F>(path:&str,f: F)->Result<T,c_int>
+    where F:Fn(*mut MDB_env,*mut MDB_txn)->Result<T,c_int> {
         unsafe {
-            let dat = slice::from_raw_parts(self.mv_data,self.mv_size as usize);
-            match str::from_utf8(dat){
-                Ok(e)=>write!(f, "MDB_val {:?}", e),
-                Err(e)=>write!(f, "MDB_val [error: could not decode utf8]")
-            }
+            let env: *mut MDB_env = ptr::null_mut();
+            mdb_env_create(std::mem::transmute(&env));
+            let mut dead:c_int=0;
+            let e=mdb_reader_check(env,&mut dead);
+            if e != 0 { println!("mdb_reader_check");return Err(e) };
+            let e=mdb_env_set_maxdbs(env,10);
+            if e != 0 { println!("mdb_env_set_maxdbs");return Err(e) };
+            let e=mdb_env_set_mapsize(env,std::ops::Shl::shl(1,30) as size_t);
+            if e !=0 { println!("mdb_env_set_mapsize");return Err(e) };
+            let e=mdb_env_open(env,path.as_ptr() as *const c_char,0,0o755);
+            if e !=0 { println!("mdb_env_open");return Err(e) };
+            let txn: *mut MDB_txn = ptr::null_mut();
+            let e=mdb_txn_begin(env,ptr::null_mut(),0,std::mem::transmute(&txn));
+            if e!=0 { println!("mdb_txn_begin");mdb_txn_abort(txn);return Err(e) };
+            let x=
+                match f(env,txn) {
+                    Ok(x)=>{
+                        let e=mdb_txn_commit(txn);
+                        if e==0 {Ok(x)} else {Err(e)}
+                    },
+                    Err(e)=>{
+                        let _=mdb_txn_abort(txn);
+                        Err(e)
+                    }
+                };
+            mdb_env_close(env);
+            x
         }
     }
-}
-
-
-
-extern "C" {
-    fn mdb_env_create(env: *mut *mut MDB_env) -> c_int;
-    fn mdb_env_open(env: *mut MDB_env, path: *const c_char, flags: c_uint, mode: mode_t) -> c_int;
-    fn mdb_env_close(env: *mut MDB_env);
-    fn mdb_env_set_maxdbs(env: *mut MDB_env,maxdbs:c_uint)->c_int;
-    fn mdb_env_set_mapsize(env: *mut MDB_env,mapsize:size_t)->c_int;
-    fn mdb_reader_check(env:*mut MDB_env,dead:*mut c_int)->c_int;
-    fn mdb_txn_begin(env: *mut MDB_env,parent: *mut MDB_txn, flags:c_uint, txn: *mut *mut MDB_txn)->c_int;
-    fn mdb_txn_commit(txn: *mut MDB_txn)->c_int;
-    fn mdb_txn_abort(txn: *mut MDB_txn)->c_int;
-    fn mdb_dbi_open(txn: *mut MDB_txn, name: *const c_char, flags:c_uint, dbi:*mut c_uint)->c_int;
-    fn mdb_get(txn: *mut MDB_txn, dbi:c_uint, key: *mut MDB_val, val:*mut MDB_val)->c_int;
-    fn mdb_put(txn: *mut MDB_txn, dbi:c_uint, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
-}
-
-
-
-fn with_repository<T,F>(path:&str,f: F)->T
-    where F:Fn(*mut MDB_env,*mut MDB_txn)->T {
-    unsafe {
-        let env: *mut MDB_env = ptr::null_mut();
-        mdb_env_create(std::mem::transmute(&env));
-        let mut dead:c_int=0;
-        mdb_reader_check(env,&mut dead);
-        mdb_env_set_maxdbs(env,10);
-        mdb_env_set_mapsize(env,10485760 << 7);
-        mdb_env_open(env,path.as_ptr() as *const c_char,0,0o755);
-        let txn: *mut MDB_txn = ptr::null_mut();
-        mdb_txn_begin(env,ptr::null_mut(),0,std::mem::transmute(&txn));
-        let t=f(env,txn);
-        mdb_txn_commit(txn);
-        mdb_env_close(env);
-        t
-    }
-}
 
 struct Repository {
     t:*mut MDB_txn,
@@ -136,7 +75,20 @@ fn open_base(t:*mut MDB_txn,base:&mut Result<c_uint,c_int>, name:&str, flags:c_u
     }
 }
 
-
+fn mdb_put(t:*mut MDB_txn,base:c_uint,key:&mut MDB_val,value:&mut MDB_val,flag:c_uint)->Result<(),c_int>{
+    unsafe {
+        let ret=mdb::mdb_put(t,base,key as *mut MDB_val, value as *mut MDB_val,flag);
+        if ret==0 {Ok(())} else
+            {Err(ret)}
+    }
+}
+fn mdb_get(t:*mut MDB_txn,base:c_uint,key:&mut MDB_val,value:&mut MDB_val)->Result<bool,c_int>{
+    unsafe {
+        let ret=mdb::mdb_get(t,base,key as *mut MDB_val, value as *mut MDB_val);
+        if ret==0 {Ok(true)} else
+            if ret==MDB_NOTFOUND {Ok(false)} else {Err(ret)}
+    }
+}
 
 impl Repository {
     fn dbi_nodes(&mut self)->Result<c_uint,c_int> { open_base(self.t,&mut self.nodes,"nodes",MDB_CREATE|MDB_DUPSORT) }
@@ -151,62 +103,44 @@ impl Repository {
     fn dbi_revinodes(&mut self)->Result<c_uint,c_int> { open_base(self.t,&mut self.revinodes,"revinodes",MDB_CREATE) }
 }
 
+fn from_val(v:MDB_val)->Vec<u8>{unsafe {slice::from_raw_parts(v.mv_data,v.mv_size as usize).to_vec()}}
+
+
 fn main() {
-    with_repository("/tmp/test",|_,txn| {
-        println!("Hello, world!");
-        let mut rep=
-            Repository {
-                t:txn,
-                nodes: Err(0),
-                contents: Err(0),
-                revdep: Err(0),
-                internalhashes: Err(0),
-                externalhashes: Err(0),
-                branches: Err(0),
-                tree: Err(0),
-                revtree: Err(0),
-                inodes: Err(0),
-                revinodes: Err(0),
-                current_branch: Vec::from("main")
-            };
-        match rep.dbi_branches() {
-            Ok(dbi)=>{
-                let mut k=MDB_val { mv_size:1 as size_t, mv_data:"\0".as_ptr() };
-                let mut v=MDB_val { mv_size:0 as size_t, mv_data:ptr::null_mut() };
-                unsafe {
-                    let ok=mdb_get(txn,dbi,&mut k as *mut MDB_val,&mut v as *mut MDB_val);
-                    if ok==0 {
-                        rep.current_branch=slice::from_raw_parts(v.mv_data,v.mv_size as usize).to_vec()
-                    }
+    let x=
+        with_repository("/tmp/test\0",|_,txn| {
+            let mut rep=
+                Repository {
+                    t:txn,
+                    nodes: Err(0),
+                    contents: Err(0),
+                    revdep: Err(0),
+                    internalhashes: Err(0),
+                    externalhashes: Err(0),
+                    branches: Err(0),
+                    tree: Err(0),
+                    revtree: Err(0),
+                    inodes: Err(0),
+                    revinodes: Err(0),
+                    current_branch: Vec::from("main")
                 };
-            },
-            Err(_)=>()
-        };
-
-
-
-
-
-        ////////////
-        let key="key";
-        let value="value";
-        match rep.dbi_nodes() {
-            Ok(dbi)=>{
-                let mut k=MDB_val { mv_size:key.len() as size_t, mv_data:key.as_ptr() };
-                let mut v=MDB_val { mv_size:value.len() as size_t, mv_data:value.as_ptr() };
-
-                unsafe { mdb_put(txn,dbi,&mut k as *mut MDB_val,&mut v as *mut MDB_val,0); }
-
-                let mut k=MDB_val { mv_size:key.len() as size_t, mv_data:key.as_ptr() };
-                let mut w=MDB_val { mv_size:0 as size_t, mv_data:ptr::null_mut() };
-
-                unsafe { mdb_get(txn,dbi,&mut k as *mut MDB_val,&mut w as *mut MDB_val) };
-                println!("got: {}",w)
-            },
-            Err(e)=>{
-                println!("error {}",e)
+            match rep.dbi_branches() {
+                Ok(dbi)=>{
+                    let mut k=MDB_val { mv_size:1 as size_t, mv_data:"\0".as_ptr() };
+                    let mut v=MDB_val { mv_size:0 as size_t, mv_data:ptr::null_mut() };
+                    match mdb_get(txn,dbi,&mut k,&mut v) {
+                        Ok(e) => {
+                            if e {rep.current_branch=from_val(v)};
+                            Ok(0)
+                        },
+                        Err(e)=> { Err(e) }
+                    }
+                },
+                Err(e)=>{Err(e)}
             }
-        }
-        ()
-    })
+        });
+    match x {
+        Ok(_)=>println!("ok"),
+        Err(e)=>println!("err:{}",e)
+    }
 }
