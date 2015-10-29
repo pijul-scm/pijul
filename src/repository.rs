@@ -8,42 +8,10 @@ use std::slice;
 use std::fmt;
 use std::str;
 use std;
-use mdb::{Env,Txn,Val,Cursor,mdb_env_create,mdb_reader_check,mdb_env_set_maxdbs,mdb_env_set_mapsize,mdb_env_open,mdb_txn_begin,mdb_txn_commit,mdb_txn_abort,mdb_env_close,mdb_dbi_open,mdb_cursor_open,mdb_cursor_close,mdb_cursor_get,mdb_cursor_put,mdb_cursor_del,MDB_CREATE,MDB_DUPSORT,MDB_NOTFOUND};
+use mdb::{Val,mdb_env_create,mdb_reader_check,mdb_env_set_maxdbs,mdb_env_set_mapsize,mdb_env_open,mdb_txn_begin,mdb_txn_commit,mdb_txn_abort,mdb_env_close,mdb_dbi_open,mdb_cursor_get,mdb_cursor_put,mdb_cursor_del,MDB_CREATE,MDB_DUPSORT,MDB_NOTFOUND};
 use mdb;
 
-pub fn with_repository<T,F>(path:&str,f: F)->Result<T,c_int>
-    where F:Fn(*mut Env,*mut Txn)->Result<T,c_int> {
-        unsafe {
-            let env: *mut Env = ptr::null_mut();
-            mdb_env_create(std::mem::transmute(&env));
-            let mut dead:c_int=0;
-            let e=mdb_reader_check(env,&mut dead);
-            if e != 0 { println!("mdb_reader_check");return Err(e) };
-            let e=mdb_env_set_maxdbs(env,10);
-            if e != 0 { println!("mdb_env_set_maxdbs");return Err(e) };
-            let e=mdb_env_set_mapsize(env,std::ops::Shl::shl(1,30) as size_t);
-            if e !=0 { println!("mdb_env_set_mapsize");return Err(e) };
-            let e=mdb_env_open(env,path.as_ptr() as *const c_char,0,0o755);
-            if e !=0 { println!("mdb_env_open");return Err(e) };
-            let txn: *mut Txn = ptr::null_mut();
-            let e=mdb_txn_begin(env,ptr::null_mut(),0,std::mem::transmute(&txn));
-            if e!=0 { println!("mdb_txn_begin");mdb_txn_abort(txn);return Err(e) };
-            let x=
-                match f(env,txn) {
-                    Ok(x)=>{
-                        let e=mdb_txn_commit(txn);
-                        if e==0 {Ok(x)} else {Err(e)}
-                    },
-                    Err(e)=>{
-                        let _=mdb_txn_abort(txn);
-                        Err(e)
-                    }
-                };
-            mdb_env_close(env);
-            x
-        }
-    }
-
+/*
 fn with_cursor<T,F>(txn:*mut Txn,dbi:c_uint,f:F)->Result<T,c_int>
     where F:Fn(*mut Cursor)->Result<T,c_int> {
         unsafe {
@@ -55,6 +23,22 @@ fn with_cursor<T,F>(txn:*mut Txn,dbi:c_uint,f:F)->Result<T,c_int>
             x
         }
     }
+ */
+
+fn mdb_cursor_open(txn:*mut Txn,dbi:c_uint)->Result<*mut Cursor,c_int> {
+    unsafe {
+        let mut cursor:*mut Cursor=ptr::null_mut();
+        let ok=mdb::mdb_cursor_open(txn,dbi,std::mem::transmute(&txn));
+        if ok!=0 { Err(ok) } else { Ok(cursor) }
+    }
+}
+
+fn mdb_cursor_close(curs:*mut Cursor) {
+    unsafe {
+        mdb::mdb_cursor_close(curs);
+    }
+}
+
 
 pub struct Repository {
     pub t:*mut mdb::Txn,
@@ -147,9 +131,98 @@ pub fn open_repository(txn:*mut mdb::Txn)->Result<Repository,c_int> {
     }
 }
 
-fn add_inode(txn:*mut mdb::Txn,repo:&mut Repository,inode0:Vec<u8>)->Result<(),c_int>{
-    let dbi_nodes=try!(repo.dbi_nodes());
-    with_cursor(txn,dbi_nodes,|cursor| {
-        Ok(())
+
+const INODE_SIZE:usize = 10;
+
+macro_rules! with_cursor {
+    ( $txn:expr,$dbi:expr,$x:ident,$e:expr )=> ({
+        {
+            let $x=try!(mdb_cursor_open($txn,$dbi));
+            let x=$e;
+            mdb_cursor_close($x);
+            x
+        }
     })
+}
+
+
+pub fn initialize_repository(env:*mut *mut Env,txn:*mut *mut Txn,path:&str)->Result<(),c_int> {
+    unsafe {
+        mdb_env_create(env);
+        let mut dead:c_int=0;
+        let e=mdb_reader_check(*env,&mut dead);
+        if e != 0 { println!("mdb_reader_check");return Err(e) };
+        let e=mdb_env_set_maxdbs(*env,10);
+        if e != 0 { println!("mdb_env_set_maxdbs");return Err(e) };
+        let e=mdb_env_set_mapsize(*env,std::ops::Shl::shl(1,30) as size_t);
+        if e !=0 { println!("mdb_env_set_mapsize");return Err(e) };
+        let e=mdb_env_open(*env,path.as_ptr() as *const c_char,0,0o755);
+        if e !=0 { println!("mdb_env_open");return Err(e) };
+
+        let e=mdb_txn_begin(*env,ptr::null_mut(),0,txn);
+        if e!=0 { println!("mdb_txn_begin");mdb_txn_abort(*txn);mdb_env_close(*env);return Err(e) };
+        Ok(())
+    }
+}
+
+pub fn env_close(env:*mut Env){
+    unsafe {
+        mdb_env_close(env);
+    }
+}
+pub fn txn_commit(txn:*mut Txn)->c_int{
+    unsafe { mdb_txn_commit(txn) }
+}
+
+pub fn txn_abort(txn:*mut Txn)->c_int{
+    unsafe { mdb_txn_abort(txn) }
+}
+pub type Env=mdb::Env;
+pub type Txn=mdb::Txn;
+pub type Cursor=mdb::Cursor;
+
+impl Drop for Cursor {
+    fn drop(&mut self){
+        println!("cursor dropped!");
+        unsafe {mdb_cursor_close(self)}
+    }
+}
+
+#[macro_export]
+macro_rules! with_repository {
+    ( $path:expr, $env:ident, $txn:ident, $f:expr )=> ({
+        let $env: *mut $crate::repository::Env = std::ptr::null_mut();
+        let $txn: *mut $crate::repository::Txn = std::ptr::null_mut();
+        match unsafe { $crate::repository::initialize_repository(std::mem::transmute(&$env),
+                                                                 std::mem::transmute(&$txn),
+                                                                 $path) } {
+            Ok(())=> {
+                let x=
+                    match { $f } {
+                        Ok(x)=>{
+                            let e=$crate::repository::txn_commit($txn);
+                            if e==0 {Ok(x)} else {Err(e)}
+                        },
+                        Err(e)=>{
+                            let _=$crate::repository::txn_abort($txn);
+                            Err(e)
+                        }
+                    };
+                $crate::repository::env_close($env);
+                x
+            },
+            Err(e)=>{Err(e)}
+        }
+    })
+}
+
+
+
+fn add_inode(txn:*mut mdb::Txn,repo:&mut Repository,inode0:Vec<u8>,path0:Vec<&str>)->Result<(),c_int>{
+    let dbi_nodes=try!(repo.dbi_nodes());
+    let mut inode:Vec<u8>=Vec::with_capacity(INODE_SIZE);
+
+    let curs=mdb_cursor_open(txn,dbi_nodes);
+
+    Ok(())
 }
