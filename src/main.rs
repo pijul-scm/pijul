@@ -17,7 +17,7 @@ fn main() {
             )
         .get_matches();
 
-    let repository = args.value_of("REPOSITORY").unwrap_or("/tmp/test");
+    let repository = args.value_of("REPOSITORY").unwrap_or("/tmp/test\0");
 
     let x=
         with_repository!(repository,env,txn,{
