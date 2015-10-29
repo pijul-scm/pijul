@@ -21,8 +21,8 @@ fn main() {
 
     let x=
         with_repository!(repository,env,txn,{
-            let rep=open_repository(txn);
-            rep
+            let mut rep=Repository::new(txn);
+            add_inode(txn,&mut rep,vec!(),vec!())
         });
     match x {
         Ok(_)=>println!("ok"),

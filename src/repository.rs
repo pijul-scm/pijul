@@ -55,6 +55,7 @@ pub struct Repository {
     pub current_branch: Vec<u8>
 }
 
+
 pub fn open_base(t:*mut Txn,base:&mut Result<c_uint,c_int>, name:&str, flags:c_uint)->Result<c_uint,c_int>{
     match *base {
         Ok(n)=>Ok(n),
@@ -100,37 +101,36 @@ impl Repository {
     pub fn dbi_revinodes(&mut self)->Result<c_uint,c_int> { open_base(self.t,&mut self.revinodes,"revinodes",MDB_CREATE) }
 }
 
-pub fn open_repository(txn:*mut mdb::Txn)->Result<Repository,c_int> {
-    let mut rep=Repository {
-        t:txn,
-        nodes: Err(0),
-        contents: Err(0),
-        revdep: Err(0),
-        internalhashes: Err(0),
-        externalhashes: Err(0),
-        branches: Err(0),
-        tree: Err(0),
-        revtree: Err(0),
-        inodes: Err(0),
-        revinodes: Err(0),
-        current_branch: Vec::from("main")
-    };
-    match rep.dbi_branches() {
-        Ok(dbi)=>{
-            let mut k=Val { mv_size:1 as size_t, mv_data:"\0".as_ptr() };
-            let mut v=Val { mv_size:0 as size_t, mv_data:ptr::null_mut() };
-            match mdb_get(txn,dbi,&mut k,&mut v) {
-                Ok(e) => {
-                    if e {rep.current_branch=from_val(v)};
-                    Ok(rep)
-                },
-                Err(e)=> { Err(e) }
-            }
-        },
-        Err(e)=>{Err(e)}
+impl Repository {
+    pub fn new(txn:*mut mdb::Txn)->Repository{
+        let mut rep=Repository {
+            t:txn,
+            nodes: Err(0),
+            contents: Err(0),
+            revdep: Err(0),
+            internalhashes: Err(0),
+            externalhashes: Err(0),
+            branches: Err(0),
+            tree: Err(0),
+            revtree: Err(0),
+            inodes: Err(0),
+            revinodes: Err(0),
+            current_branch: Vec::from("main")
+        };
+        match rep.dbi_branches() {
+            Ok(dbi)=>{
+                let mut k=Val { mv_size:1 as size_t, mv_data:"\0".as_ptr() };
+                let mut v=Val { mv_size:0 as size_t, mv_data:ptr::null_mut() };
+                match mdb_get(txn,dbi,&mut k,&mut v) {
+                    Ok(e) => { if e {rep.current_branch=from_val(v)} }
+                    Err(e)=> { }
+                }
+            },
+            Err(e)=>{ }
+        };
+        rep
     }
 }
-
 
 const INODE_SIZE:usize = 10;
 
@@ -218,7 +218,7 @@ macro_rules! with_repository {
 
 
 
-fn add_inode(txn:*mut mdb::Txn,repo:&mut Repository,inode0:Vec<u8>,path0:Vec<&str>)->Result<(),c_int>{
+pub fn add_inode(txn:*mut mdb::Txn,repo:&mut Repository,inode0:Vec<u8>,path0:Vec<&str>)->Result<(),c_int>{
     let dbi_nodes=try!(repo.dbi_nodes());
     let mut inode:Vec<u8>=Vec::with_capacity(INODE_SIZE);
 
