@@ -1,5 +1,10 @@
 extern crate libc;
+#[macro_use]
 extern crate pijul;
+#[macro_use]
+extern crate clap;
+
+use clap::{Arg, App};
 use pijul::repository::*;
 
 fn main() {
@@ -15,7 +20,7 @@ fn main() {
     let repository = args.value_of("REPOSITORY").unwrap_or("/tmp/test");
 
     let x=
-        with_repository("/tmp/test\0",|_,txn| {
+        with_repository!(repository,env,txn,{
             let rep=open_repository(txn);
             rep
         });
