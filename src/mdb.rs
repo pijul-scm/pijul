@@ -11,7 +11,7 @@ pub enum MDB_txn {}
 pub enum MDB_cursor {}
 
 #[repr(C)]
-enum MDB_cursor_op {
+pub enum MDB_cursor_op {
     MDB_FIRST,
     MDB_FIRST_DUP,
     MDB_GET_BOTH,
@@ -65,7 +65,7 @@ impl fmt::Display for MDB_val {
     }
 }
 
-
+pub type Dbi=c_uint;
 
 extern "C" {
     pub fn mdb_env_create(env: *mut *mut MDB_env) -> c_int;

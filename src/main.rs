@@ -20,9 +20,9 @@ fn main() {
     let repository = args.value_of("REPOSITORY").unwrap_or("/tmp/test\0");
     match Env::new(repository) {
         Ok (env)=>{
-            match Txn::new(env,None,0) {
+            match Txn::new(&env,None,0) {
                 Ok(txn)=>{
-                    let rep=Repository::new(txn);
+                    let rep=Repository::new(&txn);
                     println!("ok");
                 },
                 Err(e)=>{

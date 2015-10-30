@@ -8,14 +8,114 @@ use std::slice;
 use std::fmt;
 use std::str;
 use std;
+use std::collections::HashMap;
 extern crate rand;
-use std::sync::Arc;
-use std::rc::Rc;
-use std::ffi::CString;
-use mdb::{Val,mdb_env_create,mdb_reader_check,mdb_env_set_maxdbs,mdb_env_set_mapsize,mdb_env_open,mdb_txn_begin,mdb_txn_commit,mdb_txn_abort,mdb_env_close,mdb_cursor_get,mdb_cursor_put,mdb_cursor_del,MDB_CREATE,MDB_DUPSORT,MDB_NOTFOUND};
-use mdb;
 
-pub struct Repository {
+use std::ffi::CString;
+use mdb::{Val,mdb_env_create,mdb_reader_check,mdb_env_set_maxdbs,mdb_env_set_mapsize,mdb_env_open,mdb_txn_begin,mdb_txn_commit,mdb_txn_abort,mdb_env_close,mdb_cursor_get,mdb_cursor_put,mdb_cursor_del,MDB_CREATE,MDB_DUPSORT,MDB_NOTFOUND,MDB_cursor_op};
+use mdb;
+use std::marker::{PhantomData} ;
+
+pub struct Env {env:*mut mdb::MDB_env}
+pub struct Txn<'a> { _marker:PhantomData<&'a ()>,active:bool,txn:*mut mdb::MDB_txn }
+
+impl<'a> Drop for Txn<'a> {
+    fn drop(&mut self){
+        self.abort()
+    }
+}
+
+impl <'env> Txn<'env> {
+    pub fn new(env:&'env Env,parent:Option<Txn<'env>>,flags:c_uint)->Result<Txn<'env>,c_int>{
+
+        let t:*mut mdb::MDB_txn = std::ptr::null_mut();
+        let e= unsafe { mdb_txn_begin(env.env,
+                                      match parent { None=>{ptr::null_mut()},
+                                                     Some(x)=>{x.txn} },
+                                      flags,
+                                      std::mem::transmute(&t)) };
+        assert!(e==0);
+        if e!=0 { println!("error: mdb_txn_begin");
+                  unsafe {mdb_txn_abort(t)};
+                  Err(e) }
+        else {
+            Ok(Txn { _marker:PhantomData,active:true,txn:t })
+        }
+    }
+    pub fn commit(&mut self)->Result<(),c_int>{
+        if self.active {
+            self.active=false;
+            unsafe { let e=mdb_txn_commit(self.txn);if e==0 { Ok(()) } else { Err(e) } }
+        } else { Err(-1) }
+    }
+    pub fn abort(&mut self){
+        if self.active {
+            self.active=false;
+            unsafe { mdb_txn_abort(self.txn) }
+        }
+    }
+}
+
+
+impl Env {
+    pub fn new(path:&str)->Result<Env,c_int>{
+        let env:*mut mdb::MDB_env = std::ptr::null_mut();
+        unsafe {
+            mdb_env_create(std::mem::transmute(&env));
+            let mut dead:c_int=0;
+            let e=mdb_reader_check(env,&mut dead);
+            if e != 0 { println!("mdb_reader_check");return Err(e) };
+            let e=mdb_env_set_maxdbs(env,10);
+            if e != 0 { println!("mdb_env_set_maxdbs");return Err(e) };
+            let e=mdb_env_set_mapsize(env,std::ops::Shl::shl(1,30) as size_t);
+            if e !=0 { println!("mdb_env_set_mapsize");return Err(e) };
+            let e=mdb_env_open(env,path.as_ptr() as *const c_char,0,0o755);
+            if e !=0 { println!("mdb_env_open");return Err(e) };
+        };
+        Ok (Env { env:env })
+    }
+}
+
+impl Drop for Env {
+    fn drop(&mut self){
+        unsafe {mdb_env_close(self.env)}
+    }
+}
+
+
+
+/*
+struct Cursor {txn:Rc<Txn>,cursor:*mut mdb::MDB_cursor}
+
+impl Clone for Env {
+    fn clone(&self)->Env{
+        Env {env:self.env}
+    }
+}
+
+impl Cursor {
+    fn new(t:&Rc<Txn>,dbi:c_uint)->Result<Rc<Cursor>,c_int> {
+        let mut cursor:*mut mdb::MDB_cursor=ptr::null_mut();
+        let ok= unsafe {mdb::mdb_cursor_open(t.txn,dbi,std::mem::transmute(&cursor))};
+        if ok!=0 { Err(ok) } else { Ok(Rc::new(Cursor { txn:Rc::clone(&t),cursor:cursor })) }
+    }
+}
+impl Drop for Cursor {
+    fn drop(&mut self){
+        unsafe {mdb::mdb_cursor_close(self.cursor)}
+    }
+}
+*/
+
+
+
+
+
+////////////////////////////////
+
+
+
+pub struct Repository<'a> {
     pub nodes: Result<c_uint,c_int>,
     pub contents: Result<c_uint,c_int>,
     pub revdep: Result<c_uint,c_int>,
@@ -26,7 +126,8 @@ pub struct Repository {
     pub revtree: Result<c_uint,c_int>,
     pub inodes: Result<c_uint,c_int>,
     pub revinodes: Result<c_uint,c_int>,
-    pub current_branch: Rc<Vec<c_char>>
+    pub current_branch: &'a [i8],
+    _marker:PhantomData<&'a ()>
 }
 
 
@@ -46,50 +147,44 @@ pub fn open_base(t:*mut mdb::MDB_txn,base:&mut Result<c_uint,c_int>, name:&str, 
         }
     }
 }
-/*
-fn mdb_put(t:&mut Txn,base:c_uint,key:&mut Val,value:&mut Val,flag:c_uint)->Result<(),c_int>{
-    unsafe {
-        let ret=mdb::mdb_put(&mut t.txn,base,key as *mut Val, value as *mut Val,flag);
-        if ret==0 {Ok(())} else
-            {Err(ret)}
-    }
-}
-*/
-fn mdb_get(t:&Rc<Txn>,base:c_uint,key:&mut Val,value:&mut Val)->Result<bool,c_int>{
-    unsafe {
-        let ret=mdb::mdb_get(t.txn,base,key as *mut Val, value as *mut Val);
-        if ret==0 {Ok(true)} else
-            if ret==MDB_NOTFOUND {Ok(false)} else {Err(ret)}
-    }
+fn mdb_get<'a>(t:&'a Txn<'a>,base:c_uint,key:&[u8])->Result<&'a [c_char],c_int>{
+    let mut key = Val { mv_size: key.len() as size_t,
+                        mv_data: key.as_ptr() as *mut c_char };
+    let mut data = Val { mv_size: 0,
+                         mv_data: ptr::null_mut() };
+    let ret=unsafe {mdb::mdb_get(t.txn,base,&mut key, &mut data)};
+    if ret==0 {
+        unsafe {
+            Ok(slice::from_raw_parts(data.mv_data as *const c_char,data.mv_size as usize))
+        }
+    } else {Err(ret)}
 }
 
-fn mdb_put(t:&Rc<Txn>,base:c_uint,key:&Vec<c_char>,value:&Vec<c_char>,flags:c_uint)->Result<(),c_int>{
-    unsafe {
-        let mut k=Val { mv_size:key.len() as size_t,mv_data:key.as_ptr() };
-        let mut v=Val { mv_size:value.len() as size_t,mv_data:value.as_ptr() };
-        let ret=mdb::mdb_put(t.txn,base,&mut k,&mut v,flags);
-        if ret==0 {Ok(())} else {Err(ret)}
-    }
+fn mdb_put<'a>(t:&'a mut Txn<'a>,base:c_uint,key:&[u8],value:&[u8],flags:c_uint)->Result<(),c_int>{
+    let mut k=Val { mv_size:key.len() as size_t,mv_data:key.as_ptr() as *const c_char };
+    let mut v=Val { mv_size:value.len() as size_t,mv_data:value.as_ptr() as *const c_char};
+    let ret=unsafe {mdb::mdb_put(t.txn,base,&mut k,&mut v,flags)};
+    if ret==0 {Ok(())} else {Err(ret)}
 }
 
 
 
 pub fn from_val(v:Val)->Vec<c_char>{unsafe {slice::from_raw_parts(v.mv_data,v.mv_size as usize).to_vec()}}
-impl Repository {
-    pub fn dbi_nodes(&mut self,t:&Rc<Txn>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.nodes,"nodes\0",MDB_CREATE|MDB_DUPSORT) }
+impl <'a> Repository<'a> {
+    fn dbi_nodes(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.nodes,"nodes\0",MDB_CREATE|MDB_DUPSORT) }
 
-    pub fn dbi_contents(&mut self,t:&Rc<Txn>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.contents,"contents\0",MDB_CREATE) }
-    pub fn dbi_revdep(&mut self,t:&Rc<Txn>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.contents,"revdep\0",MDB_CREATE|MDB_DUPSORT) }
-    pub fn dbi_internalhashes(&mut self,t:&Rc<Txn>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.internalhashes,"internal\0",MDB_CREATE) }
-    pub fn dbi_externalhashes(&mut self,t:&Rc<Txn>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.externalhashes,"external\0",MDB_CREATE) }
-    pub fn dbi_branches(&mut self,t:&Rc<Txn>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.branches,"branches\0",MDB_CREATE|MDB_DUPSORT) }
-    pub fn dbi_tree(&mut self,t:&Rc<Txn>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.tree,"tree\0",MDB_CREATE|MDB_DUPSORT) }
-    pub fn dbi_revtree(&mut self,t:&Rc<Txn>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.revtree,"revtree\0",MDB_CREATE) }
-    pub fn dbi_inodes(&mut self,t:&Rc<Txn>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.inodes,"inodes\0",MDB_CREATE) }
-    pub fn dbi_revinodes(&mut self,t:&Rc<Txn>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.revinodes,"revinodes\0",MDB_CREATE)}
+    fn dbi_contents(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.contents,"contents\0",MDB_CREATE) }
+    fn dbi_revdep(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.contents,"revdep\0",MDB_CREATE|MDB_DUPSORT) }
+    fn dbi_internalhashes(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.internalhashes,"internal\0",MDB_CREATE) }
+    fn dbi_externalhashes(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.externalhashes,"external\0",MDB_CREATE) }
+    fn dbi_branches(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.branches,"branches\0",MDB_CREATE|MDB_DUPSORT) }
+    fn dbi_tree(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.tree,"tree\0",MDB_CREATE|MDB_DUPSORT) }
+    fn dbi_revtree(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.revtree,"revtree\0",MDB_CREATE) }
+    fn dbi_inodes(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.inodes,"inodes\0",MDB_CREATE) }
+    fn dbi_revinodes(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.revinodes,"revinodes\0",MDB_CREATE)}
 
-    pub fn new(txn:Rc<Txn>)->Repository{
-        let mut rep=Repository {
+    pub fn new(txn:&'a Txn<'a>)->Repository{
+        let mut rep:Repository<'a>=Repository {
             nodes: Err(0),
             contents: Err(0),
             revdep: Err(0),
@@ -100,14 +195,14 @@ impl Repository {
             revtree: Err(0),
             inodes: Err(0),
             revinodes: Err(0),
-            current_branch: Rc::new(unsafe {Vec::from_raw_parts(DEFAULT_BRANCH.as_ptr() as *mut c_char, DEFAULT_BRANCH.len(),DEFAULT_BRANCH.len()) })
+            current_branch: unsafe {slice::from_raw_parts(DEFAULT_BRANCH.as_ptr() as *const c_char,
+                                                          DEFAULT_BRANCH.len()) },
+            _marker:PhantomData
         };
         match rep.dbi_branches(&txn) {
             Ok(dbi)=>{
-                let mut k=Val { mv_size:1 as size_t, mv_data:"\0".as_ptr() as *mut c_char };
-                let mut v=Val { mv_size:0 as size_t, mv_data:ptr::null_mut() };
-                match mdb_get(&txn,dbi,&mut k,&mut v) {
-                    Ok(e) => { if e {rep.current_branch=Rc::new(from_val(v))} }
+                match mdb_get(&txn,dbi,"\0".as_bytes()) {
+                    Ok(e) => { rep.current_branch=e }
                     Err(e)=> { }
                 }
             },
@@ -117,101 +212,22 @@ impl Repository {
     }
 }
 
-pub const DEFAULT_BRANCH:&'static str = "main";
-
-pub struct Env {env:*mut mdb::MDB_env}
-pub struct Txn { env:Arc<Env>,active:bool,txn:*mut mdb::MDB_txn }
-
-pub struct Cursor {txn:Rc<Txn>,cursor:*mut mdb::MDB_cursor}
-
-impl Clone for Env {
-    fn clone(&self)->Env{
-        Env {env:self.env}
-    }
-}
-
-impl Cursor {
-    pub fn new(t:&Rc<Txn>,dbi:c_uint)->Result<Cursor,c_int> {
-        let mut cursor:*mut mdb::MDB_cursor=ptr::null_mut();
-        let ok= unsafe {mdb::mdb_cursor_open(t.txn,dbi,std::mem::transmute(&cursor))};
-        if ok!=0 { Err(ok) } else { Ok(Cursor { txn:Rc::clone(&t),cursor:cursor }) }
-    }
-}
-impl Drop for Cursor {
-    fn drop(&mut self){
-        unsafe {mdb::mdb_cursor_close(self.cursor)}
-    }
-}
-
-impl Drop for Txn {
-    fn drop(&mut self){
-        self.abort()
-    }
-}
-
-impl Txn {
-    pub fn new(env:Arc<Env>,parent:Option<Txn>,flags:c_uint)->Result<Rc<Txn>,c_int>{
-
-        let mut t:*mut mdb::MDB_txn = std::ptr::null_mut();
-        let e= unsafe { mdb_txn_begin(env.env,
-                                      match parent { None=>{ptr::null_mut()},
-                                                     Some(x)=>{x.txn} },
-                                      flags,
-                                      std::mem::transmute(&t)) };
-        assert!(e==0);
-        if e!=0 { println!("error: mdb_txn_begin");
-                  unsafe {mdb_txn_abort(t)};
-                  Err(e) }
-        else {
-            Ok(Rc::new(Txn { env:Arc::clone(&env),active:true,txn:t }))
-        }
-    }
-    pub fn commit(&mut self)->Result<(),c_int>{
-        if self.active {
-            self.active=false;
-            unsafe { let e=mdb_txn_commit(self.txn);if(e==0) { Ok(()) } else { Err(e) } }
-        } else { Err(-1) }
-    }
-    pub fn abort(&mut self){
-        if self.active {
-            self.active=false;
-            unsafe { mdb_txn_abort(self.txn) }
-        }
-    }
-}
+const DEFAULT_BRANCH:&'static str = "main";
 
 
-impl Env {
-    pub fn new(path:&str)->Result<Arc<Env>,c_int>{
-        let env:*mut mdb::MDB_env = std::ptr::null_mut();
-        unsafe {
-            mdb_env_create(std::mem::transmute(&env));
-            let mut dead:c_int=0;
-            let e=mdb_reader_check(env,&mut dead);
-            if e != 0 { println!("mdb_reader_check");return Err(e) };
-            let e=mdb_env_set_maxdbs(env,10);
-            if e != 0 { println!("mdb_env_set_maxdbs");return Err(e) };
-            let e=mdb_env_set_mapsize(env,std::ops::Shl::shl(1,30) as size_t);
-            if e !=0 { println!("mdb_env_set_mapsize");return Err(e) };
-            let e=mdb_env_open(env,path.as_ptr() as *const c_char,0,0o755);
-            if e !=0 { println!("mdb_env_open");return Err(e) };
-        };
-        Ok (Arc::new(Env { env:env }))
-    }
-}
-impl Drop for Env {
-    fn drop(&mut self){
-        unsafe {mdb_env_close(self.env)}
-    }
-}
-
-////////////////////////////////
 
 
+
+
+
+
+
+
+/*
 const INODE_SIZE:usize = 16;
 const ROOT_INODE:[c_char;INODE_SIZE]=[0;INODE_SIZE];
 
-pub fn add_inode(txn:&Rc<Txn>,repo:&mut Repository,inode0:&Vec<c_char>,path0:Vec<&str>)->Result<(),c_int>{
+fn add_inode(txn:&Rc<Txn>,repo:&mut Repository,inode0:&Vec<c_char>,path0:Vec<&str>)->Result<(),c_int>{
     let dbi_inodes=try!(repo.dbi_inodes(&txn));
     let curs=Cursor::new(txn,dbi_inodes);
     let mut k=Val { mv_size:0,mv_data:ptr::null() };
@@ -253,3 +269,59 @@ pub fn add_inode(txn:&Rc<Txn>,repo:&mut Repository,inode0:&Vec<c_char>,path0:Vec
     Ok(())
 }
 
+pub fn add_file(txn:&Rc<Txn>,repo:&mut Repository,path0:Vec<&str>)->Result<(),c_int>{
+    add_inode(&txn,repo,&vec!(),path0)
+}
+*/
+/*
+
+struct Line { key:Val,half_deleted:bool,children:Vec<Rc<Line>>, index:isize, lowlink:usize, on_stack:bool, spit:bool }
+
+impl Line {
+    fn new(key:Val)->Rc<Line> {
+        Rc::new(Line { key:key, half_deleted:false,children:vec!(),index:-1,lowlink:0,on_stack:false,spit:false })
+    }
+}
+
+struct Neighbors { curs:Rc<Cursor>, cursor_flag:MDB_cursor_op, flag:c_char, key:Val, value:Val }
+impl Neighbors {
+    fn new(txn:&Rc<Txn>, dbi:mdb::Dbi, key:&Val,flag:c_char)->Result<Neighbors,c_int> {
+        let c=try!(Cursor::new(txn,dbi));
+        Ok(Neighbors {curs:c, cursor_flag:MDB_cursor_op::MDB_GET_BOTH_RANGE, flag:flag,
+                      key:Val{mv_size:key.mv_size,mv_data:key.mv_data},
+                      value:Val{mv_size:1,mv_data:vec!(flag).as_ptr()}})
+    }
+}
+impl Iterator for Neighbors {
+    type Item=Val;
+    fn next(&mut self)->Option<Val>{
+        let ok= unsafe {mdb::mdb_cursor_get(self.curs.cursor,&mut self.key,&mut self.value,self.cursor_flag as c_uint)};
+        self.cursor_flag=mdb::MDB_cursor_op::MDB_NEXT_DUP;
+        if ok==0 && self.value.mv_size>0 {
+            if unsafe {*self.value.mv_data == self.flag} { Some(self.value) } else {None}
+        } else {if ok==mdb::MDB_NOTFOUND {None} else {panic!("mdb_cursor_get")}}
+    }
+}
+
+
+fn retrieve(txn:&Rc<Txn>,repo:&mut Repository, key0:Vec<c_char>)->Result<(),c_int>{
+    let sink=Line::new(Val{mv_size:0,mv_data:ptr::null_mut()});
+    let mut visited:HashMap<&Vec<c_char>>,Rc<Line>>=HashMap::new();
+    let dbi_nodes=try!(repo.dbi_nodes(&txn));
+    let retr=|pkey:Rc<Vec<c_char>>| {
+        match visited.get(&*pkey) {
+            Some(l)=>l,
+            None =>{
+                let l=Line::new(Val{mv_size:pkey.len() as size_t,mv_data:pkey.as_ptr()});
+                visited.insert(pkey,l.clone());
+                &l
+                //real_pseudo_children_iter(&txn,dbi_nodes,vkey,|chi|{
+                //()
+                //})
+            }
+        }
+    };
+    retr(Rc::new(key0));
+    Ok(())
+}
+*/
