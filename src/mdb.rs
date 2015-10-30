@@ -1,6 +1,4 @@
 extern crate libc;
-use std::ptr;
-
 use std::slice;
 use std::str;
 use self::libc::{c_int, c_uint,c_char,size_t};
@@ -8,13 +6,9 @@ use self::libc::types::os::arch::posix88::mode_t;
 use std::fmt;
 
 #[allow(missing_copy_implementations)]
-enum MDB_env {}
-enum MDB_txn {}
-enum MDB_cursor {}
-
-pub type Env=MDB_env;
-pub type Txn=MDB_txn;
-pub type Cursor=MDB_cursor;
+pub enum MDB_env {}
+pub enum MDB_txn {}
+pub enum MDB_cursor {}
 
 #[repr(C)]
 enum MDB_cursor_op {
@@ -82,7 +76,7 @@ extern "C" {
     pub fn mdb_reader_check(env:*mut MDB_env,dead:*mut c_int)->c_int;
     pub fn mdb_txn_begin(env: *mut MDB_env,parent: *mut MDB_txn, flags:c_uint, txn: *mut *mut MDB_txn)->c_int;
     pub fn mdb_txn_commit(txn: *mut MDB_txn)->c_int;
-    pub fn mdb_txn_abort(txn: *mut MDB_txn)->c_int;
+    pub fn mdb_txn_abort(txn: *mut MDB_txn);
     pub fn mdb_dbi_open(txn: *mut MDB_txn, name: *const c_char, flags:c_uint, dbi:*mut c_uint)->c_int;
     pub fn mdb_get(txn: *mut MDB_txn, dbi:c_uint, key: *mut MDB_val, val:*mut MDB_val)->c_int;
     pub fn mdb_put(txn: *mut MDB_txn, dbi:c_uint, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;

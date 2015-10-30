@@ -18,14 +18,20 @@ fn main() {
         .get_matches();
 
     let repository = args.value_of("REPOSITORY").unwrap_or("/tmp/test\0");
-
-    let x=
-        with_repository!(repository,env,txn,{
-            let mut rep=Repository::new(txn);
-            add_inode(txn,&mut rep,vec!(),vec!())
-        });
-    match x {
-        Ok(_)=>println!("ok"),
-        Err(e)=>println!("err:{}",e)
+    match Env::new(repository) {
+        Ok (env)=>{
+            match Txn::new(env,None,0) {
+                Ok(txn)=>{
+                    let rep=Repository::new(txn);
+                    println!("ok");
+                },
+                Err(e)=>{
+                    println!("err:{}",e)
+                }
+            }
+        },
+        Err(e)=>{
+            println!("err:{}",e)
+        }
     }
 }
