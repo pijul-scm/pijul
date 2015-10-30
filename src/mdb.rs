@@ -65,7 +65,7 @@ impl fmt::Display for MDB_val {
     }
 }
 
-pub type Dbi=c_uint;
+pub type MDB_dbi=c_uint;
 
 extern "C" {
     pub fn mdb_env_create(env: *mut *mut MDB_env) -> c_int;
@@ -77,13 +77,13 @@ extern "C" {
     pub fn mdb_txn_begin(env: *mut MDB_env,parent: *mut MDB_txn, flags:c_uint, txn: *mut *mut MDB_txn)->c_int;
     pub fn mdb_txn_commit(txn: *mut MDB_txn)->c_int;
     pub fn mdb_txn_abort(txn: *mut MDB_txn);
-    pub fn mdb_dbi_open(txn: *mut MDB_txn, name: *const c_char, flags:c_uint, dbi:*mut c_uint)->c_int;
-    pub fn mdb_get(txn: *mut MDB_txn, dbi:c_uint, key: *mut MDB_val, val:*mut MDB_val)->c_int;
-    pub fn mdb_put(txn: *mut MDB_txn, dbi:c_uint, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    pub fn mdb_dbi_open(txn: *mut MDB_txn, name: *const c_char, flags:c_uint, dbi:*mut MDB_dbi)->c_int;
+    pub fn mdb_get(txn: *mut MDB_txn, dbi:MDB_dbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
+    pub fn mdb_put(txn: *mut MDB_txn, dbi:MDB_dbi, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
     pub fn mdb_cursor_get(cursor: *mut MDB_cursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
     pub fn mdb_cursor_put(cursor: *mut MDB_cursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
     pub fn mdb_cursor_del(cursor: *mut MDB_cursor, flags:c_uint)->c_int;
 
-    pub fn mdb_cursor_open(txn: *mut MDB_txn, dbi:c_uint, cursor:*mut *mut MDB_cursor)->c_int;
+    pub fn mdb_cursor_open(txn: *mut MDB_txn, dbi:MDB_dbi, cursor:*mut *mut MDB_cursor)->c_int;
     pub fn mdb_cursor_close(cursor: *mut MDB_cursor);
 }
