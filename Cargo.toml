@@ -7,3 +7,4 @@ build="build.rs"
 [dependencies]
 libc = "0.1.0"
 clap = "1.4.5"
+rand="0.3"

@@ -46,7 +46,7 @@ pub const MDB_NOTFOUND: c_int = -30798;
 #[repr(C)]
 struct MDB_val {
     pub mv_size:size_t,
-    pub mv_data: *const u8
+    pub mv_data: *const c_char
 }
 pub type Val=MDB_val;
 
@@ -56,7 +56,7 @@ impl fmt::Display for MDB_val {
         // write! macro is expecting. Note that this formatting ignores the
         // various flags provided to format strings.
         unsafe {
-            let dat = slice::from_raw_parts(self.mv_data,self.mv_size as usize);
+            let dat = slice::from_raw_parts(self.mv_data as *mut u8,self.mv_size as usize);
             match str::from_utf8(dat){
                 Ok(e)=>write!(f, "MDB_val {:?}", e),
                 Err(e)=>write!(f, "MDB_val [error: could not decode utf8]")
