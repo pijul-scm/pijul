@@ -48,7 +48,7 @@ impl Drop for Env {
 
 
 
-pub struct Txn<'a> { _marker:PhantomData<&'a ()>,active:bool,txn:*mut mdb::MDB_txn }
+pub struct Txn<'env> { _marker:PhantomData<&'env ()>,active:bool,txn:*mut mdb::MDB_txn }
 
 impl <'env> Txn<'env> {
     pub fn new(env:&'env Env,parent:Option<Txn<'env>>,flags:c_uint)->Result<Txn<'env>,c_int>{
@@ -88,7 +88,7 @@ impl<'a> Drop for Txn<'a> {
     }
 }
 
-fn mdb_get<'a>(t:&'a Txn<'a>,base:mdb::MDB_dbi,key:&[u8])->Result<&'a [u8],c_int>{
+fn mdb_get<'txn,'env>(t:&'txn Txn<'env>,base:mdb::MDB_dbi,key:&[u8])->Result<&'txn [u8],c_int>{
     let mut key = Val { mv_size: key.len() as size_t,
                         mv_data: key.as_ptr() as *mut c_char };
     let mut data = Val { mv_size: 0,
@@ -101,7 +101,7 @@ fn mdb_get<'a>(t:&'a Txn<'a>,base:mdb::MDB_dbi,key:&[u8])->Result<&'a [u8],c_int
     } else {Err(ret)}
 }
 
-fn mdb_put<'a>(t:&'a mut Txn<'a>,base:mdb::MDB_dbi,key:&[u8],value:&[u8],flags:c_uint)->Result<(),c_int>{
+fn mdb_put<'txn,'env>(t:&'txn mut Txn<'env>,base:mdb::MDB_dbi,key:&[u8],value:&[u8],flags:c_uint)->Result<(),c_int>{
     let mut k=Val { mv_size:key.len() as size_t,mv_data:key.as_ptr() as *const c_char };
     let mut v=Val { mv_size:value.len() as size_t,mv_data:value.as_ptr() as *const c_char};
     let ret=unsafe {mdb::mdb_put(t.txn,base,&mut k,&mut v,flags)};
@@ -109,7 +109,7 @@ fn mdb_put<'a>(t:&'a mut Txn<'a>,base:mdb::MDB_dbi,key:&[u8],value:&[u8],flags:c
 }
 
 
-
+/*
 struct Cursor<'a,'b> {_env:PhantomData<&'a ()>,
                       _txn:PhantomData<&'b ()>, cursor:*mut mdb::MDB_cursor}
 
@@ -126,7 +126,7 @@ impl <'a,'b> Drop for Cursor<'a,'b> {
         unsafe {mdb::mdb_cursor_close(self.cursor)}
     }
 }
-
+*/
 
 
 
@@ -136,7 +136,7 @@ impl <'a,'b> Drop for Cursor<'a,'b> {
 
 
 
-pub struct Repository<'a> {
+pub struct Repository<'env,'txn> {
     pub nodes: Result<c_uint,c_int>,
     pub contents: Result<c_uint,c_int>,
     pub revdep: Result<c_uint,c_int>,
@@ -147,9 +147,11 @@ pub struct Repository<'a> {
     pub revtree: Result<c_uint,c_int>,
     pub inodes: Result<c_uint,c_int>,
     pub revinodes: Result<c_uint,c_int>,
-    pub current_branch: &'a [u8],
-    _marker:PhantomData<&'a ()>
+    pub current_branch: &'txn [u8],
+    _env:PhantomData<&'env ()>,
+    _txn:PhantomData<&'txn ()>
 }
+
 
 
 pub fn open_base(t:*mut mdb::MDB_txn,base:&mut Result<c_uint,c_int>, name:&str, flags:c_uint)->Result<c_uint,c_int>{
@@ -170,22 +172,24 @@ pub fn open_base(t:*mut mdb::MDB_txn,base:&mut Result<c_uint,c_int>, name:&str, 
 }
 
 
-pub fn from_val(v:Val)->Vec<c_char>{unsafe {slice::from_raw_parts(v.mv_data,v.mv_size as usize).to_vec()}}
-impl <'a> Repository<'a> {
-    fn dbi_nodes(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.nodes,"nodes\0",MDB_CREATE|MDB_DUPSORT) }
+//pub fn from_val(v:Val)->Vec<c_char>{unsafe {slice::from_raw_parts(v.mv_data,v.mv_size as usize).to_vec()}}
+impl <'env,'txn> Repository<'env,'txn> {
 
-    fn dbi_contents(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.contents,"contents\0",MDB_CREATE) }
-    fn dbi_revdep(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.contents,"revdep\0",MDB_CREATE|MDB_DUPSORT) }
-    fn dbi_internalhashes(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.internalhashes,"internal\0",MDB_CREATE) }
-    fn dbi_externalhashes(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.externalhashes,"external\0",MDB_CREATE) }
-    fn dbi_branches(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.branches,"branches\0",MDB_CREATE|MDB_DUPSORT) }
-    fn dbi_tree(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.tree,"tree\0",MDB_CREATE|MDB_DUPSORT) }
-    fn dbi_revtree(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.revtree,"revtree\0",MDB_CREATE) }
-    fn dbi_inodes(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.inodes,"inodes\0",MDB_CREATE) }
-    fn dbi_revinodes(&mut self,t:&'a Txn<'a>)->Result<c_uint,c_int> { open_base(t.txn,&mut self.revinodes,"revinodes\0",MDB_CREATE)}
 
-    pub fn new(txn:&'a Txn<'a>)->Repository{
-        let mut rep:Repository<'a>=Repository {
+    fn dbi_nodes(&mut self,t:&'txn Txn<'env>)->Result<mdb::MDB_dbi,c_int> { open_base(t.txn,&mut self.nodes,"nodes\0",MDB_CREATE|MDB_DUPSORT) }
+
+    fn dbi_contents(&mut self,t:&'txn Txn<'env>)->Result<mdb::MDB_dbi,c_int> { open_base(t.txn,&mut self.contents,"contents\0",MDB_CREATE) }
+    fn dbi_revdep(&mut self,t:&'txn Txn<'env>)->Result<mdb::MDB_dbi,c_int> { open_base(t.txn,&mut self.contents,"revdep\0",MDB_CREATE|MDB_DUPSORT) }
+    fn dbi_internalhashes(&mut self,t:&'txn Txn<'env>)->Result<mdb::MDB_dbi,c_int> { open_base(t.txn,&mut self.internalhashes,"internal\0",MDB_CREATE) }
+    fn dbi_externalhashes(&mut self,t:&'txn Txn<'env>)->Result<mdb::MDB_dbi,c_int> { open_base(t.txn,&mut self.externalhashes,"external\0",MDB_CREATE) }
+    fn dbi_branches(&mut self,t:&'txn Txn<'env>)->Result<mdb::MDB_dbi,c_int> { open_base(t.txn,&mut self.branches,"branches\0",MDB_CREATE|MDB_DUPSORT) }
+    fn dbi_tree(&mut self,t:&'txn Txn<'env>)->Result<mdb::MDB_dbi,c_int> { open_base(t.txn,&mut self.tree,"tree\0",MDB_CREATE|MDB_DUPSORT) }
+    fn dbi_revtree(&mut self,t:&'txn Txn<'env>)->Result<mdb::MDB_dbi,c_int> { open_base(t.txn,&mut self.revtree,"revtree\0",MDB_CREATE) }
+    fn dbi_inodes(&mut self,t:&'txn Txn<'env>)->Result<mdb::MDB_dbi,c_int> { open_base(t.txn,&mut self.inodes,"inodes\0",MDB_CREATE) }
+    fn dbi_revinodes(&mut self,t:&'txn Txn<'env>)->Result<mdb::MDB_dbi,c_int> { open_base(t.txn,&mut self.revinodes,"revinodes\0",MDB_CREATE)}
+
+    pub fn new(txn:&'txn Txn<'env>)->Repository<'env,'txn>{
+        let mut rep=Repository {
             nodes: Err(0),
             contents: Err(0),
             revdep: Err(0),
@@ -198,7 +202,8 @@ impl <'a> Repository<'a> {
             revinodes: Err(0),
             current_branch: unsafe {slice::from_raw_parts(DEFAULT_BRANCH.as_ptr() as *const u8,
                                                           DEFAULT_BRANCH.len()) },
-            _marker:PhantomData
+            _env:PhantomData,
+            _txn:PhantomData
         };
         match rep.dbi_branches(&txn) {
             Ok(dbi)=>{
@@ -214,17 +219,26 @@ impl <'a> Repository<'a> {
 }
 
 const DEFAULT_BRANCH:&'static str = "main";
+extern "C" {
+    pub fn apply_edge(txn: *mut mdb::MDB_txn,dbi_internal:mdb::MDB_dbi,curs_nodes:*mut mdb::MDB_cursor,
+                      internal_patch_id:*const c_char,ev:*const mdb::Val,ep:*const mdb::Val);
+    pub fn apply_newnodes(txn: *mut mdb::MDB_txn,dbi_internal:mdb::MDB_dbi,dbi_nodes: mdb::MDB_dbi,
+                          internal_patch_id:*const c_char, flag:c_char, first_line_num:c_int,
+                          upContext:*mut mdb::MDB_val, nupContext:size_t,
+                          nodes:*mut mdb::MDB_val, nnodes:size_t,
+                          downContext:*mut mdb::MDB_val, ndownContext:size_t);
+}
 
-
-
-
+/*
 
 const INODE_SIZE:usize = 16;
 const ROOT_INODE:[u8;INODE_SIZE]=[0;INODE_SIZE];
 
-fn add_inode<'a>(txn:&'a mut Txn<'a>,repo:&'a mut Repository<'a>,inode0:&[u8],path0:Vec<&[u8]>)->Result<(),c_int>{
-    let dbi_inodes=try!(repo.dbi_inodes(txn));
-    let curs=Cursor::new(txn,dbi_inodes);
+fn add_inode<'env,'txn>(txn:&'txn mut Txn<'env>,repo:&'txn mut Repository<'env,'txn>,inode0:&[u8],path0:Vec<&[u8]>)->Result<(),c_int>{
+    //let dbi_inodes:c_uint=try!(repo.dbi_inodes(txn));
+    let dbi_tree:c_uint=try!(repo.dbi_tree(txn));
+    mdb_put(txn,dbi_tree,&[2][..],&[1][..],0);
+    //let curs=Cursor::new(txn,dbi_inodes);
     let mut k=Val { mv_size:0,mv_data:ptr::null() };
     let mut v=Val { mv_size:0,mv_data:ptr::null() };
     let mut it=path0.iter();
@@ -232,48 +246,55 @@ fn add_inode<'a>(txn:&'a mut Txn<'a>,repo:&'a mut Repository<'a>,inode0:&[u8],pa
     let mut dir=ROOT_INODE.to_vec();
     let mut inode:&[u8]=&([0;16] [..]);
 
-    while elem.is_some() {
+    //while elem.is_some() {
         let mut h=elem.unwrap();
         for i in 0..(*h).len()-1 { dir.push((*h)[i]) };
 
-        match mdb_get (txn,try!(repo.dbi_tree(txn)), &*dir) {
-            Ok (v)=>{
-                dir.clear();
-                for i in 0..v.len()-1 { dir.push(v[i]) };
-                elem=it.next();
-            },
-            Err(mdb::MDB_NOTFOUND)=>{
-                elem=it.next();
-                let inode:&[u8]=
-                    if elem.is_some() || inode0.len()==0 {
-                        dir.clear();
-                        for i in 0..INODE_SIZE-1 {dir.push(rand::random())}
-                        &dir
-                    } else {
-                        inode0
-                    };
+
+        let next=
+            match mdb_get (txn,dbi_tree, &*dir) {
+                Ok (v)=>{
+                    dir.clear();
+                    for i in 0..v.len()-1 { dir.push(v[i]) };
+                    elem=it.next();
+                    false
+                },
+                Err(mdb::MDB_NOTFOUND)=>{
+                    elem=it.next();
+                    true
+                },
+                Err(_)=>{
+                    panic!("add_inode: error")
+                }
+            };
+        if(next){
+            let inode:&[u8]=
+                if elem.is_some() || inode0.len()==0 {
+                    dir.clear();
+                    for i in 0..INODE_SIZE-1 {dir.push(rand::random())}
+                    &dir
+                } else {
+                    inode0
+                };
+            mdb_put(txn,dbi_tree,&dir,&inode,0);
+        }
                 /*
-                mdb_put(txn,try!(repo.dbi_tree(txn)),&dir,&inode,0);
                 mdb_put(txn,try!(repo.dbi_revtree(txn)),&inode,&dir,0);
                 if elem.is_some() {
                     mdb_put(txn,try!(repo.dbi_tree(txn)),&inode,&[],0);
                 }
                  */
 
-            },
-            Err(_)=>{
-                panic!("add_inode: error")
-            }
-        }
-    }
+//}
+
     Ok(())
 }
 
-pub fn add_file<'a>(txn:&'a mut Txn<'a>,repo:&'a mut Repository<'a>,path0:Vec<&[u8]>)->Result<(),c_int>{
+pub fn add_file<'env,'txn>(txn:&'txn mut Txn<'env>,repo:&'txn mut Repository<'env,'txn>,path0:Vec<&[u8]>)->Result<(),c_int>{
     add_inode(txn,repo,&vec!(),path0)
 }
 
-/*
+
 
 struct Line { key:Val,half_deleted:bool,children:Vec<Rc<Line>>, index:isize, lowlink:usize, on_stack:bool, spit:bool }
 

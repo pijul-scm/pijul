@@ -44,7 +44,7 @@ pub const MDB_NOTFOUND: c_int = -30798;
 
 
 #[repr(C)]
-struct MDB_val {
+pub struct MDB_val {
     pub mv_size:size_t,
     pub mv_data: *const c_char
 }
