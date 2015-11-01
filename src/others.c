@@ -286,6 +286,7 @@ int tarjan(struct line* l){
     }
   }
   dfs(l);
+  free(stack);
   return (index-1);
 }
 
@@ -300,6 +301,8 @@ int tarjan(struct line* l){
     reconnect downwards
   V remove obsolete pseudoedges
 
+  Note: reconnect upwards and downwards must be called for both edges and newnodes, but after these have been inserted.
+
 V Fetch repository
 
   V Tarjan
@@ -313,7 +316,7 @@ V add_file
 
 
 // apply just one edge, not deleting anything else.
-void apply_edge(MDB_txn*txn,MDB_dbi dbi_internal,MDB_cursor *curs_nodes,
+int apply_edge(MDB_txn*txn,MDB_dbi dbi_internal,MDB_cursor *curs_nodes,
                 const char* internal_patch_id,
                 const MDB_val*eu,char flag,const MDB_val*ev,const MDB_val*ep){
   char pu[1+KEY_SIZE+HASH_SIZE];
@@ -323,9 +326,10 @@ void apply_edge(MDB_txn*txn,MDB_dbi dbi_internal,MDB_cursor *curs_nodes,
   char* dev=(char*)ev->mv_data;
   // Find out internal keys
   MDB_val eeu,eev;
+  int ret;
   eeu.mv_data=eu->mv_data;
   eeu.mv_size=eu->mv_size-LINE_SIZE;
-  mdb_get(txn,dbi_internal,&eeu,&internal_u);
+  if((ret=mdb_get(txn,dbi_internal,&eeu,&internal_u))) return ret;
   memcpy(pu+1,internal_u.mv_data,HASH_SIZE);
   pu[0]=flag ^ PARENT_EDGE ^ DELETED_EDGE;
 
@@ -333,13 +337,13 @@ void apply_edge(MDB_txn*txn,MDB_dbi dbi_internal,MDB_cursor *curs_nodes,
 
   eeu.mv_data=eu->mv_data;
   eeu.mv_size=eu->mv_size-LINE_SIZE;
-  mdb_get(txn,dbi_internal,&eeu,&internal_u);
+  if((ret=mdb_get(txn,dbi_internal,&eeu,&internal_u))) return ret;
   memcpy(pv+1,internal_u.mv_data,HASH_SIZE);
   pv[0]=flag^DELETED_EDGE;
 
   memcpy(pv+1+HASH_SIZE,dev+ev->mv_size-LINE_SIZE,LINE_SIZE);
 
-  mdb_get(txn,dbi_internal,ep,&internal_u);
+  if((ret=mdb_get(txn,dbi_internal,ep,&internal_u))) return ret;
   memcpy(pu+1+KEY_SIZE,internal_u.mv_data,HASH_SIZE);
   memcpy(pv+1+KEY_SIZE,internal_u.mv_data,HASH_SIZE);
 
@@ -351,24 +355,24 @@ void apply_edge(MDB_txn*txn,MDB_dbi dbi_internal,MDB_cursor *curs_nodes,
   int ret=mdb_cursor_get(curs_nodes,&eeu,&eev,MDB_GET_BOTH);
   if(!ret){
     mdb_cursor_del(curs_nodes,0);
-  }
+  } else if(ret!=MDB_NOTFOUND) return ret;
   eeu.mv_data=pv+1;
   eev.mv_data=pu;
   ret=mdb_cursor_get(curs_nodes,&eeu,&eev,MDB_GET_BOTH);
   if(!ret){
     mdb_cursor_del(curs_nodes,0);
-  }
+  } else if(ret!=MDB_NOTFOUND) return ret;
 
   // Now insert actual version
   memcpy(pu+1+KEY_SIZE,internal_patch_id,HASH_SIZE);
   memcpy(pv+1+KEY_SIZE,internal_patch_id,HASH_SIZE);
   pv[0]=flag;
   pu[0]=flag^PARENT_EDGE;
-  mdb_cursor_put(curs_nodes,&eeu,&eev,0);
+  if((ret=mdb_cursor_put(curs_nodes,&eeu,&eev,0))) return ret;
   eeu.mv_data=pu+1;
   eev.mv_data=pv;
-  mdb_cursor_put(curs_nodes,&eeu,&eev,0);
-  return;
+  if((ret=mdb_cursor_put(curs_nodes,&eeu,&eev,0))) return ret;
+  return 0;
 }
 
 void check_pseudo_edges(MDB_txn*txn,MDB_dbi dbi_internal,MDB_cursor *curs_nodes,
@@ -445,13 +449,14 @@ void check_pseudo_edges(MDB_txn*txn,MDB_dbi dbi_internal,MDB_cursor *curs_nodes,
 }
 
 // Apply a sequence of new nodes
-void apply_newnodes(MDB_txn*txn,MDB_dbi dbi_internal,MDB_dbi dbi_nodes,
+int apply_newnodes(MDB_txn*txn,MDB_dbi dbi_internal,MDB_dbi dbi_nodes,
                     char* internal_patch_id,
                     char flag,
                     int first_line_num,
                     MDB_val* upContext,size_t nupContext,
                     MDB_val* nodes,size_t nnodes,
                     MDB_val* downContext, size_t ndownContext){
+  int ret;
   MDB_val vv,ww;
   char pv[1+KEY_SIZE+HASH_SIZE];
   char pw[1+KEY_SIZE+HASH_SIZE];
@@ -485,7 +490,8 @@ void apply_newnodes(MDB_txn*txn,MDB_dbi dbi_internal,MDB_dbi dbi_nodes,
     } else {
       context.mv_data=upContext[i].mv_data;
       context.mv_size=upContext[i].mv_size - LINE_SIZE;
-      mdb_get(txn,dbi_internal,&context,&uu);
+      if((ret=mdb_get(txn,dbi_internal,&context,&uu)))
+        return ret;
     }
     memcpy(pv+1,uu.mv_data,HASH_SIZE);
     // Copy upcontext line number
@@ -494,11 +500,11 @@ void apply_newnodes(MDB_txn*txn,MDB_dbi dbi_internal,MDB_dbi dbi_nodes,
 
     // Add the edges.
     // First direction
-    mdb_put(txn,dbi_nodes,&vv,&ww,0);
+    if((ret=mdb_put(txn,dbi_nodes,&vv,&ww,0))) return ret;
     // Other direction.
     vv.mv_data=pw+1;
     ww.mv_data=pv;
-    mdb_put(txn,dbi_nodes,&vv,&ww,0);
+    if((ret=mdb_put(txn,dbi_nodes,&vv,&ww,0))) return ret;
   }
 
   MDB_val contents;
@@ -523,12 +529,12 @@ void apply_newnodes(MDB_txn*txn,MDB_dbi dbi_internal,MDB_dbi dbi_nodes,
       linenum >>= 8;
     }
 
-    mdb_put(txn,dbi_nodes,&vv,&ww,0);
+    if((ret=mdb_put(txn,dbi_nodes,&vv,&ww,0))) return ret;
 
     vv.mv_data=ppw+1;
     ww.mv_data=ppv;
 
-    mdb_put(txn,dbi_nodes,&vv,&ww,0);
+    if((ret=mdb_put(txn,dbi_nodes,&vv,&ww,0))) return ret;
 
     // invert ppv / ppw
     char*tmp=ppv;
@@ -549,7 +555,7 @@ void apply_newnodes(MDB_txn*txn,MDB_dbi dbi_internal,MDB_dbi dbi_nodes,
     } else {
       context.mv_data=upContext[i].mv_data;
       context.mv_size=upContext[i].mv_size - LINE_SIZE;
-      mdb_get(txn,dbi_internal,&context,&uu);
+      if((ret=mdb_get(txn,dbi_internal,&context,&uu))) return ret;
     }
 
     char*upc=(char*)downContext[i].mv_data;
@@ -567,6 +573,7 @@ void apply_newnodes(MDB_txn*txn,MDB_dbi dbi_internal,MDB_dbi dbi_nodes,
   }
   return;
 }
+
 
 int main(){
   /*
