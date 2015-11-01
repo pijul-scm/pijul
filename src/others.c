@@ -26,7 +26,7 @@ MDB_dbi db_open(pijul_repository*repo,unsigned int op){
   }
 }
 
-int pijul_open_repository(pijul_repository**repo,const char* path){
+int pijul_open_repository(const char* path,pijul_repository**repo){
   *repo=malloc(sizeof(pijul_repository));
   if(*repo == NULL)
     return -1;
@@ -37,7 +37,6 @@ int pijul_open_repository(pijul_repository**repo,const char* path){
   int dead;
   if((ret=mdb_reader_check((*repo)->env,&dead))) goto cleanup;
   if((ret=mdb_env_open((*repo)->env,path,0,0750))) goto cleanup;
-
   if((ret=mdb_txn_begin((*repo)->env,NULL,0,&(*repo)->txn))) goto cleanup;
 
   return 0;
@@ -102,7 +101,6 @@ int add_inode(pijul_repository*repo,char*inode,char**path,int pathc){
   return ret;
 }
 
-// Next target: retrieve, tarjan, output
 struct line {
   MDB_val key;
   unsigned char flags;
@@ -152,8 +150,8 @@ unsigned int hash_key(char* str){
 }
 
 struct hashtable {
-  void** table;
-  size_t size; // should always be even
+  void** table; // allocated at 2*size.
+  size_t size;
   size_t elements;
 };
 
@@ -177,7 +175,7 @@ void rehash(struct hashtable*t){
   t->size*=2;
   t->elements=0;
   int i;
-  for(i=0;i<oldsize;i+=2){
+  for(i=0;i<oldsize*2;i+=2){
     if(old[i])
       insert(t,old[i],old[i+1]);
   }
@@ -185,26 +183,26 @@ void rehash(struct hashtable*t){
 }
 
 void insert(struct hashtable*t,char*key,void*value){
-  int h=(2*hash_key(key)) % t->size;
-  while((t->table[h]) && (strncmp(t->table [h], key, KEY_SIZE) != 0)) {
-    h+=(h+2) % t->size;
+  int h=(hash_key(key) % t->size);
+  while((t->table[2*h]) && (strncmp(t->table [2*h], key, KEY_SIZE) != 0)) {
+    h += (h+1) % t->size;
   }
-  if(!(t->table[h]))
+  if(!(t->table[2*h]))
     t->elements++; // This is an actual insertion (else it is a replacement).
-  t->table[h]=key;
-  t->table[h+1]=value;
+  t->table[2*h]=key;
+  t->table[2*h+1]=value;
   if(t->elements > t->size/2) rehash(t);
 }
 #define PIJUL_NOTFOUND -1
 int get(struct hashtable*t,char*key,void**value){
-  int h=(2*hash_key(key)) % t->size;
-  while((t->table[h] != NULL) && (strncmp(t->table [h], key, KEY_SIZE) != 0)) {
-    h+=(h+2) % t->size;
+  int h=(hash_key(key) % t->size);
+  while((t->table[2*h] != NULL) && (strncmp(t->table [2*h], key, KEY_SIZE) != 0)) {
+    h+=(h+1) % t->size;
   }
-  if((t->table[h]) == NULL)
+  if((t->table[2*h]) == NULL)
     return PIJUL_NOTFOUND;
   else {
-    *value=t->table[h+1];
+    *value=t->table[2*h+1];
     return 0;
   }
 }
@@ -292,27 +290,6 @@ int tarjan(struct line* l){
 
 
 
-/* TODO: (R=must be done in rust, V=done)
-
-  UnsafeApply
-
-  V unsafe_apply for edges and newnodes
-    reconnect upwards
-    reconnect downwards
-  V remove obsolete pseudoedges
-
-  Note: reconnect upwards and downwards must be called for both edges and newnodes, but after these have been inserted.
-
-V Fetch repository
-
-  V Tarjan
-  R output_repository
-
-V add_file
-  move_file
-  del_file
-
-*/
 
 
 // apply just one edge, not deleting anything else.
@@ -373,79 +350,6 @@ int apply_edge(MDB_txn*txn,MDB_dbi dbi_internal,MDB_cursor *curs_nodes,
   eev.mv_data=pv;
   if((ret=mdb_cursor_put(curs_nodes,&eeu,&eev,0))) return ret;
   return 0;
-}
-
-void check_pseudo_edges(MDB_txn*txn,MDB_dbi dbi_internal,MDB_cursor *curs_nodes,
-                        const char* internal_patch_id,
-                        const MDB_val*eu,char flag,const MDB_val*ev,const MDB_val*ep){
-
-  if(flag & DELETED_EDGE){
-    int ret=0;
-
-    MDB_val *deleted=(flag&PARENT_EDGE) ? ev:eu;
-    char pu[1+KEY_SIZE+HASH_SIZE];
-    char pv[1+KEY_SIZE+HASH_SIZE];
-    pu[0]=flag^PARENT_EDGE;
-
-    MDB_val external,internal;
-    external.mv_data=deleted->mv_data;
-    external.mv_size=deleted->mv_size-LINE_SIZE;
-    mdb_get(txn,dbi_internal,&external,&internal);
-    memcpy(pu+1,internal.mv_data,HASH_SIZE);
-    char*ce=deleted->mv_data;
-    memcpy(pu+1+HASH_SIZE,ce + deleted->mv_size-LINE_SIZE,LINE_SIZE);
-    // pu+1 now contains the full id of the patch, the first 1+KEY_SIZE are correct.
-
-    // Does pu have any alive parent or folder parent?
-    MDB_val u,v;
-    u.mv_data=pu+1;
-    u.mv_size=KEY_SIZE;
-    v.mv_data=pv;
-    v.mv_data=1+HASH_SIZE+KEY_SIZE;
-    memset(pv,0,1+HASH_SIZE+KEY_SIZE);
-    pv[0]=PARENT_EDGE;
-    ret=mdb_cursor_get(curs,&u,&v,MDB_GET_BOTH_RANGE);
-    if(ret==0 && v.mv_size>0){
-      if(v.mv_data[0] != PARENT_EDGE) // if the neighbor is not a parent
-        ret=MDB_NOTFOUND;
-    } else {ret=MDB_NOTFOUND;}
-    // here ret==0 if and only if u has a parent.
-    // does it have a pseudo-parent?
-    if(ret!=0){
-      v.mv_data=pv;
-      v.mv_data=1+HASH_SIZE+KEY_SIZE;
-      pv[0]=PARENT_EDGE | FOLDER_EDGE;
-      ret=mdb_cursor_get(curs,&u,&v,MDB_GET_BOTH_RANGE);
-      if(ret==0 && v.mv_size>0) { // has some neighbor
-        if(v.mv_data[0] != (PARENT_EDGE|FOLDER_EDGE)) // if the neighbor is not a folder parent
-          ret=MDB_NOTFOUND;
-      } else { ret=MDB_NOTFOUND; }
-    }
-    // here ret==0 if and only if u has a parent or a folder parent
-    // while u has a pseudo parent
-    while(!ret){
-      MDB_val u,v;
-      pv[0]=PSEUDO_EDGE | PARENT_EDGE; // v is a pseudo-parent of u.
-      ret=mdb_cursor_get(curs,&u,&v,MDB_GET_BOTH_RANGE);
-      if(!ret && v.mv_size>0 && v.mv_size==pv.[0]) {
-        memcpy(pv+1,v.mv_data+1,KEY_SIZE);
-        memcpy(pu+1+KEY_SIZE,v.mv_data+1+KEY_SIZE,HASH_SIZE);
-        char*ppv=v.mv_data;
-        pu[0]=ppv[0] ^ PARENT_EDGE;
-
-        mdb_cursor_del(curs,0);
-
-        u.mv_data=pv+1;
-        u.mv_size=KEY_SIZE;
-        v.mv_data=pu;
-        v.mv_size=1+KEY_SIZE+HASH_SIZE;
-        ret=mdb_cursor_get(curs,&u,&v,MDB_GET_BOTH);
-        if(!ret) {
-          mdb_cursor_del(curs,0);
-        }
-      } else ret=MDB_NOTFOUND;
-    }
-  }
 }
 
 // Apply a sequence of new nodes
@@ -573,6 +477,156 @@ int apply_newnodes(MDB_txn*txn,MDB_dbi dbi_internal,MDB_dbi dbi_nodes,
   }
   return;
 }
+
+
+
+void check_pseudo_edges(MDB_txn*txn,MDB_dbi dbi_internal,MDB_cursor *curs_nodes,
+                        const char* internal_patch_id,
+                        const MDB_val*eu,char flag,const MDB_val*ev,const MDB_val*ep){
+
+  if(flag & DELETED_EDGE){
+    int ret=0;
+
+    MDB_val *deleted=(flag&PARENT_EDGE) ? ev:eu;
+    char pu[1+KEY_SIZE+HASH_SIZE];
+    char pv[1+KEY_SIZE+HASH_SIZE];
+    pu[0]=flag^PARENT_EDGE;
+
+    MDB_val external,internal;
+    external.mv_data=deleted->mv_data;
+    external.mv_size=deleted->mv_size-LINE_SIZE;
+    mdb_get(txn,dbi_internal,&external,&internal);
+    memcpy(pu+1,internal.mv_data,HASH_SIZE);
+    char*ce=deleted->mv_data;
+    memcpy(pu+1+HASH_SIZE,ce + deleted->mv_size-LINE_SIZE,LINE_SIZE);
+    // pu+1 now contains the full id of the patch, the first 1+KEY_SIZE are correct.
+
+    // Does pu have any alive parent or folder parent?
+    MDB_val u,v;
+    u.mv_data=pu+1;
+    u.mv_size=KEY_SIZE;
+    v.mv_data=pv;
+    v.mv_data=1+HASH_SIZE+KEY_SIZE;
+    memset(pv,0,1+HASH_SIZE+KEY_SIZE);
+    pv[0]=PARENT_EDGE;
+    ret=mdb_cursor_get(curs,&u,&v,MDB_GET_BOTH_RANGE);
+    if(ret==0 && v.mv_size>0){
+      if(v.mv_data[0] != PARENT_EDGE) // if the neighbor is not a parent
+        ret=MDB_NOTFOUND;
+    } else {ret=MDB_NOTFOUND;}
+    // here ret==0 if and only if u has a parent.
+    // does it have a pseudo-parent?
+    if(ret!=0){
+      v.mv_data=pv;
+      v.mv_data=1+HASH_SIZE+KEY_SIZE;
+      pv[0]=PARENT_EDGE | FOLDER_EDGE;
+      ret=mdb_cursor_get(curs,&u,&v,MDB_GET_BOTH_RANGE);
+      if(ret==0 && v.mv_size>0) { // has some neighbor
+        if(v.mv_data[0] != (PARENT_EDGE|FOLDER_EDGE)) // if the neighbor is not a folder parent
+          ret=MDB_NOTFOUND;
+      } else { ret=MDB_NOTFOUND; }
+    }
+    // here ret==0 if and only if u has a parent or a folder parent
+    // while u has a pseudo parent
+    while(!ret){
+      MDB_val u,v;
+      pv[0]=PSEUDO_EDGE | PARENT_EDGE; // v is a pseudo-parent of u.
+      ret=mdb_cursor_get(curs,&u,&v,MDB_GET_BOTH_RANGE);
+      if(!ret && v.mv_size>0 && v.mv_size==pv.[0]) {
+        memcpy(pv+1,v.mv_data+1,KEY_SIZE);
+        memcpy(pu+1+KEY_SIZE,v.mv_data+1+KEY_SIZE,HASH_SIZE);
+        char*ppv=v.mv_data;
+        pu[0]=ppv[0] ^ PARENT_EDGE;
+
+        mdb_cursor_del(curs,0);
+
+        u.mv_data=pv+1;
+        u.mv_size=KEY_SIZE;
+        v.mv_data=pu;
+        v.mv_size=1+KEY_SIZE+HASH_SIZE;
+        ret=mdb_cursor_get(curs,&u,&v,MDB_GET_BOTH);
+        if(!ret) {
+          mdb_cursor_del(curs,0);
+        }
+      } else ret=MDB_NOTFOUND;
+    }
+  }
+}
+
+char deleted_parent_edge[1+HASH_SIZE+KEY_SIZE]={PARENT_EDGE|DELETED_EDGE};
+char parent_edge[1+HASH_SIZE+KEY_SIZE]={PARENT_EDGE};
+
+void connect_up(MDB_txn*txn,MDB_dbi nodes,char*internal_patch_id,MDB_val*a0,MDB_val*b){
+  char va[1+KEY_SIZE+HASH_SIZE];
+  char vb[1+KEY_SIZE+HASH_SIZE];
+  MDB_val psa,psb;
+  memcpy(va+1+KEY_SIZE, internal_patch_id, HASH_SIZE);
+  memcpy(vb+1+KEY_SIZE, internal_patch_id, HASH_SIZE);
+  va[0]=PSEUDO_EDGE|PARENT_EDGE;
+  vb[0]=PSEUDO_EDGE;
+  void connect(MDB_val*a){
+    MDB_val c;
+    c.mv_data=deleted_parent_edge;
+    c.mv_size=1+HASH_SIZE+KEY_SIZE;
+    MDB_cursor*curs0;
+    mdb_cursor_open(txn,nodes,&curs0);
+    int ret=mdb_cursor_get(curs0,a,&c,MDB_GET_BOTH_RANGE);
+    int flag;
+    char*d=c.mv_data;
+    if(c.mv_size > 0) { flag=d[0]; } else {ret=MDB_NOTFOUND;}
+    while(!ret && flag==deleted_parent_edge[0]){
+      c.mv_data=d+1;
+      c.mv_size=KEY_SIZE;
+      connect(&c);
+      ret=mdb_cursor_get(curs0,a,&c,MDB_NEXT_DUP);
+      if(c.mv_size > 0) { d=c.mv_data; flag=d[0]; } else {ret=MDB_NOTFOUND;}
+    }
+
+    c.mv_data=parent_edge;
+    ret=mdb_cursor_get(curs0,a,&c,MDB_GET_BOTH_RANGE);
+    if(!ret && c.mv_size>0){
+      d=c.mv_data;
+      if(d[0] < DELETED_EDGE && d[0]>=PARENT_EDGE && a!=a0) {
+        // a has the right kind of neighbors and a!=a0, add a pseudo-edge.
+        psa.mv_data=va+1;psa.mv_size=KEY_SIZE;
+        psb.mv_data=vb;psb.mv_size=1+KEY_SIZE_HASH_SIZE;
+        mdb_put(txn,dbi_nodes,&psa,&psb,0);
+        psa.mv_data=vb+1;psa.mv_size=KEY_SIZE;
+        psb.mv_data=va;psb.mv_size=1+KEY_SIZE_HASH_SIZE;
+        mdb_put(txn,dbi_nodes,&psa,&psb,0);
+      }
+    }
+    mdb_cursor_close(curs0);
+  }
+  connect(a0);
+}
+
+
+
+/* TODO: (R=must be done in rust, V=done)
+
+  UnsafeApply
+
+  V unsafe_apply for edges and newnodes
+  V reconnect upwards
+    reconnect downwards
+  V remove obsolete pseudoedges
+
+  Note: reconnect upwards and downwards must be called for both edges and newnodes, but after these have been inserted.
+
+V Fetch repository
+
+  V Tarjan
+  R output_repository
+
+V add_file
+  move_file
+  del_file
+
+*/
+
+
+
 
 
 int main(){
