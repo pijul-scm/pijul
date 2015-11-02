@@ -1,7 +1,7 @@
 [package]
 name = "pijul"
 version = "0.1.0"
-authors = ["pe <pe@marcelle>"]
+authors = ["Pierre-Étienne Meunier","Florent Becker"]
 build="build.rs"
 
 [dependencies]
