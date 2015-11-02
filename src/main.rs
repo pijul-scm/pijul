@@ -18,13 +18,13 @@ fn main() {
     match args.subcommand() {
         ("info", Some(info_args)) =>
         {
-            let request = pijul::commands::parse_info_args(info_args);
-            pijul::commands::get_info(&request)
+            let request = pijul::commands::info::parse_args(info_args);
+            pijul::commands::info::run(&request)
         },
         ("check", Some(check_args)) =>
         {
-            let repository = pijul::commands::parse_check_args(check_args);
-            match pijul::commands::check_repo(&repository) {
+            let repository = pijul::commands::check::parse_args(check_args);
+            match pijul::commands::check::run(&repository) {
                 Ok(()) => (),
                 Err(e) => {
                     println!("err: {}", e);
@@ -32,11 +32,12 @@ fn main() {
                 }
             }
         },
+
         ("", None) =>
         {
-            let repository = pijul::commands::CheckArgs
+            let repository = pijul::commands::check::CheckArgs
                                    {repository : "/tmp/test\0"};
-            pijul::commands::check_repo(&repository).unwrap()
+            pijul::commands::check::run(&repository).unwrap()
         }
         _ => panic!("Incorrect subcommand name"),
     }
