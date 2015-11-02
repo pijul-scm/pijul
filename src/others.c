@@ -26,8 +26,7 @@ MDB_dbi db_open(pijul_repository*repo,unsigned int op){
   return dbis[op];
 }
 
-int pijul_open_repository(const char* path,pijul_repository**repo){
-  *repo=malloc(sizeof(pijul_repository));
+int pijul_open_repository(const char* path,pijul_repository*repo){
   if(*repo == NULL)
     return -1;
   int ret;
@@ -43,7 +42,6 @@ int pijul_open_repository(const char* path,pijul_repository**repo){
 
  cleanup:
   mdb_env_close((*repo)->env);
-  free(*repo);
   return ret;
 }
 
@@ -51,7 +49,6 @@ void pijul_close_repository(pijul_repository*repo){
   if(repo->txn) mdb_txn_abort(repo->txn);
   mdb_env_close(repo->env);
   free(repo->current_branch.mv_data);
-  free(repo);
 }
 
 #define INODE_SIZE 16
@@ -230,8 +227,7 @@ struct line* retrieve(pijul_repository*repo,char*key){
       MDB_cursor* curs;
       mdb_cursor_open(repo->txn,repo->dbi_nodes,&curs);
       MDB_val v;
-      char c=0;
-      v.mv_data=&c;
+      v.mv_data=children_edge;
       v.mv_size=1;
       ret=mdb_cursor_get(curs,&(l->key),&v,MDB_GET_BOTH_RANGE);
       while(!ret && (((char*)v.mv_data)[0]==0 || ((char*)v.mv_data)[0]==PSEUDO_EDGE)){
@@ -556,6 +552,7 @@ void check_pseudo_edges(MDB_txn*txn,MDB_dbi dbi_internal,MDB_cursor *curs_nodes,
 
 char deleted_parent_edge[1+HASH_SIZE+KEY_SIZE]={PARENT_EDGE|DELETED_EDGE};
 char parent_edge[1+HASH_SIZE+KEY_SIZE]={PARENT_EDGE};
+char children_edge[1+HASH_SIZE+KEY_SIZE]={0};
 
 void connect_up(MDB_txn*txn,MDB_dbi nodes,char*internal_patch_id,MDB_val*a0,MDB_val*b){
   char va[1+KEY_SIZE+HASH_SIZE];
@@ -603,6 +600,55 @@ void connect_up(MDB_txn*txn,MDB_dbi nodes,char*internal_patch_id,MDB_val*a0,MDB_
 }
 
 
+void connect_down(MDB_txn*txn,MDB_dbi nodes,char*internal_patch_id,MDB_val*a,MDB_val*b0){
+  char va[1+KEY_SIZE+HASH_SIZE];
+  char vb[1+KEY_SIZE+HASH_SIZE];
+  MDB_val psa,psb;
+  memcpy(va+1+KEY_SIZE, internal_patch_id, HASH_SIZE);
+  memcpy(vb+1+KEY_SIZE, internal_patch_id, HASH_SIZE);
+  va[0]=PSEUDO_EDGE|PARENT_EDGE;
+  vb[0]=PSEUDO_EDGE;
+  void connect(MDB_val*b){
+    MDB_val c;
+    c.mv_data=children_edge;
+    c.mv_size=1+HASH_SIZE+KEY_SIZE;
+    MDB_cursor*curs0;
+    mdb_cursor_open(txn,nodes,&curs0);
+    int ret=mdb_cursor_get(curs0,a,&c,MDB_GET_BOTH_RANGE);
+    int flag;
+    char*d=c.mv_data;
+    if(c.mv_size > 0) { flag=d[0]; } else {ret=MDB_NOTFOUND;}
+    while(!ret && flag==deleted_parent_edge[0]){
+      c.mv_data=d+1;
+      c.mv_size=KEY_SIZE;
+      connect(&c);
+      ret=mdb_cursor_get(curs0,a,&c,MDB_NEXT_DUP);
+      if(c.mv_size > 0) { d=c.mv_data; flag=d[0]; } else {ret=MDB_NOTFOUND;}
+    }
+
+    // is b alive?
+    c.mv_data=parent_edge;
+    ret=mdb_cursor_get(curs0,b,&c,MDB_GET_BOTH_RANGE);
+    if(!ret && c.mv_size>0){
+      d=c.mv_data;
+      if(d[0] < DELETED_EDGE && d[0]>=PARENT_EDGE && a!=a0) {
+        // a has the right kind of neighbors and a!=a0, add a pseudo-edge.
+        psa.mv_data=va+1;psa.mv_size=KEY_SIZE;
+        psb.mv_data=vb;psb.mv_size=1+KEY_SIZE+HASH_SIZE;
+        mdb_put(txn,nodes,&psa,&psb,0);
+        psa.mv_data=vb+1;psa.mv_size=KEY_SIZE;
+        psb.mv_data=va;psb.mv_size=1+KEY_SIZE+HASH_SIZE;
+        mdb_put(txn,nodes,&psa,&psb,0);
+      }
+    }
+    mdb_cursor_close(curs0);
+  }
+  connect(b0);
+}
+
+
+
+
 
 /* TODO: (R=must be done in rust, V=done)
 
@@ -615,9 +661,9 @@ void connect_up(MDB_txn*txn,MDB_dbi nodes,char*internal_patch_id,MDB_val*a0,MDB_
 
   Note: reconnect upwards and downwards must be called for both edges and newnodes, but after these have been inserted.
 
-V Fetch repository
+V/R Fetch repository
 
-  V Tarjan
+  V/R Tarjan
   R output_repository
 
 V add_file
@@ -625,17 +671,3 @@ V add_file
   del_file
 
 */
-
-
-
-
-
-int main(){
-  /*
-  pijul_repository*repo;
-  int ret=pijul_open_repository(&repo,"/tmp/test");
-  pijul_close_repository(repo);
-  printf("returned %d\n",ret);
-  */
-
-}

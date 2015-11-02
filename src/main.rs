@@ -17,21 +17,6 @@ fn main() {
             )
         .get_matches();
 
-    let repository = args.value_of("REPOSITORY").unwrap_or("/tmp/test\0");
-    match Env::new(repository) {
-        Ok (env)=>{
-            match Txn::new(&env,None,0) {
-                Ok(txn)=>{
-                    let rep=Repository::new(&txn);
-                    println!("ok");
-                },
-                Err(e)=>{
-                    println!("err:{}",e)
-                }
-            }
-        },
-        Err(e)=>{
-            println!("err:{}",e)
-        }
-    }
+    let repository_path = args.value_of("REPOSITORY").unwrap_or("/tmp/test\0");
+    let rep=Repository::new(std::path::Path::new(repository_path));
 }
