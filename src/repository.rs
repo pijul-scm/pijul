@@ -62,6 +62,12 @@ impl Repository {
     }
 }
 
+impl Drop for Repository {
+    fn drop(&mut self){
+        unsafe { mdb_env_close(self.mdb_env) }
+    }
+}
+
 fn add_inode(repo:&mut Repository, inode:&Option<[u8;INODE_SIZE]>, path:&std::path::Component){
     ()
 }
