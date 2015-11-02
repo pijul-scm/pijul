@@ -11,9 +11,6 @@ fn main() {
             (author: "Pierre-Étienne Meunier and Florent Becker")
             (about: "Version Control: performant, distributed, easy to use; pick any three")
             );
-
-    let app = app.subcommand_required_else_help(true);
-
     let app = app.subcommands(pijul::commands::all_command_invocations());
 
     let args = app.get_matches();
