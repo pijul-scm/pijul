@@ -35,6 +35,11 @@ extern "C" {
     fn mdb_dbi_open(txn: *mut MDB_txn, name: *const c_char, flags:c_uint, dbi:*mut MDB_dbi)->c_int;
     fn mdb_get(txn: *mut MDB_txn, dbi:MDB_dbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
     fn mdb_put(txn: *mut MDB_txn, dbi:MDB_dbi, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    fn mdb_cursor_get(cursor: *mut MDB_cursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    fn mdb_cursor_put(cursor: *mut MDB_cursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    fn mdb_cursor_del(cursor: *mut MDB_cursor, flags:c_uint)->c_int;
+    fn mdb_cursor_open(txn: *mut MDB_txn, dbi:MDB_dbi, cursor:*mut *mut MDB_cursor)->c_int;
+    fn mdb_cursor_close(cursor: *mut MDB_cursor);
 }
 
 
@@ -48,17 +53,31 @@ pub const MDB_CREATE: c_uint = 0x40000;
 pub const MDB_NOTFOUND: c_int = -30798;
 
 const INODE_SIZE:usize=16;
-const MAX_DBS:usize=3;
 
+const MAX_DBS:usize=10;
 pub enum DBI {
     NODES,
+    CONTENTS,
+    REVDEP,
+    INTERNAL_HASHES,
+    EXTERNAL_HASHES,
+    BRANCHES,
     TREE,
-    REVTREE
+    REVTREE,
+    INODES,
+    REVINODES
 }
 
 const dbis:[(&'static str,c_uint);MAX_DBS]=[("nodes\0",MDB_CREATE|MDB_DUPSORT),
-                                            ("tree\0",MDB_CREATE),
-                                            ("revtree\0",MDB_CREATE)
+                                            ("contents\0",MDB_CREATE),
+                                            ("revdep\0",MDB_CREATE|MDB_DUPSORT),
+                                            ("internal\0",MDB_CREATE),
+                                            ("external\0",MDB_CREATE),
+                                            ("branches\0",MDB_CREATE|MDB_DUPSORT),
+                                            ("tree\0",MDB_CREATE|MDB_DUPSORT),
+                                            ("revtree\0",MDB_CREATE),
+                                            ("inodes\0",MDB_CREATE),
+                                            ("revinodes\0",MDB_CREATE)
                                             ];
 
 pub struct Repository{
@@ -181,4 +200,44 @@ fn add_inode(repo:&mut Repository, inode:&Option<[c_char;INODE_SIZE]>, path:&std
         }
     }
     Ok(())
+}
+
+pub fn add_file(repo:&mut Repository, path:&std::path::Path)->Result<(),()>{
+    add_inode(repo,&None,path)
+}
+
+struct newnodes<'a> {
+    up_context:Vec<&'a [u8]>,
+    down_context:Vec<&'a [u8]>,
+    nodes:Vec<&'a [u8]>
+}
+
+enum Change<'a> {
+    NewNodes(newnodes<'a>),
+    Edges(Vec<(&'a [u8], u8, &'a[u8], &'a [u8])>)
+}
+
+struct Cursor {
+    cursor:*mut MDB_cursor
+}
+impl Cursor {
+    fn new(txn:*mut MDB_txn,dbi:MDB_dbi)->Result<Cursor,c_int>{
+        unsafe {
+            let curs=ptr::null_mut();
+            let e=mdb_cursor_open(txn,dbi,std::mem::transmute(&curs));
+            if e!=0 { Err(e) } else { Ok(Cursor { cursor:curs }) }
+        }
+    }
+}
+impl Drop for Cursor {
+    fn drop(&mut self){
+        unsafe {mdb_cursor_close(self.cursor);}
+    }
+}
+
+pub fn record(repo:&mut Repository,working_copy:&std::path::Path){
+    let actions:Vec<Change>=Vec::new();
+    let line_num=1;
+    let updatables:HashMap<&[u8;INODE_SIZE],&[u8]>=HashMap::new();
+    let cursor=Cursor::new(repo.mdb_txn, repo.dbi(DBI::NODES));
 }
