@@ -22,10 +22,7 @@ pub fn invocation() -> StaticSubcommand {
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> CheckArgs<'a>
 {
-    match args.value_of("repository") {
-        Some(x) => CheckArgs {repository : x},
-        None => CheckArgs {repository : "."}
-    }
+    CheckArgs {repository : args.value_of("repository").unwrap_or(".")}
 }
 
 pub fn run(args: &CheckArgs) -> Result<(),i32> {
