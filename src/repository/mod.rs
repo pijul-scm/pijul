@@ -16,6 +16,7 @@ pub enum MDB_env {}
 pub enum MDB_txn {}
 pub enum MDB_cursor {}
 use std::io::prelude::*;
+use std::io::Error;
 use std::marker::PhantomData;
 
 pub mod fs_representation;
@@ -112,27 +113,28 @@ pub struct Repository{
 }
 
 impl Repository {
-    pub fn new(path:&std::path::Path)->Result<Repository,c_int>{
+    pub fn new(path:&std::path::Path)->Result<Repository,Error>{
         unsafe {
             let env=ptr::null_mut();
             let e=mdb_env_create(std::mem::transmute(&env));
-            if e != 0 { println!("mdb_env_create");return Err(e) };
+            if e != 0 { println!("mdb_env_create");
+                        return Err(Error::from_raw_os_error(e)) };
             let mut dead:c_int=0;
             let e=mdb_reader_check(env,&mut dead);
-            if e != 0 { println!("mdb_reader_check");return Err(e) };
+            if e != 0 { println!("mdb_reader_check");return Err(Error::from_raw_os_error(e)) };
             let e=mdb_env_set_maxdbs(env,MAX_DBS as c_uint);
-            if e != 0 { println!("mdb_env_set_maxdbs");return Err(e) };
+            if e != 0 { println!("mdb_env_set_maxdbs");return Err(Error::from_raw_os_error(e)) };
             let e=mdb_env_set_mapsize(env,std::ops::Shl::shl(1,30) as size_t);
-            if e !=0 { println!("mdb_env_set_mapsize");return Err(e) };
+            if e !=0 { println!("mdb_env_set_mapsize");return Err(Error::from_raw_os_error(e)) };
             let p=path.as_os_str().to_str();
             match p {
                 Some(pp) => {
                     let e=mdb_env_open(env,pp.as_ptr() as *const i8,0,0o755);
-                    if e !=0 { println!("mdb_env_open");return Err(e) };
+                    if e !=0 { println!("mdb_env_open");return Err(Error::from_raw_os_error(e)) };
 
                     let txn=ptr::null_mut();
                     let e=mdb_txn_begin(env,ptr::null_mut(),0,std::mem::transmute(&txn));
-                    if e !=0 { println!("mdb_env_open");return Err(e) };
+                    if e !=0 { println!("mdb_env_open");return Err(Error::from_raw_os_error(e)) };
 
                     let repo=Repository{
                         mdb_env:env,
@@ -143,7 +145,7 @@ impl Repository {
                 },
                 None => {
                     println!("invalid path");
-                    Err(0)
+                    Err(Error::from_raw_os_error(0))
                 }
             }
         }
@@ -255,11 +257,11 @@ struct Cursor {
 }
 
 impl Cursor {
-    fn new(txn:*mut MDB_txn,dbi:MDB_dbi)->Result<Cursor,c_int>{
+    fn new(txn:*mut MDB_txn,dbi:MDB_dbi)->Result<Cursor,Error>{
         unsafe {
             let curs=ptr::null_mut();
             let e=mdb_cursor_open(txn,dbi,std::mem::transmute(&curs));
-            if e!=0 { Err(e) } else { Ok(Cursor { cursor:curs }) }
+            if e!=0 { Err(Error::from_raw_os_error(e)) } else { Ok(Cursor { cursor:curs }) }
         }
     }
 }
@@ -517,15 +519,14 @@ const FOLDER_EDGE:u8=2;
 const PARENT_EDGE:u8=4;
 const DELETED_EDGE:u8=8;
 
-
-pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Change>,c_int>{
+pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Change>,Error>{
     // no recursive closures, but I understand why (ownership would be tricky).
     fn dfs(repo:&mut Repository, actions:&mut Vec<Change>,
            line_num:&mut usize,updatables:&HashMap<&[u8],&[u8]>,
            parent_inode:Option<&[u8]>,
            parent_node:Option<&[u8]>,
            current_inode:&[u8],
-           realpath:&mut std::path::PathBuf, basename:&[u8]) -> Result<(),c_int> {
+           realpath:&mut std::path::PathBuf, basename:&[u8]) -> Result<(),Error> {
 
         realpath.push(str::from_utf8(&basename).unwrap());
 

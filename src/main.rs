@@ -41,16 +41,21 @@ fn main() {
                     Ok(()) => (),
                     Err(e) => {
                         println!("err: {}", e);
-                        std::process::exit(1)
+                        std::process::exit(255)
                     }
                 }
             },
         ("record", Some(_)) =>
             {
                 match pijul::commands::record::run() {
-                    Some(()) => (),
-                    None => {
+                    Ok(Some(())) => (),
+                    Ok(None) => {
+                        println!("No changes to record");
                         std::process::exit(1)
+                    },
+                    Err(e) => {
+                        println!("err: {}", e);
+                        std::process::exit(255)
                     }
                 }
             },

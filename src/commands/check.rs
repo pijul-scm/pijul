@@ -1,6 +1,7 @@
 extern crate clap;
 use clap::{SubCommand, Arg, ArgMatches};
 use std::path::Path;
+use std::io::{Error, ErrorKind};
 
 use commands::StaticSubcommand;
 use repository::Repository;
@@ -26,7 +27,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
     Params {repository : Path::new(args.value_of("repository").unwrap_or("."))}
 }
 
-pub fn run(args: &Params) -> Result<(),i32> {
+pub fn run(args: &Params) -> Result<(),Error> {
     match find_repo_root(args.repository)
     {
         Some(repo_base) => {
@@ -36,8 +37,7 @@ pub fn run(args: &Params) -> Result<(),i32> {
         },
 
         None => {
-            println!("No repo found at {}", args.repository.display());
-            Err(1)
+            Err(Error::new(ErrorKind::NotFound, "not in a repository"))
         }
     }
 }
