@@ -4,6 +4,8 @@ extern crate clap;
 
 extern crate pijul;
 
+use std::path::Path;
+
 fn main() {
     let app = clap_app!(
         pijul =>
@@ -45,8 +47,8 @@ fn main() {
             },
         ("", None) =>
         {
-            let repository = pijul::commands::check::CheckArgs
-                                   {repository : "/tmp/test\0"};
+            let repository = pijul::commands::check::Params
+                                   {repository : Path::new("/tmp/test")};
             pijul::commands::check::run(&repository).unwrap()
         }
         _ => panic!("Incorrect subcommand name"),

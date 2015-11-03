@@ -8,9 +8,9 @@ pub mod init;
 
 pub fn all_command_invocations() -> Vec<StaticSubcommand> {
     return vec![
-        info::invocation(),
         check::invocation(),
-        init::invocation()
+        info::invocation(),
+        init::invocation(),
         ];
 }
 

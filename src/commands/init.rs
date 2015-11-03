@@ -1,7 +1,6 @@
 extern crate clap;
 use clap::{SubCommand, Arg, ArgMatches};
 use std::path::Path;
-use std::env::current_dir;
 use std::io;
 
 use commands::StaticSubcommand;
@@ -19,20 +18,19 @@ pub fn invocation() -> StaticSubcommand {
 }
 
 pub struct Params<'a> {
-    location : Option<&'a Path>,
+    location : &'a Path,
     allow_nested : bool
 }
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 {
-    Params {location : args.value_of("directory").map(|x| Path::new(x)),
+    Params {location : Path::new(args.value_of("directory").unwrap_or(".")),
             allow_nested : false
     }
 }
 
 pub fn run (p : &Params) -> io::Result<()> {
-    let current = try!(current_dir());
-    let dir = p.location.unwrap_or(&current);
+    let dir = p.location;
     match fs_representation::find_repo_root(&dir) {
         Some(d) =>
             {

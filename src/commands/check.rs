@@ -6,8 +6,8 @@ use commands::StaticSubcommand;
 use repository::Repository;
 use repository::fs_representation::{find_repo_root,repo_dir};
 
-pub struct CheckArgs<'a> {
-    pub repository : &'a str
+pub struct Params<'a> {
+    pub repository : &'a Path
 }
 
 pub fn invocation() -> StaticSubcommand {
@@ -21,13 +21,13 @@ pub fn invocation() -> StaticSubcommand {
              );
 }
 
-pub fn parse_args<'a>(args: &'a ArgMatches) -> CheckArgs<'a>
+pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 {
-    CheckArgs {repository : args.value_of("repository").unwrap_or(".")}
+    Params {repository : Path::new(args.value_of("repository").unwrap_or("."))}
 }
 
-pub fn run(args: &CheckArgs) -> Result<(),i32> {
-    match find_repo_root(Path::new(args.repository))
+pub fn run(args: &Params) -> Result<(),i32> {
+    match find_repo_root(args.repository)
     {
         Some(repo_base) => {
             let _repository = try!(Repository::new(&repo_dir(&repo_base)));
@@ -36,7 +36,7 @@ pub fn run(args: &CheckArgs) -> Result<(),i32> {
         },
 
         None => {
-            println!("No repo found at {}", args.repository);
+            println!("No repo found at {}", args.repository.display());
             Err(1)
         }
     }

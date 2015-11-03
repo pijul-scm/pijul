@@ -7,8 +7,8 @@ use clap::{SubCommand, Arg, ArgMatches};
 use commands;
 use repository::fs_representation::find_repo_root;
 
-pub struct InfoArgs<'a> {
-    pub directory : &'a str
+pub struct Params<'a> {
+    pub directory : &'a Path
 }
 
 pub fn invocation() -> commands::StaticSubcommand {
@@ -22,16 +22,13 @@ pub fn invocation() -> commands::StaticSubcommand {
              );
 }
 
-pub fn parse_args<'a>(args : &'a ArgMatches) -> InfoArgs<'a>
+pub fn parse_args<'a>(args : &'a ArgMatches) -> Params<'a>
 {
-    match args.value_of("dir") {
-        Some(dir) => InfoArgs {directory : dir},
-        None => InfoArgs {directory : "."}
-    }
+    Params{ directory : Path::new(args.value_of("dir").unwrap_or(".")) }
 }
 
-pub fn run(request: &InfoArgs) -> () {
-    match find_repo_root(Path::new(request.directory)) {
+pub fn run(request: &Params) -> () {
+    match find_repo_root(request.directory) {
         Some(r) => println!("Current repository location: '{}'", r.display()),
         None => {
             println!("not in a repository");
