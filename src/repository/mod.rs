@@ -266,7 +266,7 @@ impl Drop for Cursor {
     }
 }
 
-
+#[repr(C)]
 struct c_line {
     key:*const char,
     flags:c_uchar,

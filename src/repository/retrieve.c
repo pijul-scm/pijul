@@ -127,8 +127,7 @@ struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi,char*key){
     } else {
       l=malloc(sizeof(struct c_line));
       memset(l,0,sizeof(struct c_line));
-      l->key.mv_data=key;
-      l->key.mv_size=KEY_SIZE;
+      l->key=key;
       l->index= -1;
       insert(cache,key,l);
       MDB_cursor* curs;
