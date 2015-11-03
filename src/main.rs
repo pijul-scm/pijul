@@ -45,6 +45,15 @@ fn main() {
                     }
                 }
             },
+        ("record", Some(_)) =>
+            {
+                match pijul::commands::record::run() {
+                    Some(()) => (),
+                    None => {
+                        std::process::exit(1)
+                    }
+                }
+            },
         ("", None) =>
         {
             let repository = pijul::commands::check::Params
