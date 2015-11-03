@@ -4,6 +4,7 @@ use std::path::Path;
 
 use commands::StaticSubcommand;
 use repository::Repository;
+use repository::fs_representation::{find_repo_root,repo_dir};
 
 pub struct CheckArgs<'a> {
     pub repository : &'a str
@@ -26,10 +27,17 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> CheckArgs<'a>
 }
 
 pub fn run(args: &CheckArgs) -> Result<(),i32> {
-    let mut repo_base = String::from(args.repository);
-    repo_base.push_str("\0");
-    let repo_base = Path::new(&repo_base);
-    let _repository = try!(Repository::new(&repo_base));
-    println!("Your repo looks alright Ma'am/Sir");
-    Ok(())
+    match find_repo_root(Path::new(args.repository))
+    {
+        Some(repo_base) => {
+            let _repository = try!(Repository::new(&repo_dir(&repo_base)));
+            println!("Your repo looks alright Ma'am/Sir");
+            Ok(())
+        },
+
+        None => {
+            println!("No repo found at {}", args.repository);
+            Err(1)
+        }
+    }
 }
