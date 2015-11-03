@@ -11,13 +11,8 @@ pub fn find_repo_root(dir : &Path) -> Option<&Path> {
     match (metadata(pijul_dir)) {
         Ok (attr) =>
             if attr.is_dir() {Some(dir)} else {None},
-        Err(_) => {
-            match dir.parent()
-            {
-                Some(p) => find_repo_root(p),
-                None => None
-            }
-        }
+        Err(_) =>
+            dir.parent().and_then(find_repo_root)
     }
 }
 

@@ -1,8 +1,11 @@
 extern crate clap;
 
+use std;
+use std::path::Path;
 use clap::{SubCommand, Arg, ArgMatches};
 
 use commands;
+use repository::fs_representation::find_repo_root;
 
 pub struct InfoArgs<'a> {
     pub directory : &'a str
@@ -28,5 +31,11 @@ pub fn parse_args<'a>(args : &'a ArgMatches) -> InfoArgs<'a>
 }
 
 pub fn run(request: &InfoArgs) -> () {
-    println!("info about {}", request.directory);
+    match find_repo_root(Path::new(request.directory)) {
+        Some(r) => println!("Current repository location: '{}'", r.display()),
+        None => {
+            println!("not in a repository");
+            std::process::exit(1)
+        }
+    }
 }
