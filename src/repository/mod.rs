@@ -268,18 +268,20 @@ impl Drop for Cursor {
 
 
 struct c_line {
-    key:MDB_val,
+    key:*const char,
     flags:c_uchar,
-    children:*mut *mut Line,
-    children_capacity:usize,
-    children_off:usize,
+    children:*mut*mut c_line,
+    children_capacity:size_t,
+    children_off:size_t,
     index:c_int,
     lowlink:c_int
 }
+
 extern "C"{
     fn c_retrieve(txn:*mut MDB_txn,dbi:MDB_dbi,key:*const c_char) -> *mut c_line;
     fn c_free_line(c_line:*mut c_line);
 }
+
 struct Line { c_line:*mut c_line }
 impl Drop for Line {
     fn drop(&mut self){

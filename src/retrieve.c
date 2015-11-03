@@ -3,20 +3,21 @@
 #include<stdlib.h>
 #include<lmdb.h>
 
-struct line {
-  MDB_val key;
+struct c_line {
+  char *key;
   unsigned char flags;
-  struct line** children;
+  struct c_line** children;
   size_t children_capacity;
   size_t children_off;
   int index;
   int lowlink;
 };
+
 #define LINE_FREED 1
 #define LINE_SPIT 2
 #define LINE_ONSTACK 4
 
-void c_free_line(struct line* line){
+void c_free_line(struct c_line* line){
   if((line->flags & LINE_FREED) == 0) {
     int i;
     line->flags=line->flags | LINE_FREED;
@@ -28,7 +29,7 @@ void c_free_line(struct line* line){
 }
 
 
-void push_children(struct line* line, struct line* child){
+void push_children(struct c_line* line, struct c_line* child){
   if(line->children_off >= line->children_capacity){
     line->children_capacity=(line->children_capacity>0) ? (line->children_capacity << 1) : 1;
     line->children=realloc(line->children,line->children_capacity);
@@ -79,7 +80,7 @@ void rehash(struct hashtable*t){
   int i;
   for(i=0;i<oldsize*2;i+=2){
     if(old[i])
-      insert(t,old[i],old[i+1]);
+     insert(t,old[i],old[i+1]);
   }
   free(old);
 }
@@ -115,17 +116,17 @@ int get(struct hashtable*t,char*key,void**value){
 #define PARENT_EDGE 4
 #define DELETED_EDGE 8
 
-struct line* c_retrieve(MDB_txn* txn,MDB_dbi dbi,char*key){
+struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi,char*key){
   struct hashtable*cache=new_hashtable(1024);
 
-  struct line* retrieve_dfs(char*key) {
-    struct line* l;
+  struct c_line* retrieve_dfs(char*key) {
+    struct c_line* l;
     int ret=get(cache,key,(void*) &l);
     if(ret){
       return l;
     } else {
-      l=malloc(sizeof(struct line));
-      memset(l,0,sizeof(struct line));
+      l=malloc(sizeof(struct c_line));
+      memset(l,0,sizeof(struct c_line));
       l->key.mv_data=key;
       l->key.mv_size=KEY_SIZE;
       l->index= -1;
@@ -145,7 +146,7 @@ struct line* c_retrieve(MDB_txn* txn,MDB_dbi dbi,char*key){
       return l;
     }
   }
-  struct line* l=retrieve_dfs(key);
+  struct c_line* l=retrieve_dfs(key);
   free_hashtable(cache);
   return l;
 }
