@@ -15,6 +15,7 @@ use std::path::{PathBuf,Path};
 pub enum MDB_env {}
 pub enum MDB_txn {}
 pub enum MDB_cursor {}
+use std::io::prelude::*;
 
 pub mod fs_representation;
 
@@ -236,15 +237,15 @@ pub fn add_file(repo:&mut Repository, path:&std::path::Path)->Result<(),()>{
     add_inode(repo,&None,path)
 }
 
-struct newnodes<'a> {
-    up_context:Vec<&'a [u8]>,
-    down_context:Vec<&'a [u8]>,
-    nodes:Vec<&'a [u8]>
-}
 
-enum Change<'a> {
-    NewNodes(newnodes<'a>),
-    Edges(Vec<(&'a [u8], u8, &'a[u8], &'a [u8])>)
+pub enum Change {
+    NewNodes{
+        up_context:Vec<Vec<u8>>,
+        down_context:Vec<Vec<u8>>,
+        flag:u8,
+        nodes:Vec<Vec<u8>>
+    }
+    //Edges(Vec<(&'a [u8], u8, &'a[u8], &'a [u8])>)
 }
 
 struct Cursor {
@@ -298,12 +299,17 @@ fn retrieve(repo:&mut Repository,key:&[u8])->Result<Line,()>{
 }
 
 
+const PSEUDO_EDGE:u8=1;
+const FOLDER_EDGE:u8=2;
+const PARENT_EDGE:u8=4;
+const DELETED_EDGE:u8=8;
 
 
 
-pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<(),c_int>{
+pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Change>,c_int>{
     // no recursive closures, but I understand why (ownership would be tricky).
-    fn dfs(repo:&mut Repository, actions:&Vec<Change>,line_num:&usize,updatables:&HashMap<&[u8],&[u8]>,
+    fn dfs(repo:&mut Repository, actions:&mut Vec<Change>,
+           line_num:&usize,updatables:&HashMap<&[u8],&[u8]>,
            parent_inode:Option<&[u8]>,
            parent_node:Option<&[u8]>,
            current_inode:&[u8],
@@ -314,6 +320,7 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<(),c_i
         let mut k = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
         let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
         let root_key=&ROOT_KEY[..];
+        let mut l2:Vec<u8>=Vec::with_capacity(LINE_SIZE);
         let current_node=
             match parent_inode {
                 Some(parent_inode) => {
@@ -336,7 +343,35 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<(),c_i
                         current_node
                     } else {
                         // File addition, create appropriate Newnodes.
-                        &[][..]
+                        let mut nodes=Vec::new();
+                        let mut lnum= *line_num;
+                        for i in 0..(LINE_SIZE-1) { l2.push((lnum & 0xff) as u8); lnum=lnum>>8 }
+                        actions.push(
+                            Change::NewNodes { up_context: vec!(parent_node.unwrap().to_vec()),
+                                               down_context: vec!(),
+                                               nodes: nodes.clone(),
+                                               flag:FOLDER_EDGE }
+                            );
+
+
+                        // Reading the file
+                        nodes.clear();
+                        let mut line=Vec::new();
+                        let f = std::fs::File::open(realpath.as_path());
+                        let mut f = std::io::BufReader::new(f.unwrap());
+                        loop {
+                            match f.read_until('\n' as u8,&mut line) {
+                                Ok(l) => nodes.push(line.clone()),
+                                Err(_) => break
+                            }
+                        }
+                        actions.push(
+                            Change::NewNodes { up_context:vec!(l2.clone()),
+                                               down_context: vec!(),
+                                               nodes: nodes,
+                                               flag:0 }
+                            );
+                        &l2[..]
                     }
                 },
                 None => { root_key }
@@ -363,11 +398,11 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<(),c_i
         let _=realpath.pop();
         Ok(())
     };
-    let actions:Vec<Change>=Vec::new();
+    let mut actions:Vec<Change>=Vec::new();
     let line_num=1;
     let updatables:HashMap<&[u8],&[u8]>=HashMap::new();
     let mut realpath=PathBuf::from("/tmp/test");
-    dfs(repo,&actions,&line_num,&updatables,
+    dfs(repo,&mut actions,&line_num,&updatables,
         None,None,&ROOT_INODE[..],&mut realpath, "test".as_bytes());
-    Ok(())
+    Ok(actions)
 }
