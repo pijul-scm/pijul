@@ -463,7 +463,7 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Ch
                         } else if current_node[0]==0 {
                             // file not moved, we need to diff
                             let ret=retrieve(repo,&current_node);
-                            
+                            unimplemented!()
                         } else {
                             panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
                         };
@@ -537,3 +537,6 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Ch
         None,None,&ROOT_INODE[..],&mut realpath, "test".as_bytes());
     Ok(actions)
 }
+
+
+// Missing: diff, apply, output_repository
