@@ -4,11 +4,13 @@ pub type StaticSubcommand = clap::App<'static, 'static, 'static, 'static, 'stati
 
 pub mod info;
 pub mod check;
+pub mod init;
 
 pub fn all_command_invocations() -> Vec<StaticSubcommand> {
     return vec![
         info::invocation(),
-        check::invocation()
+        check::invocation(),
+        init::invocation()
         ];
 }
 

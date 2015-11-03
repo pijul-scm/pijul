@@ -32,7 +32,17 @@ fn main() {
                 }
             }
         },
-
+        ("init", Some(init_args)) =>
+            {
+                let params = pijul::commands::init::parse_args(init_args);
+                match pijul::commands::init::run(&params) {
+                    Ok(()) => (),
+                    Err(e) => {
+                        println!("err: {}", e);
+                        std::process::exit(1)
+                    }
+                }
+            },
         ("", None) =>
         {
             let repository = pijul::commands::check::CheckArgs

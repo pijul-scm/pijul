@@ -15,6 +15,9 @@ use std::path::{PathBuf,Path};
 pub enum MDB_env {}
 pub enum MDB_txn {}
 pub enum MDB_cursor {}
+
+pub mod fs_representation;
+
 type MDB_dbi=c_uint;
 #[repr(C)]
 pub struct MDB_val {
