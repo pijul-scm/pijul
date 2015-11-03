@@ -9,13 +9,14 @@ struct c_line {
   struct c_line** children;
   size_t children_capacity;
   size_t children_off;
-  int index;
-  int lowlink;
+  unsigned int index;
+  unsigned int lowlink;
 };
 
 #define LINE_FREED 1
 #define LINE_SPIT 2
 #define LINE_ONSTACK 4
+#define LINE_VISITED 8
 
 void c_free_line(struct c_line* line){
   if((line->flags & LINE_FREED) == 0) {
@@ -132,14 +133,16 @@ struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi,char*key){
       insert(cache,key,l);
       MDB_cursor* curs;
       mdb_cursor_open(txn,dbi,&curs);
-      MDB_val v;
+      MDB_val k,v;
       char children_edge=0;
       v.mv_data=&children_edge;
       v.mv_size=1;
-      ret=mdb_cursor_get(curs,&(l->key),&v,MDB_GET_BOTH_RANGE);
+      k.mv_data=l->key;
+      k.mv_size=KEY_SIZE;
+      ret=mdb_cursor_get(curs,&k,&v,MDB_GET_BOTH_RANGE);
       while(!ret && (((char*)v.mv_data)[0]==0 || ((char*)v.mv_data)[0]==PSEUDO_EDGE)){
         push_children(l,retrieve_dfs(v.mv_data));
-        ret=mdb_cursor_get(curs,&(l->key),&v,MDB_NEXT_DUP);
+        ret=mdb_cursor_get(curs,&k,&v,MDB_NEXT_DUP);
       }
       mdb_cursor_close(curs);
       return l;

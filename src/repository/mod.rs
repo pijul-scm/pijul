@@ -16,6 +16,7 @@ pub enum MDB_env {}
 pub enum MDB_txn {}
 pub enum MDB_cursor {}
 use std::io::prelude::*;
+use std::marker::PhantomData;
 
 pub mod fs_representation;
 
@@ -243,6 +244,7 @@ pub enum Change {
         up_context:Vec<Vec<u8>>,
         down_context:Vec<Vec<u8>>,
         flag:u8,
+        line_num:usize,
         nodes:Vec<Vec<u8>>
     }
     //Edges(Vec<(&'a [u8], u8, &'a[u8], &'a [u8])>)
@@ -267,6 +269,10 @@ impl Drop for Cursor {
     }
 }
 
+const LINE_VISITED:c_uchar=8;
+const LINE_ONSTACK:c_uchar=4;
+const LINE_SPIT:c_uchar=2;
+
 #[repr(C)]
 struct c_line {
     key:*const char,
@@ -274,11 +280,14 @@ struct c_line {
     children:*mut*mut c_line,
     children_capacity:size_t,
     children_off:size_t,
-    index:c_int,
-    lowlink:c_int
+    index:c_uint,
+    lowlink:c_uint
 }
 
 extern "C"{
+    // retrieve uses hash tables growing monotonically. For time and
+    // memory, we need it in C (or with fast hashtables and no copy of
+    // anything).
     fn c_retrieve(txn:*mut MDB_txn,dbi:MDB_dbi,key:*const c_char) -> *mut c_line;
     fn c_free_line(c_line:*mut c_line);
 }
@@ -298,6 +307,125 @@ fn retrieve(repo:&mut Repository,key:&[u8])->Result<Line,()>{
     }
 }
 
+fn tarjan(line:&mut Line)->usize{
+    fn dfs(stack:&mut Vec<*mut c_line>,index:&mut usize, l:*mut c_line){
+        unsafe {
+            (*l).index = *index as c_uint;
+            (*l).lowlink = *index as c_uint;
+            (*l).flags |= LINE_ONSTACK | LINE_VISITED;
+            stack.push(l);
+            *index = *index + 1;
+            let children:&[*mut c_line]=slice::from_raw_parts((*l).children, (*l).children_off as usize);
+            for child in children {
+                if (**child).flags & LINE_VISITED == 0 {
+                    dfs(stack,index,*child);
+                    (*l).lowlink=std::cmp::min((*l).lowlink, (**child).lowlink);
+                } else {
+                    if (**child).flags & LINE_ONSTACK != 0 {
+                        (*l).lowlink=std::cmp::min((*l).lowlink, (**child).index)
+                    }
+                }
+            }
+            if (*l).index == (*l).lowlink {
+                stack.pop();
+                while let Some(h)=stack.pop() {
+                    if h == l { break }
+                }
+            }
+        }
+    }
+    let mut stack=vec!();
+    let mut index=0;
+    dfs(&mut stack, &mut index, line.c_line);
+    index-1
+}
+
+struct File<'a> {
+    counts:Vec<usize>,
+    lines:Vec<Vec<*mut c_line>>,
+    i:usize,
+    mdb_txn:*mut MDB_txn,
+    dbi_contents: MDB_dbi,
+    phantom: PhantomData<&'a()>
+}
+
+impl<'a> File<'a> {
+    fn new(repo:&'a mut Repository, file:&'a mut Line)->File<'a> {
+        let max_level=tarjan(file);
+        let mut counts=vec![0;max_level+1];
+        let mut lines:Vec<Vec<*mut c_line>>=vec![vec!();max_level+1];
+        for i in 0..max_level { lines[i]=Vec::new() }
+
+        // First task: add number of lines and list of lines for each level.
+        fn fill_lines(counts:&mut Vec<usize>,
+                      lines:&mut Vec<Vec<*mut c_line>>,
+                      cl:*mut c_line){
+            unsafe {
+                if (*cl).flags & LINE_SPIT == 0 {
+                    (*cl).flags |= LINE_SPIT;
+                    (*counts.get_unchecked_mut((*cl).lowlink as usize)) += 1;
+                    (*lines.get_unchecked_mut((*cl).lowlink as usize)).push (cl);
+                    let children:&[*mut c_line]=slice::from_raw_parts((*cl).children, (*cl).children_off as usize);
+                    for child in children {
+                        fill_lines(counts,lines,*child)
+                    }
+                }
+            }
+        }
+        fill_lines(&mut counts, &mut lines, file.c_line);
+
+        // Then add "undetected conflicts"
+        unsafe  {
+            for i in 0..max_level {
+                if *counts.get_unchecked(i) > 1 {
+                    for line in lines.get_unchecked(i) {
+                        let children:&[*mut c_line]=slice::from_raw_parts((**line).children, (**line).children_off as usize);
+                        for child in children {
+                            for j in (**line).lowlink+1 .. (**child).lowlink-1 {
+                                (*counts.get_unchecked_mut(i)) += 1
+                            }}}}}
+        }
+        File {
+            counts:counts,
+            lines:lines,
+            i:0,
+            mdb_txn:repo.mdb_txn,
+            dbi_contents:repo.dbi(DBI::CONTENTS),
+            phantom:PhantomData
+        }
+    }
+}
+
+
+impl <'a> Iterator for File<'a> {
+    type Item = Vec<&'a[u8]>;
+    fn next(&mut self)->Option<Vec<&'a[u8]>>{
+        if self.i >= self.counts.len() { None } else {
+            let mut current=vec!();
+            unsafe {
+                if *self.counts.get_unchecked(self.i) == 1 {
+                    let l = self.lines.get_unchecked(self.i) [0];
+                    let mut k = MDB_val { mv_data:(*l).key as *const c_void, mv_size:KEY_SIZE as size_t };
+                    let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
+                    let e=mdb_get(self.mdb_txn, self.dbi_contents, &mut k, &mut v);
+                    if e==0 {
+                        current.push(slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize));
+                        self.i+=1;
+                        Some(current)
+                    } else {
+                        current.push(&[][..]);
+                        self.i+=1;
+                        Some(current)
+                    }
+                } else {
+                    // conflit
+                    unimplemented!()
+                }
+            }
+        }
+    }
+}
+
 
 const PSEUDO_EDGE:u8=1;
 const FOLDER_EDGE:u8=2;
@@ -305,11 +433,10 @@ const PARENT_EDGE:u8=4;
 const DELETED_EDGE:u8=8;
 
 
-
 pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Change>,c_int>{
     // no recursive closures, but I understand why (ownership would be tricky).
     fn dfs(repo:&mut Repository, actions:&mut Vec<Change>,
-           line_num:&usize,updatables:&HashMap<&[u8],&[u8]>,
+           line_num:&mut usize,updatables:&HashMap<&[u8],&[u8]>,
            parent_inode:Option<&[u8]>,
            parent_node:Option<&[u8]>,
            current_inode:&[u8],
@@ -320,23 +447,23 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Ch
         let mut k = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
         let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
         let root_key=&ROOT_KEY[..];
-        let mut l2:Vec<u8>=Vec::with_capacity(LINE_SIZE);
+        let mut l2=[0;LINE_SIZE];
         let current_node=
             match parent_inode {
                 Some(parent_inode) => {
                     k.mv_data=current_inode.as_ptr() as *const c_void;
                     k.mv_size=INODE_SIZE as size_t;
                     let e = unsafe { mdb_get(repo.mdb_txn,repo.dbi(DBI::INODES),&mut k, &mut v) };
-                    if(e==0){
+                    if e==0 { // This inode already has a corresponding node
                         let current_node=unsafe { slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize) };
                         if current_node[0]==1 {
                             // file moved
                         } else if current_node[0]==2 {
                             // file deleted. delete recursively
                         } else if current_node[0]==0 {
-                            // file not moved
+                            // file not moved, we need to diff
                             let ret=retrieve(repo,&current_node);
-
+                            
                         } else {
                             panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
                         };
@@ -345,14 +472,15 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Ch
                         // File addition, create appropriate Newnodes.
                         let mut nodes=Vec::new();
                         let mut lnum= *line_num;
-                        for i in 0..(LINE_SIZE-1) { l2.push((lnum & 0xff) as u8); lnum=lnum>>8 }
+                        for i in 0..(LINE_SIZE-1) { l2[i]=(lnum & 0xff) as u8; lnum=lnum>>8 }
                         actions.push(
                             Change::NewNodes { up_context: vec!(parent_node.unwrap().to_vec()),
+                                               line_num: *line_num,
                                                down_context: vec!(),
-                                               nodes: nodes.clone(),
+                                               nodes: vec!(basename.to_vec(),vec!()),
                                                flag:FOLDER_EDGE }
                             );
-
+                        *line_num += 2;
 
                         // Reading the file
                         nodes.clear();
@@ -365,12 +493,15 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Ch
                                 Err(_) => break
                             }
                         }
+                        let len=nodes.len();
                         actions.push(
-                            Change::NewNodes { up_context:vec!(l2.clone()),
+                            Change::NewNodes { up_context:vec!(l2.to_vec()),
+                                               line_num: *line_num,
                                                down_context: vec!(),
                                                nodes: nodes,
                                                flag:0 }
                             );
+                        *line_num+=len;
                         &l2[..]
                     }
                 },
@@ -399,10 +530,10 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Ch
         Ok(())
     };
     let mut actions:Vec<Change>=Vec::new();
-    let line_num=1;
+    let mut line_num=1;
     let updatables:HashMap<&[u8],&[u8]>=HashMap::new();
     let mut realpath=PathBuf::from("/tmp/test");
-    dfs(repo,&mut actions,&line_num,&updatables,
+    dfs(repo,&mut actions,&mut line_num,&updatables,
         None,None,&ROOT_INODE[..],&mut realpath, "test".as_bytes());
     Ok(actions)
 }
