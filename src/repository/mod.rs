@@ -183,6 +183,7 @@ const KEY_SIZE:usize=HASH_SIZE+LINE_SIZE;
 const ROOT_INODE:[u8;INODE_SIZE]=[0;INODE_SIZE];
 const ROOT_KEY:[u8;KEY_SIZE]=[0;KEY_SIZE];
 
+
 fn add_inode(repo:&mut Repository, inode:&Option<[c_char;INODE_SIZE]>, path:&std::path::Path)->Result<(),()>{
     let mut buf:Vec<c_char>=Vec::with_capacity(INODE_SIZE);
     // Init to 0
@@ -191,8 +192,7 @@ fn add_inode(repo:&mut Repository, inode:&Option<[c_char;INODE_SIZE]>, path:&std
     }
     let mut components=path.components();
     let mut cs=components.next();
-    while cs.is_some(){
-        let s=cs.unwrap();
+    while let Some(s)=cs { // need to peek at the next element, so no for.
         cs=components.next();
         match s.as_os_str().to_str(){
             Some(ss) => {
@@ -549,7 +549,7 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Ch
                         } else if current_node[0]==0 {
                             // file not moved, we need to diff
                             let ret=retrieve(repo,&current_node);
-                            unimplemented!()
+                            diff(repo,line_num,actions, &mut ret.unwrap(), realpath.as_path())
                         } else {
                             panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
                         };
