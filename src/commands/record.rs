@@ -80,7 +80,7 @@ pub fn run(_ : &()) -> Result<Option<()>, Error> {
         Some(r) =>
         {
             let mut repo = try!(Repository::new(&repo_dir(r)));
-            let recs = try!(record(&mut repo, &pwd));
+            let (recs,syncs) = try!(record(&mut repo, &pwd));
             if recs.is_empty() {Ok(None)} else {Ok(Some(()))}
         }
     }

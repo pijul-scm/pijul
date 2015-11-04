@@ -582,7 +582,7 @@ const FOLDER_EDGE:u8=2;
 const PARENT_EDGE:u8=4;
 const DELETED_EDGE:u8=8;
 
-pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Change>,Error>{
+pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<&'a[u8],&'a[u8]>),Error>{
     // no recursive closures, but I understand why (ownership would be tricky).
     fn dfs(repo:&mut Repository, actions:&mut Vec<Change>,
            line_num:&mut usize,updatables:&HashMap<&[u8],&[u8]>,
@@ -684,7 +684,7 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Ch
     let mut realpath=PathBuf::from("/tmp/test");
     dfs(repo,&mut actions,&mut line_num,&updatables,
         None,None,&ROOT_INODE[..],&mut realpath, "test".as_bytes());
-    Ok(actions)
+    Ok((actions,updatables))
 }
 
 
@@ -925,7 +925,7 @@ pub fn apply(repo:&mut Repository, changes:&[Change], external_id:&[u8]) {
                     }
                 }
             },
-            _ => {}
+            _ => { unimplemented!() } // c'est un conflit de toute façon
         }
     }
 }
@@ -1043,5 +1043,10 @@ fn connect_down(repo:&mut Repository, a:&[u8], b0:&[u8],internal_patch_id:&[u8])
 }
 
 
-// Missing: output_repository
+fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<&[u8],&[u8]>){
+    unimplemented!()
+}
 
+fn output_repository(repo:&mut Repository, working_copy:&Path){
+    unimplemented!()
+}
