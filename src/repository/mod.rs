@@ -184,7 +184,7 @@ const ROOT_KEY:[u8;KEY_SIZE]=[0;KEY_SIZE];
 fn add_inode(repo:&mut Repository, inode:&Option<[c_char;INODE_SIZE]>, path:&std::path::Path)->Result<(),()>{
     let mut buf:Vec<c_char>=Vec::with_capacity(INODE_SIZE);
     // Init to 0
-    for i in 0..INODE_SIZE-1 {
+    for i in 0..INODE_SIZE {
         buf.push(0)
     }
     let mut components=path.components();
@@ -203,13 +203,13 @@ fn add_inode(repo:&mut Repository, inode:&Option<[c_char;INODE_SIZE]>, path:&std
                     // replace buf with existing inode
                     buf.clear();
                     let pv:*const c_char=v.mv_data as *const c_char;
-                    unsafe { for c in 0..v.mv_size-1 { buf.push(*pv.offset(c as isize)) } }
+                    unsafe { for c in 0..v.mv_size { buf.push(*pv.offset(c as isize)) } }
                 } else {
                     let inode = if cs.is_none() && inode.is_some() {
                         inode.unwrap()
                     } else {
                         let mut inode:[c_char;INODE_SIZE]=[0;INODE_SIZE];
-                        for i in 0..INODE_SIZE-1 { inode[i]=rand::random() }
+                        for i in 0..INODE_SIZE { inode[i]=rand::random() }
                         inode
                     };
                     v.mv_data=inode.as_ptr() as *const c_void;
@@ -344,17 +344,15 @@ struct File<'a> {
     counts:Vec<usize>,
     lines:Vec<Vec<*mut c_line>>,
     i:usize,
-    mdb_txn:*mut MDB_txn,
-    dbi_contents: MDB_dbi,
     phantom: PhantomData<&'a()>
 }
 
 impl<'a> File<'a> {
-    fn new(repo:&'a mut Repository, file:&'a mut Line)->File<'a> {
+    fn new(file:&'a mut Line)->File<'a> {
         let max_level=tarjan(file);
         let mut counts=vec![0;max_level+1];
         let mut lines:Vec<Vec<*mut c_line>>=vec![vec!();max_level+1];
-        for i in 0..max_level { lines[i]=Vec::new() }
+        for i in 0..counts.len() { lines[i]=Vec::new() }
 
         // First task: add number of lines and list of lines for each level.
         fn fill_lines(counts:&mut Vec<usize>,
@@ -376,7 +374,7 @@ impl<'a> File<'a> {
 
         // Then add "undetected conflicts"
         unsafe  {
-            for i in 0..max_level {
+            for i in 0..counts.len() {
                 if *counts.get_unchecked(i) > 1 {
                     for line in lines.get_unchecked(i) {
                         let children:&[*mut c_line]=slice::from_raw_parts((**line).children, (**line).children_off as usize);
@@ -389,8 +387,6 @@ impl<'a> File<'a> {
             counts:counts,
             lines:lines,
             i:0,
-            mdb_txn:repo.mdb_txn,
-            dbi_contents:repo.dbi(DBI::CONTENTS),
             phantom:PhantomData
         }
     }
@@ -401,22 +397,10 @@ impl <'a> Iterator for File<'a> {
     type Item = Vec<&'a[u8]>;
     fn next(&mut self)->Option<Vec<&'a[u8]>>{
         if self.i >= self.counts.len() { None } else {
-            let mut current=vec!();
             unsafe {
                 if *self.counts.get_unchecked(self.i) == 1 {
                     let l = self.lines.get_unchecked(self.i) [0];
-                    let mut k = MDB_val { mv_data:(*l).key as *const c_void, mv_size:KEY_SIZE as size_t };
-                    let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
-                    let e=mdb_get(self.mdb_txn, self.dbi_contents, &mut k, &mut v);
-                    if e==0 {
-                        current.push(slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize));
-                        self.i+=1;
-                        Some(current)
-                    } else {
-                        current.push(&[][..]);
-                        self.i+=1;
-                        Some(current)
-                    }
+                    Some(vec!(slice::from_raw_parts((*l).key as *const u8, KEY_SIZE)))
                 } else {
                     // conflit
                     unimplemented!()
@@ -425,6 +409,107 @@ impl <'a> Iterator for File<'a> {
         }
     }
 }
+
+
+fn contents<'a>(repo:&mut Repository, key:&'a[u8])->&'a[u8] {
+    unsafe {
+        let mdb_txn=repo.mdb_txn;
+        let mdb_dbi=repo.dbi(DBI::CONTENTS);
+        let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
+        let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
+        let e=mdb_get(mdb_txn, mdb_dbi, &mut k, &mut v);
+        if e==0 {
+            slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)
+        } else {
+            &[][..]
+        }
+    }
+}
+
+fn push_conflict<'a>(repo:&mut Repository,lines_a:&mut Vec<&'a[u8]>, l:Vec<&'a[u8]>) {
+    if l.len()==1 {
+        lines_a.push(contents(repo,&l[0]))
+    } else {
+        unimplemented!()
+    }
+}
+
+fn diff(repo:&mut Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut Line, b:&Path) {
+    let mut lines_a=Vec::new();
+    let it=File::new(a);
+    for l in it {
+        push_conflict(repo, &mut lines_a, l)
+    }
+
+    let mut buf_b=Vec::new();
+    let mut lines_b=Vec::new();
+    {
+        let f = std::fs::File::open(b);
+        let mut f = std::io::BufReader::new(f.unwrap());
+        f.read_to_end(&mut buf_b);
+        let mut i=0;
+        let mut j=0;
+        while j<buf_b.len() {
+            if buf_b[j]==0xa {
+                lines_b.push(&buf_b[i..j+1]);
+                i=j+1
+            }
+            j+=1;
+        }
+    };
+    fn local_diff(actions:&mut Vec<Change>,line_num:&mut usize, a:&[&[u8]], b:&[&[u8]]) {
+        let mut opt:Vec<Vec<usize>>=Vec::with_capacity(a.len()+1);
+        for i in 0..opt.len() { opt.push (vec![0;b.len()+1]) }
+        // opt
+        for i in (0..a.len()).rev() {
+            for j in (0..b.len()).rev() {
+                opt[i][j]=
+                    if a[i]==b[i] { opt[i+1][j+1]+1 } else { std::cmp::max(opt[i+1][j], opt[i][j+1]) }
+            }
+        }
+        let mut i=1;
+        let mut j=0;
+        fn add_lines(actions:&mut Vec<Change>, line_num:&mut usize,
+                     up_context:&[u8],down_context:&[&[u8]],lines:&[&[u8]]){
+            actions.push(
+                Change::NewNodes {
+                    up_context:vec!(up_context.to_vec()),
+                    down_context:{ let mut d=Vec::with_capacity(down_context.len());
+                                   for c in down_context { d.push(c.to_vec()) };
+                                   d },
+                    line_num: *line_num,
+                    flag:0,
+                    nodes:{
+                        let mut nodes=Vec::with_capacity(lines.len());
+                        for l in lines { nodes.push(l.to_vec()) }
+                        nodes
+                    }
+                });
+            *line_num += lines.len()
+        }
+        fn delete_lines(actions:&mut Vec<Change>, lines:&[&[u8]]){
+            unimplemented!()
+        }
+        while(i<a.len() && j<b.len()) {
+            if a[i]==b[i] { i+=1; j+=1 }
+            else {
+                let i0=i;
+                while(i<a.len() && opt[i+1][j]>=opt[i][j+1]) { i+=1 };
+                if i>i0 { delete_lines(actions, &a[i0..i]) }
+                if i<a.len() {
+                    let j0=j;
+                    while(j<b.len() && opt[i+1][j] < opt[i][j+1]) { j+=1 };
+                    if j>j0 { add_lines(actions, line_num, a[i], if i<a.len() {&a[i..i+1]} else { &[][..] }, &b[j0..j]) }
+                }
+            }
+        }
+        if i < a.len() { delete_lines(actions, &a[i..a.len()]) }
+        else if j < b.len() { add_lines(actions, line_num, a[i-1], &[][..], &b[j..b.len()]) }
+    }
+    local_diff(actions, line_num, &lines_a[..],&lines_b[..])
+}
+
+
 
 
 const PSEUDO_EDGE:u8=1;
@@ -539,4 +624,4 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Ch
 }
 
 
-// Missing: diff, apply, output_repository
+// Missing: apply, output_repository
