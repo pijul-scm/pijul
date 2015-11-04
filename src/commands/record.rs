@@ -17,7 +17,7 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 extern crate clap;
-use clap::{SubCommand};
+use clap::{SubCommand, ArgMatches};
 
 use commands::StaticSubcommand;
 use repository::{Repository,record};
@@ -33,6 +33,8 @@ pub fn invocation() -> StaticSubcommand {
         SubCommand::with_name("record")
         .about("record changes in the repository")
 }
+
+pub fn parse_args(_: &ArgMatches) -> () {}
 
 #[derive(Debug)]
 pub enum Error {
@@ -71,7 +73,7 @@ impl From<io::Error> for Error {
     }
 }
 
-pub fn run() -> Result<Option<()>, Error> {
+pub fn run(_ : &()) -> Result<Option<()>, Error> {
     let pwd = try!(std::env::current_dir());
     match find_repo_root(&pwd){
         None => return Err(Error::NotInARepository),

@@ -45,12 +45,13 @@ pub fn parse_args<'a>(args : &'a ArgMatches) -> Params<'a>
     Params{ directory : Path::new(args.value_of("dir").unwrap_or(".")) }
 }
 
-pub fn run(request: &Params) -> () {
+pub fn run(request: &Params) -> Result<(),&'static str> {
     match find_repo_root(request.directory) {
-        Some(r) => println!("Current repository location: '{}'", r.display()),
-        None => {
-            println!("not in a repository");
-            std::process::exit(1)
-        }
+        Some(r) =>
+        { println!("Current repository location: '{}'", r.display());
+          Ok(())
+        },
+        None => Err("not in a repository")
     }
 }
+
