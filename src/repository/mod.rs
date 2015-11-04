@@ -89,15 +89,16 @@ extern "C" {
 }
 
 
-pub const MDB_REVERSEKEY: c_uint = 0x02;
-pub const MDB_DUPSORT: c_uint = 0x04;
-pub const MDB_INTEGERKEY: c_uint = 0x08;
-pub const MDB_DUPFIXED: c_uint = 0x10;
-pub const MDB_INTEGERDUP: c_uint = 0x20;
-pub const MDB_REVERSEDUP: c_uint =  0x40;
-pub const MDB_CREATE: c_uint = 0x40000;
-pub const MDB_NOTFOUND: c_int = -30798;
+const MDB_REVERSEKEY: c_uint = 0x02;
+const MDB_DUPSORT: c_uint = 0x04;
+const MDB_INTEGERKEY: c_uint = 0x08;
+const MDB_DUPFIXED: c_uint = 0x10;
+const MDB_INTEGERDUP: c_uint = 0x20;
+const MDB_REVERSEDUP: c_uint =  0x40;
+const MDB_CREATE: c_uint = 0x40000;
+const MDB_NOTFOUND: c_int = -30798;
 
+const MDB_NODUPDATA:c_uint = 0x20;
 
 const MAX_DBS:usize=10;
 pub enum DBI {
@@ -459,7 +460,7 @@ fn external_key(repo:&mut Repository,key:&[u8])->Vec<u8> {
     unsafe {
         let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:HASH_SIZE as size_t };
         let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
-        let e = unsafe { mdb_get(repo.mdb_txn,repo.dbi(DBI::INODES),&mut k, &mut v) };
+        let e = unsafe { mdb_get(repo.mdb_txn,repo.dbi(DBI::EXTERNAL_HASHES),&mut k, &mut v) };
         if e==0 {
             let mut result:Vec<u8>=Vec::with_capacity(v.mv_size as usize+LINE_SIZE);
             let pv=slice::from_raw_parts(v.mv_data as *const c_uchar, v.mv_size as usize);
@@ -491,7 +492,7 @@ fn delete_edges<'a>(repo:&mut Repository, edges:&mut Vec<(Vec<u8>,Vec<u8>,u8,Vec
                 // look up the external hash up.
                 let pv=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1), KEY_SIZE as usize);
                 let pp=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1+KEY_SIZE as isize), HASH_SIZE as usize);
-                edges.push((ext_key.clone(), external_key(repo,pv), *c, external_key(repo,pp)));
+                edges.push((ext_key.clone(), external_key(repo,pv), (*c)|DELETED_EDGE, external_key(repo,pp)));
                 e= mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_NEXT_DUP as c_uint);
             }
         }
@@ -691,9 +692,208 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Ch
 }
 
 
+fn internal_hash<'a>(repo:&'a mut Repository,key:&'a [u8])->&'a [u8] {
+    unsafe {
+        let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:HASH_SIZE as size_t };
+        let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
+        let e = mdb_get(repo.mdb_txn,repo.dbi(DBI::INTERNAL_HASHES),&mut k, &mut v);
+        if e==0 {
+            slice::from_raw_parts(v.mv_data as *const c_uchar, v.mv_size as usize)
+        } else {
+            panic!("external key not found !")
+        }
+    }
+}
+
+fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8]){
+    let curs=Cursor::new(repo.mdb_txn,repo.dbi(DBI::NODES)).unwrap();
+    let mut uu= MDB_val { mv_data:ptr::null_mut(),
+                          mv_size:0 };
+    let mut vv= MDB_val { mv_data:ptr::null_mut(),
+                          mv_size:0 };
+    for ch in changes {
+
+        match *ch {
+            Change::Edges(ref edges) =>
+                for e in edges {
+                    let (ref eu,ref ev,ref f,ref ep) = *e;
+                    // First remove the deleted version of the edge
+                    let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+                    let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+
+                    pu[0]=f ^ DELETED_EDGE ^ PARENT_EDGE;
+                    pv[0]=f ^ DELETED_EDGE;
+                    { let u=internal_hash(repo,&eu[0..(eu.len()-LINE_SIZE)]);
+                      for i in 0..u.len() { pu[1+i]=u[i] } }
+                    { let v=internal_hash(repo,&ev[0..(ev.len()-LINE_SIZE)]);
+                      for i in 0..v.len() { pv[1+i]=v[i] } }
+                    { let p=internal_hash(repo,&ep[..]);
+                      for i in 0..p.len() { pu[1+KEY_SIZE+i]=p[i]; pv[1+KEY_SIZE+i]=p[i] } }
+                    unsafe {
+                        uu.mv_data=(pu[..].as_ptr().offset(1)) as *mut c_void;
+                        uu.mv_size=KEY_SIZE as size_t;
+                        vv.mv_data=(pv[..].as_ptr()) as *mut c_void;
+                        vv.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
+                        let e=mdb_cursor_get(curs.cursor,&mut uu,&mut vv,MDB_cursor_op::MDB_GET_BOTH as c_uint);
+                        if e==0 { mdb_cursor_del(curs.cursor,0) } else {e};
+                        uu.mv_data=(pv[..].as_ptr().offset(1)) as *mut c_void;
+                        uu.mv_size=KEY_SIZE as size_t;
+                        vv.mv_data=(pu[..].as_ptr()) as *mut c_void;
+                        vv.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
+                        let e=mdb_cursor_get(curs.cursor,&mut uu,&mut vv,MDB_cursor_op::MDB_GET_BOTH as c_uint);
+                        if e==0 { mdb_cursor_del(curs.cursor,0) } else {e};
+                    }
+                    // Then add the new edges
+                    unsafe {
+                        pu[0]=pu[0] ^ DELETED_EDGE;
+                        pv[0]=pv[0] ^ DELETED_EDGE;
+                        uu.mv_data=(pu[..].as_ptr().offset(1)) as *mut c_void;
+                        uu.mv_size=KEY_SIZE as size_t;
+                        vv.mv_data=(pv[..].as_ptr()) as *mut c_void;
+                        vv.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
+                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut uu,&mut vv,MDB_NODUPDATA);
+                        uu.mv_data=(pv[..].as_ptr().offset(1)) as *mut c_void;
+                        uu.mv_size=KEY_SIZE as size_t;
+                        vv.mv_data=(pu[..].as_ptr()) as *mut c_void;
+                        vv.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
+                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut uu,&mut vv,MDB_NODUPDATA);
+                    }
+                },
+            Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
+                let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+                let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+                for i in 0..HASH_SIZE { pv[1+KEY_SIZE+i]=internal_patch_id[i];
+                                        pv[1+i]=internal_patch_id[i] }
+                let mut lnum0= *line_num;
+                for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
+                for i in 0..HASH_SIZE { pu[1+KEY_SIZE+i]=internal_patch_id[i] }
+                for c in up_context {
+                    unsafe {
+                        let mut v0 = MDB_val { mv_data:(pu.as_ptr().offset(1)) as *const c_void,
+                                               mv_size:KEY_SIZE as size_t };
+                        let mut v1 = MDB_val { mv_data:pv.as_ptr() as *const c_void,
+                                               mv_size:(1+KEY_SIZE+HASH_SIZE) as size_t };
+                        { let u=internal_hash(repo,&c[0..(c.len()-LINE_SIZE)]);
+                          for i in 0..c.len() { pu[1+i]=u[i] } }
+                        pu[0]= (*flag) ^ PARENT_EDGE;
+                        pv[0]= *flag;
+                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                        v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
+                        v0.mv_size=KEY_SIZE as size_t;
+                        v1.mv_data=pu.as_ptr().offset(1) as *const c_void;
+                        v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
+                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                    }
+                }
+
+                //////////////
+                for i in 0..HASH_SIZE { pu[1+i]=internal_patch_id[i] }
+
+                let mut lnum= *line_num;
+                let mut uv=true;
+                for n in &nodes[1..] {
+                    let mut lnum0=lnum;
+                    let mut p0 = if uv { pu } else { pv };
+                    let mut p1 = if uv { pv } else { pu };
+                    for i in 0..LINE_SIZE { p1[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0 >>= 8 }
+                    p0[0]= (*flag)^PARENT_EDGE;
+                    p1[0]= *flag;
+                    unsafe {
+                        let mut v0 = MDB_val { mv_data:(p0.as_ptr().offset(1)) as *const c_void, mv_size:KEY_SIZE as size_t };
+                        let mut v1 = MDB_val { mv_data:p1.as_ptr() as *const c_void, mv_size:(1+KEY_SIZE+HASH_SIZE) as size_t };
+                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                        v0.mv_data=p1.as_ptr().offset(1) as *const c_void;
+                        v0.mv_size=KEY_SIZE as size_t;
+                        v1.mv_data=p0.as_ptr().offset(1) as *const c_void;
+                        v1.mv_size=KEY_SIZE as size_t;
+                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                        v0.mv_data=n.as_ptr() as *const c_void;
+                        v0.mv_size=n.len() as size_t;
+                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::CONTENTS),&mut v1, &mut v0, MDB_NODUPDATA);
+                    }
+                    uv = !uv;
+                    lnum = lnum+1;
+                }
+                let mut p0 = if uv { pu } else { pv };
+                let mut p1 = if uv { pv } else { pu };
+                for c in down_context {
+                    unsafe {
+                        let mut v0 = MDB_val { mv_data:(p0.as_ptr().offset(1)) as *const c_void,
+                                               mv_size:KEY_SIZE as size_t };
+                        let mut v1 = MDB_val { mv_data:p1.as_ptr() as *const c_void,
+                                               mv_size:(1+KEY_SIZE+HASH_SIZE) as size_t };
+                        { let u=internal_hash(repo,&c[0..(c.len()-LINE_SIZE)]);
+                          for i in 0..u.len() { p1[1+i]=u[i] } }
+                        p1[0]= *flag;
+                        p0[0]= (*flag) ^ PARENT_EDGE;
+                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                        v0.mv_data=p1.as_ptr().offset(1) as *const c_void;
+                        v0.mv_size=KEY_SIZE as size_t;
+                        v1.mv_data=p0.as_ptr().offset(1) as *const c_void;
+                        v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
+                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                    }
+                }
+            }
+
+        }
+    }
+}
 
 
+pub struct Patch {
+    pub changes:Vec<Change>
+}
 
 
+fn new_internal(repo:&mut Repository,result:&mut[u8],external:&[u8]) {
+    let curs=Cursor::new(repo.mdb_txn,repo.dbi(DBI::EXTERNAL_HASHES)).unwrap();
+    let last=
+        unsafe {
+            let mut k = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
+            let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
+            mdb_cursor_get(curs.cursor,&mut k,&mut v, MDB_cursor_op::MDB_LAST as c_uint);
+            slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize)
+        };
+    fn create_new(r:&mut [u8],last:&[u8],i:usize){
+        if last[i]==0xff { r[i]=0; if i>0 {create_new(r,last,i-1)} }
+        else { r[i]=last[i]+1 }
+    }
+    create_new(result,last,last.len()-1);
+    unsafe {
+        let mut exter = MDB_val { mv_data:external.as_ptr() as *const c_void, mv_size:external.len() as size_t };
+        let mut inter = MDB_val { mv_data:result.as_ptr() as *const c_void, mv_size:HASH_SIZE as size_t};
+        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::EXTERNAL_HASHES),&mut inter, &mut exter, MDB_NODUPDATA);
+        exter.mv_data=external.as_ptr() as *const c_void;
+        exter.mv_size=external.len() as size_t;
+        inter.mv_data=result.as_ptr() as *const c_void;
+        inter.mv_size=result.len() as size_t;
+        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::INTERNAL_HASHES),&mut exter, &mut inter, MDB_NODUPDATA);
+    }
+}
 
-// Missing: apply, output_repository
+pub const DEFAULT_BRANCH:&'static str="main";
+
+pub fn apply(repo:&mut Repository, patch:&Patch, external_id:&[u8]) {
+    let mut intid=[0;HASH_SIZE];
+    new_internal(repo,&mut intid[..],external_id);
+    unsafe_apply(repo,&patch.changes[..],&intid[..]);
+    let mut k = {
+        let c:&[u8]=&[0][..];
+        MDB_val { mv_data:c.as_ptr() as *const c_void, mv_size:1 }
+    };
+    let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size: 0};
+    unsafe {
+        let e=mdb_get(repo.mdb_txn,repo.dbi(DBI::BRANCHES),&mut k, &mut v);
+        if e!=0 {
+            v.mv_data=DEFAULT_BRANCH.as_ptr() as *const c_void;
+            v.mv_size=DEFAULT_BRANCH.len() as size_t
+        }
+        k.mv_data=intid.as_ptr() as *const c_void;
+        k.mv_size=intid.len() as size_t;
+        mdb_put(repo.mdb_txn,repo.dbi(DBI::BRANCHES), &mut v, &mut k, MDB_NODUPDATA);
+    }
+}
+
+
+// Missing: pseudo-edges (apply), output_repository
