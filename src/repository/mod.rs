@@ -267,8 +267,8 @@ pub enum Change {
         flag:u8,
         line_num:usize,
         nodes:Vec<Vec<u8>>
-    }
-    //Edges(Vec<(&'a [u8], u8, &'a[u8], &'a [u8])>)
+    },
+    Edges(Vec<(Vec<u8>, Vec<u8>, u8, Vec<u8>)>)
 }
 
 struct Cursor {
@@ -455,6 +455,49 @@ fn push_conflict<'a>(repo:&mut Repository,lines_a:&mut Vec<&'a[u8]>, l:Vec<&'a[u
     }
 }
 
+fn external_key(repo:&mut Repository,key:&[u8])->Vec<u8> {
+    unsafe {
+        let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:HASH_SIZE as size_t };
+        let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
+        let e = unsafe { mdb_get(repo.mdb_txn,repo.dbi(DBI::INODES),&mut k, &mut v) };
+        if e==0 {
+            let mut result:Vec<u8>=Vec::with_capacity(v.mv_size as usize+LINE_SIZE);
+            let pv=slice::from_raw_parts(v.mv_data as *const c_uchar, v.mv_size as usize);
+            for c in pv { result.push(*c) }
+            for c in &key[HASH_SIZE..KEY_SIZE] { result.push(*c) }
+            result
+        } else {
+            panic!("external key not found !")
+        }
+    }
+}
+
+fn delete_edges<'a>(repo:&mut Repository, edges:&mut Vec<(Vec<u8>,Vec<u8>,u8,Vec<u8>)>, key:&'a[u8]){
+    // Get external key for "key"
+    let ext_key=external_key(repo,key);
+
+    // Then collect edges to delete
+    let curs_tree=Cursor::new(repo.mdb_txn,repo.dbi(DBI::TREE)).unwrap();
+    for c in [PARENT_EDGE, PARENT_EDGE|FOLDER_EDGE].iter() {
+        unsafe {
+            let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len()as size_t };
+            let mut v = MDB_val{ mv_data:(c as *const c_uchar) as *const c_void, mv_size:1 };
+            let mut e= mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint);
+            // take all parent or folder-parent edges:
+            while e==0 && v.mv_size>0 && *(v.mv_data as (*mut c_uchar)) == *c {
+                if (v.mv_size as usize) < 1+HASH_SIZE+KEY_SIZE {
+                    panic!("Wrong encoding in delete_edges")
+                }
+                // look up the external hash up.
+                let pv=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1), KEY_SIZE as usize);
+                let pp=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1+KEY_SIZE as isize), HASH_SIZE as usize);
+                edges.push((ext_key.clone(), external_key(repo,pv), *c, external_key(repo,pp)));
+                e= mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_NEXT_DUP as c_uint);
+            }
+        }
+    }
+}
+
 fn diff(repo:&mut Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut Line, b:&Path) {
     let mut lines_a=Vec::new();
     let it=File::new(a);
@@ -478,7 +521,7 @@ fn diff(repo:&mut Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&m
             j+=1;
         }
     };
-    fn local_diff(actions:&mut Vec<Change>,line_num:&mut usize, a:&[&[u8]], b:&[&[u8]]) {
+    fn local_diff(repo:&mut Repository,actions:&mut Vec<Change>,line_num:&mut usize, a:&[&[u8]], b:&[&[u8]]) {
         let mut opt:Vec<Vec<usize>>=Vec::with_capacity(a.len()+1);
         for i in 0..opt.len() { opt.push (vec![0;b.len()+1]) }
         // opt
@@ -508,15 +551,19 @@ fn diff(repo:&mut Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&m
                 });
             *line_num += lines.len()
         }
-        fn delete_lines(actions:&mut Vec<Change>, lines:&[&[u8]]){
-            unimplemented!()
+        fn delete_lines(repo:&mut Repository,actions:&mut Vec<Change>, lines:&[&[u8]]){
+            let mut edges=Vec::new();
+            for l in lines {
+                delete_edges(repo,&mut edges,l)
+            }
+            actions.push(Change::Edges(edges))
         }
         while(i<a.len() && j<b.len()) {
             if a[i]==b[i] { i+=1; j+=1 }
             else {
                 let i0=i;
                 while(i<a.len() && opt[i+1][j]>=opt[i][j+1]) { i+=1 };
-                if i>i0 { delete_lines(actions, &a[i0..i]) }
+                if i>i0 { delete_lines(repo,actions, &a[i0..i]) }
                 if i<a.len() {
                     let j0=j;
                     while(j<b.len() && opt[i+1][j] < opt[i][j+1]) { j+=1 };
@@ -524,10 +571,10 @@ fn diff(repo:&mut Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&m
                 }
             }
         }
-        if i < a.len() { delete_lines(actions, &a[i..a.len()]) }
+        if i < a.len() { delete_lines(repo,actions, &a[i..a.len()]) }
         else if j < b.len() { add_lines(actions, line_num, a[i-1], &[][..], &b[j..b.len()]) }
     }
-    local_diff(actions, line_num, &lines_a[..],&lines_b[..])
+    local_diff(repo,actions, line_num, &lines_a[..],&lines_b[..])
 }
 
 
@@ -644,4 +691,9 @@ pub fn record(repo:&mut Repository,working_copy:&std::path::Path)->Result<Vec<Ch
 }
 
 
-// Missing: delete_edges (diff), apply, output_repository
+
+
+
+
+
+// Missing: apply, output_repository
