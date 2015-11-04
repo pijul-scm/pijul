@@ -18,7 +18,6 @@
 */
 extern crate clap;
 
-use std;
 use std::path::Path;
 use clap::{SubCommand, Arg, ArgMatches};
 
