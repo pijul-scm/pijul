@@ -136,7 +136,7 @@ int get(struct hashtable*t,char*key,void**value){
 #define PARENT_EDGE 4
 #define DELETED_EDGE 8
 
-struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi,char*key){
+int c_retrieve(MDB_txn* txn,MDB_dbi dbi,char*key, struct c_line**result){
   struct hashtable*cache=new_hashtable(1024);
 
   struct c_line* retrieve_dfs(char*key) {
@@ -167,7 +167,7 @@ struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi,char*key){
       return l;
     }
   }
-  struct c_line* l=retrieve_dfs(key);
+  *result=retrieve_dfs(key);
   free_hashtable(cache);
-  return l;
+  if(*result) return 0; else return 1;
 }
