@@ -592,7 +592,6 @@ const PARENT_EDGE:u8=4;
 const DELETED_EDGE:u8=8;
 
 pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<Vec<u8>,Vec<u8>>),Error>{
-    // no recursive closures, but I understand why (ownership would be tricky).
     fn dfs(repo:&mut Repository, actions:&mut Vec<Change>,
            line_num:&mut usize,updatables:&HashMap<Vec<u8>,Vec<u8>>,
            parent_inode:Option<&[u8]>,
@@ -621,7 +620,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                         } else if current_node[0]==0 {
                             // file not moved, we need to diff
                             let ret=retrieve(repo,&current_node);
-                            diff(repo,line_num,actions, &mut ret.unwrap(), realpath.as_path()).unwrap()
+                             diff(repo,line_num,actions, &mut ret.unwrap(), realpath.as_path()).unwrap()
                         } else {
                             panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
                         };
