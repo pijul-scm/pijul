@@ -33,6 +33,9 @@ pub fn repo_dir(p : &Path) -> PathBuf {
 pub fn pristine_dir(p : &Path) -> PathBuf {
     return p.join(pijul_dir_name()).join("pristine")
 }
+pub fn patches_dir(p : &Path) -> PathBuf {
+    return p.join(pijul_dir_name()).join("patches")
+}
 
 pub fn find_repo_root(dir : &Path) -> Option<&Path> {
     let pijul_dir = repo_dir(dir);
@@ -48,5 +51,8 @@ pub fn create(dir : &Path) -> io::Result<()> {
     let mut repo_dir = repo_dir(dir);
     try!(create_dir(&repo_dir));
     repo_dir.push("pristine");
+    create_dir(&repo_dir);
+    repo_dir.pop();
+    repo_dir.push("patches");
     create_dir(&repo_dir)
 }

@@ -20,13 +20,23 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches};
 
 use commands::StaticSubcommand;
-use repository::{Repository,record,sync_files};
-use repository::fs_representation::{repo_dir, pristine_dir, find_repo_root};
+use repository::{Repository,record,apply,sync_files,HASH_SIZE, Patch};
+use repository::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root};
 
 use std;
 use std::io;
 use std::fmt;
 use std::error;
+
+extern crate crypto;
+use crypto::digest::Digest;
+use crypto::sha2::Sha512;
+
+extern crate serde_json;
+use self::serde_json::Value;
+use std::io::BufWriter;
+use std::fs::File;
+
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -80,14 +90,34 @@ pub fn run(_ : &()) -> Result<Option<()>, Error> {
         Some(r) =>
         {
             let repo_dir=pristine_dir(r);
-            let (recs,syncs)= {
+            let (changes,syncs)= {
                 let mut repo = try!(Repository::new(&repo_dir));
                 try!(record(&mut repo, &r))
             };
-            let mut repo = try!(Repository::new(&repo_dir));
-            sync_files(&mut repo,&recs[..],&syncs);
+            if changes.is_empty() {
+                println!("Nothing to record");
+                Ok(None)
+            } else {
+                let patch = Patch { changes:changes };
+                // save patch
+                let patches_dir=patches_dir(r);
+                let tmp=patches_dir.join("patch");
+                println!("{:?}",tmp);
+                let mut buffer = BufWriter::new(try!(File::create(tmp))); // change to uuid
+                serde_json::ser::to_writer(&mut buffer,&patch);
 
-            if recs.is_empty() {Ok(None)} else {Ok(Some(()))}
+                // hash
+                let mut hasher = Sha512::new();
+                hasher.input_str("hello world");
+                let hash = hasher.result_str();
+
+                let mut repo = try!(Repository::new(&repo_dir));
+
+                let mut intid=[0;HASH_SIZE];
+                apply(&mut repo, &patch.changes[..], hash.as_bytes(), &mut intid[..]);
+                sync_files(&mut repo,&patch.changes[..],&syncs, &[0;HASH_SIZE][..]);
+                Ok(Some(()))
+            }
         }
     }
 }
