@@ -582,10 +582,10 @@ const FOLDER_EDGE:u8=2;
 const PARENT_EDGE:u8=4;
 const DELETED_EDGE:u8=8;
 
-pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<&'a[u8],&'a[u8]>),Error>{
+pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<Vec<u8>,Vec<u8>>),Error>{
     // no recursive closures, but I understand why (ownership would be tricky).
     fn dfs(repo:&mut Repository, actions:&mut Vec<Change>,
-           line_num:&mut usize,updatables:&HashMap<&[u8],&[u8]>,
+           line_num:&mut usize,updatables:&HashMap<Vec<u8>,Vec<u8>>,
            parent_inode:Option<&[u8]>,
            parent_node:Option<&[u8]>,
            current_inode:&[u8],
@@ -680,7 +680,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
     };
     let mut actions:Vec<Change>=Vec::new();
     let mut line_num=1;
-    let updatables:HashMap<&[u8],&[u8]>=HashMap::new();
+    let updatables:HashMap<Vec<u8>,Vec<u8>>=HashMap::new();
     let mut realpath=PathBuf::from("/tmp/test");
     dfs(repo,&mut actions,&mut line_num,&updatables,
         None,None,&ROOT_INODE[..],&mut realpath, "test".as_bytes());
@@ -1043,10 +1043,10 @@ fn connect_down(repo:&mut Repository, a:&[u8], b0:&[u8],internal_patch_id:&[u8])
 }
 
 
-fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<&[u8],&[u8]>){
+pub fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<Vec<u8>,Vec<u8>>){
     unimplemented!()
 }
 
-fn output_repository(repo:&mut Repository, working_copy:&Path){
+pub fn output_repository(repo:&mut Repository, working_copy:&Path){
     unimplemented!()
 }

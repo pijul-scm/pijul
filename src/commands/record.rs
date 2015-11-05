@@ -20,7 +20,7 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches};
 
 use commands::StaticSubcommand;
-use repository::{Repository,record};
+use repository::{Repository,record,sync_files};
 use repository::fs_representation::{repo_dir, find_repo_root};
 
 use std;
@@ -79,8 +79,14 @@ pub fn run(_ : &()) -> Result<Option<()>, Error> {
         None => return Err(Error::NotInARepository),
         Some(r) =>
         {
-            let mut repo = try!(Repository::new(&repo_dir(r)));
-            let (recs,syncs) = try!(record(&mut repo, &pwd));
+            let repo_dir=repo_dir(r);
+            let (recs,syncs)= {
+                let mut repo = try!(Repository::new(&repo_dir));
+                try!(record(&mut repo, &pwd))
+            };
+            let mut repo = try!(Repository::new(&repo_dir));
+            sync_files(&mut repo,&recs[..],&syncs);
+
             if recs.is_empty() {Ok(None)} else {Ok(Some(()))}
         }
     }
