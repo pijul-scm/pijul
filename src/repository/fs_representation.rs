@@ -30,9 +30,13 @@ pub fn repo_dir(p : &Path) -> PathBuf {
     return p.join(pijul_dir_name())
 }
 
+pub fn pristine_dir(p : &Path) -> PathBuf {
+    return p.join(pijul_dir_name()).join("pristine")
+}
+
 pub fn find_repo_root(dir : &Path) -> Option<&Path> {
     let pijul_dir = repo_dir(dir);
-    match (metadata(pijul_dir)) {
+    match metadata(pijul_dir) {
         Ok (attr) =>
             if attr.is_dir() {Some(dir)} else {None},
         Err(_) =>
@@ -41,6 +45,8 @@ pub fn find_repo_root(dir : &Path) -> Option<&Path> {
 }
 
 pub fn create(dir : &Path) -> io::Result<()> {
-    let repo_dir = repo_dir(dir);
+    let mut repo_dir = repo_dir(dir);
+    try!(create_dir(&repo_dir));
+    repo_dir.push("pristine");
     create_dir(&repo_dir)
 }

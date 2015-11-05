@@ -31,16 +31,16 @@ use std::collections::HashMap;
 extern crate rand;
 use std::path::{PathBuf,Path};
 #[allow(missing_copy_implementations)]
-pub enum MDB_env {}
-pub enum MDB_txn {}
-pub enum MDB_cursor {}
+enum MdbEnv {}
+enum MdbTxn {}
+enum MdbCursor {}
 use std::io::prelude::*;
 use std::io::Error;
 use std::marker::PhantomData;
 use std::collections::HashSet;
 pub mod fs_representation;
 
-type MDB_dbi=c_uint;
+type MdbDbi=c_uint;
 #[repr(C)]
 pub struct MDB_val {
     pub mv_size:size_t,
@@ -69,23 +69,23 @@ pub enum MDB_cursor_op {
 }
 
 extern "C" {
-    fn mdb_env_create(env: *mut *mut MDB_env) -> c_int;
-    fn mdb_env_open(env: *mut MDB_env, path: *const c_char, flags: c_uint, mode: mode_t) -> c_int;
-    fn mdb_env_close(env: *mut MDB_env);
-    fn mdb_env_set_maxdbs(env: *mut MDB_env,maxdbs:c_uint)->c_int;
-    fn mdb_env_set_mapsize(env: *mut MDB_env,mapsize:size_t)->c_int;
-    fn mdb_reader_check(env:*mut MDB_env,dead:*mut c_int)->c_int;
-    fn mdb_txn_begin(env: *mut MDB_env,parent: *mut MDB_txn, flags:c_uint, txn: *mut *mut MDB_txn)->c_int;
-    fn mdb_txn_commit(txn: *mut MDB_txn)->c_int;
-    fn mdb_txn_abort(txn: *mut MDB_txn);
-    fn mdb_dbi_open(txn: *mut MDB_txn, name: *const c_char, flags:c_uint, dbi:*mut MDB_dbi)->c_int;
-    fn mdb_get(txn: *mut MDB_txn, dbi:MDB_dbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
-    fn mdb_put(txn: *mut MDB_txn, dbi:MDB_dbi, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
-    fn mdb_cursor_get(cursor: *mut MDB_cursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
-    fn mdb_cursor_put(cursor: *mut MDB_cursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
-    fn mdb_cursor_del(cursor: *mut MDB_cursor, flags:c_uint)->c_int;
-    fn mdb_cursor_open(txn: *mut MDB_txn, dbi:MDB_dbi, cursor:*mut *mut MDB_cursor)->c_int;
-    fn mdb_cursor_close(cursor: *mut MDB_cursor);
+    fn mdb_env_create(env: *mut *mut MdbEnv) -> c_int;
+    fn mdb_env_open(env: *mut MdbEnv, path: *const c_char, flags: c_uint, mode: mode_t) -> c_int;
+    fn mdb_env_close(env: *mut MdbEnv);
+    fn mdb_env_set_maxdbs(env: *mut MdbEnv,maxdbs:c_uint)->c_int;
+    fn mdb_env_set_mapsize(env: *mut MdbEnv,mapsize:size_t)->c_int;
+    fn mdb_reader_check(env:*mut MdbEnv,dead:*mut c_int)->c_int;
+    fn mdb_txn_begin(env: *mut MdbEnv,parent: *mut MdbTxn, flags:c_uint, txn: *mut *mut MdbTxn)->c_int;
+    fn mdb_txn_commit(txn: *mut MdbTxn)->c_int;
+    fn mdb_txn_abort(txn: *mut MdbTxn);
+    fn mdb_dbi_open(txn: *mut MdbTxn, name: *const c_char, flags:c_uint, dbi:*mut MdbDbi)->c_int;
+    fn mdb_get(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
+    fn mdb_put(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    fn mdb_cursor_get(cursor: *mut MdbCursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    fn mdb_cursor_put(cursor: *mut MdbCursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    fn mdb_cursor_del(cursor: *mut MdbCursor, flags:c_uint)->c_int;
+    fn mdb_cursor_open(txn: *mut MdbTxn, dbi:MdbDbi, cursor:*mut *mut MdbCursor)->c_int;
+    fn mdb_cursor_close(cursor: *mut MdbCursor);
 }
 
 
@@ -127,9 +127,9 @@ const dbis:[(&'static str,c_uint);MAX_DBS]=[("nodes\0",MDB_CREATE|MDB_DUPSORT),
                                             ];
 
 pub struct Repository{
-    mdb_env:*mut MDB_env,
-    mdb_txn:*mut MDB_txn,
-    dbi_:[Option<MDB_dbi>;MAX_DBS]
+    mdb_env:*mut MdbEnv,
+    mdb_txn:*mut MdbTxn,
+    dbi_:[Option<MdbDbi>;MAX_DBS]
 }
 
 impl Repository {
@@ -170,7 +170,7 @@ impl Repository {
             }
         }
     }
-    fn dbi(&mut self,num:DBI)->MDB_dbi{
+    fn dbi(&mut self,num:DBI)->MdbDbi{
         let n=num as usize;
         match self.dbi_[n] {
             Some(dbi) => {dbi},
@@ -204,7 +204,7 @@ const ROOT_INODE:[u8;INODE_SIZE]=[0;INODE_SIZE];
 const ROOT_KEY:[u8;KEY_SIZE]=[0;KEY_SIZE];
 
 
-fn add_inode(repo:&mut Repository, inode:&Option<[c_char;INODE_SIZE]>, path:&std::path::Path)->Result<(),()>{
+fn add_inode(repo:&mut Repository, inode:&Option<[c_char;INODE_SIZE]>, path:&std::path::Path, is_dir:bool)->Result<(),()>{
     let mut buf:Vec<c_char>=vec![0;INODE_SIZE];
     let mut components=path.components();
     let mut cs=components.next();
@@ -234,7 +234,7 @@ fn add_inode(repo:&mut Repository, inode:&Option<[c_char;INODE_SIZE]>, path:&std
                     v.mv_size=INODE_SIZE as size_t;
                     unsafe { mdb_put(repo.mdb_txn,repo.dbi(DBI::TREE),&mut k,&mut v,0) };
                     unsafe { mdb_put(repo.mdb_txn,repo.dbi(DBI::REVTREE),&mut v,&mut k,0) };
-                    if cs.is_some() {
+                    if cs.is_some() || is_dir {
                         k.mv_data="".as_ptr() as *const c_void;
                         k.mv_size=0;
                         unsafe { mdb_put(repo.mdb_txn,repo.dbi(DBI::TREE),&mut v,&mut k,0) };
@@ -252,8 +252,9 @@ fn add_inode(repo:&mut Repository, inode:&Option<[c_char;INODE_SIZE]>, path:&std
     Ok(())
 }
 
-pub fn add_file(repo:&mut Repository, path:&std::path::Path)->Result<(),()>{
-    add_inode(repo,&None,path)
+pub fn add_file(repo:&mut Repository, path:&std::path::Path, is_dir:bool)->Result<(),()>{
+    println!("Adding {:?}",path);
+    add_inode(repo,&None,path,is_dir)
 }
 
 
@@ -269,11 +270,11 @@ pub enum Change {
 }
 
 struct Cursor {
-    cursor:*mut MDB_cursor,
+    cursor:*mut MdbCursor,
 }
 
 impl Cursor {
-    fn new(txn:*mut MDB_txn,dbi:MDB_dbi)->Result<Cursor,Error>{
+    fn new(txn:*mut MdbTxn,dbi:MdbDbi)->Result<Cursor,Error>{
         unsafe {
             let curs=ptr::null_mut();
             let e=mdb_cursor_open(txn,dbi,std::mem::transmute(&curs));
@@ -306,7 +307,7 @@ extern "C"{
     // retrieve uses hash tables growing monotonically. For time and
     // memory, we need it in C (or with fast hashtables and no copy of
     // anything).
-    fn c_retrieve(txn:*mut MDB_txn,dbi:MDB_dbi,key:*const c_char) -> *mut c_line;
+    fn c_retrieve(txn:*mut MdbTxn,dbi:MdbDbi,key:*const c_char) -> *mut c_line;
     fn c_free_line(c_line:*mut c_line);
 }
 
@@ -432,10 +433,10 @@ impl <'a> Iterator for File<'a> {
 fn contents<'a>(repo:&mut Repository, key:&'a[u8])->&'a[u8] {
     unsafe {
         let mdb_txn=repo.mdb_txn;
-        let mdb_dbi=repo.dbi(DBI::CONTENTS);
+        let MdbDbi=repo.dbi(DBI::CONTENTS);
         let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
         let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
-        let e=mdb_get(mdb_txn, mdb_dbi, &mut k, &mut v);
+        let e=mdb_get(mdb_txn, MdbDbi, &mut k, &mut v);
         if e==0 {
             slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)
         } else {
@@ -688,7 +689,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
 }
 
 
-fn internal_hash<'a>(txn:*mut MDB_txn,dbi:MDB_dbi,key:&'a [u8])->&'a [u8] {
+fn internal_hash<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&'a [u8])->&'a [u8] {
     unsafe {
         let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:HASH_SIZE as size_t };
         let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
@@ -933,7 +934,7 @@ pub fn apply(repo:&mut Repository, changes:&[Change], external_id:&[u8]) {
 
 fn connect_up(repo:&mut Repository, a0:&[u8], b:&[u8],internal_patch_id:&[u8]) {
 
-    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, txn:*mut MDB_txn, dbi:MDB_dbi, a:&'a[u8], b:&'a[u8], internal_patch_id:&'a[u8]) {
+    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, txn:*mut MdbTxn, dbi:MdbDbi, a:&'a[u8], b:&'a[u8], internal_patch_id:&'a[u8]) {
         if !visited.contains(a) {
             visited.insert(a);
             let cursor=Cursor::new(txn,dbi).unwrap();
@@ -992,7 +993,7 @@ fn connect_up(repo:&mut Repository, a0:&[u8], b:&[u8],internal_patch_id:&[u8]) {
 
 fn connect_down(repo:&mut Repository, a:&[u8], b0:&[u8],internal_patch_id:&[u8]) {
 
-    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, txn:*mut MDB_txn, dbi:MDB_dbi, a:&'a[u8], b:&'a[u8], internal_patch_id:&'a[u8]) {
+    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, txn:*mut MdbTxn, dbi:MdbDbi, a:&'a[u8], b:&'a[u8], internal_patch_id:&'a[u8]) {
         if !visited.contains(b) {
             visited.insert(b);
             let cursor=Cursor::new(txn,dbi).unwrap();
