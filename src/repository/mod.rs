@@ -19,7 +19,8 @@
 extern crate libc;
 use self::libc::{c_int, c_uint,c_char,c_uchar,c_void,size_t};
 use self::libc::types::os::arch::posix88::mode_t;
-use self::libc::funcs::c95::string::{strncpy,strncmp};
+use self::libc::funcs::c95::string::{strncmp};
+use std::ptr::{copy_nonoverlapping};
 use std::ptr;
 
 use std::slice;
@@ -44,6 +45,14 @@ pub mod patch;
 use std::os::unix::fs::PermissionsExt;
 
 use self::patch::{Patch,Change};
+
+
+extern crate rustc_serialize;
+
+use self::rustc_serialize::hex::{FromHex, ToHex};
+
+
+
 
 type MdbDbi=c_uint;
 #[repr(C)]
@@ -97,7 +106,7 @@ extern "C" {
 //const MDB_REVERSEKEY: c_uint = 0x02;
 const MDB_DUPSORT: c_uint = 0x04;
 //const MDB_INTEGERKEY: c_uint = 0x08;
-const MDB_DUPFIXED: c_uint = 0x10;
+//const MDB_DUPFIXED: c_uint = 0x10;
 //const MDB_INTEGERDUP: c_uint = 0x20;
 //const MDB_REVERSEDUP: c_uint =  0x40;
 const MDB_CREATE: c_uint = 0x40000;
@@ -119,12 +128,12 @@ pub enum DBI {
     REVINODES
 }
 
-const DBIS:[(&'static str,c_uint);MAX_DBS]=[("nodes\0",MDB_CREATE|MDB_DUPSORT|MDB_DUPFIXED),
+const DBIS:[(&'static str,c_uint);MAX_DBS]=[("nodes\0",MDB_CREATE|MDB_DUPSORT),
                                             ("contents\0",MDB_CREATE),
-                                            ("revdep\0",MDB_CREATE|MDB_DUPSORT|MDB_DUPFIXED),
+                                            ("revdep\0",MDB_CREATE|MDB_DUPSORT),
                                             ("internal\0",MDB_CREATE),
                                             ("external\0",MDB_CREATE),
-                                            ("branches\0",MDB_CREATE|MDB_DUPSORT|MDB_DUPFIXED),
+                                            ("branches\0",MDB_CREATE|MDB_DUPSORT),
                                             ("tree\0",MDB_CREATE|MDB_DUPSORT),
                                             ("revtree\0",MDB_CREATE),
                                             ("inodes\0",MDB_CREATE),
@@ -248,7 +257,7 @@ fn add_inode(repo:&mut Repository, inode:&Option<[u8;INODE_SIZE]>, path:&std::pa
                 if ret==0 {
                     // replace buf with existing inode
                     buf.clear();
-                    let _=unsafe { strncpy(buf.as_mut_ptr() as *mut c_char,v.mv_data as *const c_char,v.mv_size as size_t) };
+                    let _=unsafe { copy_nonoverlapping(v.mv_data as *const c_char,buf.as_mut_ptr() as *mut c_char,v.mv_size as usize) };
                     ()
                 } else {
                     let inode = if cs.is_none() && inode.is_some() {
@@ -633,6 +642,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                     let e = unsafe { mdb_get(repo.mdb_txn,repo.dbi(DBI::INODES),&mut k, &mut v) };
                     if e==0 { // This inode already has a corresponding node
                         let current_node=unsafe { slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize) };
+                        println!("Existing node: {}",current_node.to_hex());
                         if current_node[0]==1 {
                             // file moved
                         } else if current_node[0]==2 {
@@ -653,7 +663,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                                 let permissions=attr.permissions().mode();
                                 let is_dir= if attr.is_dir() { 1 } else { 0 };
                                 let mut nodes=Vec::new();
-                                let mut lnum= *line_num;
+                                let mut lnum= *line_num + 1;
                                 for i in 0..(LINE_SIZE-1) { l2[i]=(lnum & 0xff) as u8; lnum=lnum>>8 }
 
                                 let mut name=Vec::with_capacity(basename.len()+2);
@@ -677,7 +687,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                                 let mut f = std::io::BufReader::new(f.unwrap());
                                 loop {
                                     match f.read_until('\n' as u8,&mut line) {
-                                        Ok(l) => if l>0 { nodes.push(line.clone()) } else { break },
+                                        Ok(l) => if l>0 { nodes.push(line.clone());line.clear() } else { break },
                                         Err(_) => break
                                     }
                                 }
@@ -744,7 +754,7 @@ fn internal_hash<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&'a [u8])->&'a [u8] {
             slice::from_raw_parts(ROOT_KEY.as_ptr(), ROOT_KEY.len())
         } else {
             let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:HASH_SIZE as size_t };
-            let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
+            let mut v:MDB_val =std::mem::zeroed();
             let e = mdb_get(txn,dbi,&mut k, &mut v);
             if e==0 {
                 slice::from_raw_parts(v.mv_data as *const c_uchar, v.mv_size as usize)
@@ -758,10 +768,8 @@ fn internal_hash<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&'a [u8])->&'a [u8] {
 
 fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8]){
     let curs=Cursor::new(repo.mdb_txn,repo.dbi(DBI::NODES)).unwrap();
-    let mut uu= MDB_val { mv_data:ptr::null_mut(),
-                          mv_size:0 };
-    let mut vv= MDB_val { mv_data:ptr::null_mut(),
-                          mv_size:0 };
+    let mut uu:MDB_val= unsafe {std::mem::zeroed() };
+    let mut vv:MDB_val= unsafe {std::mem::zeroed() };
     for ch in changes {
 
         match *ch {
@@ -776,20 +784,20 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                     pv[0]=f ^ DELETED_EDGE;
                     let _=unsafe {
                         let u=internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&eu[0..(eu.len()-LINE_SIZE)]);
-                        strncpy(pu.as_ptr().offset(1) as *mut c_char, u.as_ptr() as *const c_char,HASH_SIZE as size_t)
+                        copy_nonoverlapping(u.as_ptr() as *const c_char,pu.as_ptr().offset(1) as *mut c_char, HASH_SIZE)
                     };
                     let _=unsafe {
                         let v=internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&ev[0..(ev.len()-LINE_SIZE)]);
-                        strncpy(pv.as_ptr().offset(1) as *mut c_char, v.as_ptr() as *const c_char,HASH_SIZE as size_t)
+                        copy_nonoverlapping(v.as_ptr() as *const c_char,pv.as_ptr().offset(1) as *mut c_char, HASH_SIZE)
                     };
                     let _=unsafe {
                         let p=internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&ep[..]);
-                        strncpy(pu.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
-                                p.as_ptr() as *const c_char,
-                                HASH_SIZE as size_t);
-                        strncpy(pv.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
-                                p.as_ptr() as *const c_char,
-                                HASH_SIZE as size_t)
+                        copy_nonoverlapping(p.as_ptr() as *const c_char,
+                             pu.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                             HASH_SIZE);
+                        copy_nonoverlapping(p.as_ptr() as *const c_char,
+                             pv.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                             HASH_SIZE)
                     };
                     let _=unsafe {
                         uu.mv_data=(pu.as_ptr().offset(1)) as *mut c_void;
@@ -822,81 +830,120 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                     }
                 },
             Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
+                println!("newnodes");
                 let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                 let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-                for i in 0..HASH_SIZE { pv[1+KEY_SIZE+i]=internal_patch_id[i];
-                                        pv[1+i]=internal_patch_id[i] }
                 let mut lnum0= *line_num;
                 for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
                 let _= unsafe {
-                    strncpy(pu.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
-                            internal_patch_id.as_ptr() as *const c_char,
-                            HASH_SIZE as size_t)
+                    copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
+                         pu.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                         HASH_SIZE);
+                    copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
+                         pv.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                         HASH_SIZE);
+                    copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
+                         pv.as_ptr().offset(1) as *mut c_char,
+                         HASH_SIZE)
                 };
+                println!("pu={}",pu.to_hex());
+                println!("ipi={}",internal_patch_id.to_hex());
                 for c in up_context {
                     unsafe {
                         let mut v0 = MDB_val { mv_data:(pu.as_ptr().offset(1)) as *const c_void,
                                                mv_size:KEY_SIZE as size_t };
                         let mut v1 = MDB_val { mv_data:pv.as_ptr() as *const c_void,
                                                mv_size:(1+KEY_SIZE+HASH_SIZE) as size_t };
-                        { let u= if c.len()>LINE_SIZE {
-                            internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&c[0..(c.len()-LINE_SIZE)])
-                        } else { internal_patch_id };
-                          for i in 0..c.len() { pu[1+i]=u[i] }}
+                        {
+                            println!("c.len={}, LINE_SIZE={}",c.len(), LINE_SIZE);
+                            let u= if c.len()>LINE_SIZE {
+                                internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&c[0..(c.len()-LINE_SIZE)])
+                            } else {
+                                internal_patch_id
+                            };
+                            println!("u={}",u.to_hex());
+                            copy_nonoverlapping(u.as_ptr() as *const c_char,
+                                 pu.as_ptr().offset(1) as *mut c_char,
+                                 HASH_SIZE);
+                        }
+                        copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize) as *const c_char,
+                                            pu.as_ptr().offset((1+HASH_SIZE) as isize) as *mut c_char,
+                                            LINE_SIZE);
                         pu[0]= (*flag) ^ PARENT_EDGE;
                         pv[0]= *flag;
-                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                        let e=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
                         v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
                         v0.mv_size=KEY_SIZE as size_t;
-                        v1.mv_data=pu.as_ptr().offset(1) as *const c_void;
+                        v1.mv_data=pu.as_ptr() as *const c_void;
                         v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
-                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                        println!("put (up): {}",pu.to_hex());
+                        let e=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                        println!("put e={}",e);
                     }
                 }
                 //////////////
-                for i in 0..HASH_SIZE { pu[1+i]=internal_patch_id[i] }
+                unsafe {
+                    copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
+                         pu.as_ptr().offset(1) as *mut c_char,
+                         HASH_SIZE);
+                }
 
-                let mut lnum= *line_num;
-                let mut uv=true;
+                let mut lnum= *line_num + 1;
+                let mut uv=false;
+                let mut v0:MDB_val = unsafe { std::mem::zeroed () };
+                let mut v1:MDB_val = unsafe { std::mem::zeroed () };
+                unsafe {
+                    v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
+                    v0.mv_size=KEY_SIZE as size_t;
+                    v1.mv_data=nodes[0].as_ptr() as *const c_void;
+                    v1.mv_size=nodes[0].len() as size_t;
+                    let e=mdb_put(repo.mdb_txn,repo.dbi(DBI::CONTENTS),&mut v0, &mut v1, 0);
+                }
                 for n in &nodes[1..] {
-                    let mut lnum0=lnum;
-                    let mut p0 = if uv { pu } else { pv };
-                    let mut p1 = if uv { pv } else { pu };
-                    for i in 0..LINE_SIZE { p1[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0 >>= 8 }
-                    p0[0]= (*flag)^PARENT_EDGE;
-                    p1[0]= *flag;
+                    let mut lnum0=lnum-1;
+                    for i in 0..LINE_SIZE { pu[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0 >>= 8 }
+                    lnum0=lnum;
+                    for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0 >>= 8 }
+                    pu[0]= (*flag)^PARENT_EDGE;
+                    pv[0]= *flag;
                     unsafe {
-                        let mut v0 = MDB_val { mv_data:(p0.as_ptr().offset(1)) as *const c_void, mv_size:KEY_SIZE as size_t };
-                        let mut v1 = MDB_val { mv_data:p1.as_ptr() as *const c_void, mv_size:(1+KEY_SIZE+HASH_SIZE) as size_t };
-                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
-                        v0.mv_data=p1.as_ptr().offset(1) as *const c_void;
+                        v0.mv_data=pu.as_ptr().offset(1) as *const c_void;
                         v0.mv_size=KEY_SIZE as size_t;
-                        v1.mv_data=p0.as_ptr().offset(1) as *const c_void;
-                        v1.mv_size=KEY_SIZE as size_t;
+                        v1.mv_data=pv.as_ptr() as *const c_void;
+                        v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
                         let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
-                        v0.mv_data=n.as_ptr() as *const c_void;
-                        v0.mv_size=n.len() as size_t;
-                        let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::CONTENTS),&mut v1, &mut v0, MDB_NODUPDATA);
+                        v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
+                        v0.mv_size=KEY_SIZE as size_t;
+                        v1.mv_data=pu.as_ptr() as *const c_void;
+                        v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
+                        println!("lnum={}",lnum);
+                        println!("adding node {} -> {}", pu.to_hex(), pv.to_hex());
+                        let e=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                        v1.mv_data=n.as_ptr() as *const c_void;
+                        v1.mv_size=n.len() as size_t;
+                        v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
+                        v0.mv_size=KEY_SIZE as size_t;
+                        let e=mdb_put(repo.mdb_txn,repo.dbi(DBI::CONTENTS),&mut v0, &mut v1, 0);
                     }
-                    uv = !uv;
                     lnum = lnum+1;
                 }
-                let mut p0 = if uv { pu } else { pv };
-                let mut p1 = if uv { pv } else { pu };
+
                 for c in down_context {
                     unsafe {
-                        let mut v0 = MDB_val { mv_data:(p0.as_ptr().offset(1)) as *const c_void,
+                        let mut v0 = MDB_val { mv_data:(pu.as_ptr().offset(1)) as *const c_void,
                                                mv_size:KEY_SIZE as size_t };
-                        let mut v1 = MDB_val { mv_data:p1.as_ptr() as *const c_void,
+                        let mut v1 = MDB_val { mv_data:pv.as_ptr() as *const c_void,
                                                mv_size:(1+KEY_SIZE+HASH_SIZE) as size_t };
                         { let u=internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&c[0..(c.len()-LINE_SIZE)]);
-                          for i in 0..u.len() { p1[1+i]=u[i] } }
-                        p1[0]= *flag;
-                        p0[0]= (*flag) ^ PARENT_EDGE;
+                          copy_nonoverlapping(u.as_ptr(), pv.as_mut_ptr().offset(1), HASH_SIZE)
+                        }
+                        copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize), pv.as_mut_ptr().offset((1+HASH_SIZE) as isize), LINE_SIZE);
+                        pu[0]= *flag;
+                        pv[0]= (*flag) ^ PARENT_EDGE;
                         let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
-                        v0.mv_data=p1.as_ptr().offset(1) as *const c_void;
+                        v0.mv_data=pu.as_ptr().offset(1) as *const c_void;
                         v0.mv_size=KEY_SIZE as size_t;
-                        v1.mv_data=p0.as_ptr().offset(1) as *const c_void;
+                        v1.mv_data=pv.as_ptr() as *const c_void;
                         v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
                         let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
                     }
@@ -913,8 +960,8 @@ fn new_internal(repo:&mut Repository,result:&mut[u8],external:&[u8]) {
     let root_key=&ROOT_KEY[0..HASH_SIZE];
     let last=
         unsafe {
-            let mut k = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
-            let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
+            let mut k:MDB_val=unsafe {std::mem::zeroed() };
+            let mut v:MDB_val=unsafe {std::mem::zeroed() };
             let e=mdb_cursor_get(curs.cursor,&mut k,&mut v, MDB_cursor_op::MDB_LAST as c_uint);
             if e==0 && (k.mv_size as usize)>=HASH_SIZE {
                 slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize)
@@ -950,7 +997,7 @@ pub fn apply(repo:&mut Repository, changes:&[Change], external_id:&[u8], intid:&
         let c:[u8;1]=[0];
         MDB_val { mv_data:c.as_ptr() as *const c_void, mv_size:1 }
     };
-    let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size: 0};
+    let mut v:MDB_val=unsafe {std::mem::zeroed() };
     unsafe {
         let e=mdb_get(repo.mdb_txn,repo.dbi(DBI::BRANCHES),&mut k, &mut v);
         if e!=0 {
@@ -1022,14 +1069,18 @@ fn connect_up(repo:&mut Repository, a0:&[u8], b:&[u8],internal_patch_id:&[u8]) {
                 pu[0]= PARENT_EDGE|PSEUDO_EDGE;
                 pv[0]= PSEUDO_EDGE;
                 unsafe {
-                    strncpy(pu.as_ptr().offset(1) as *mut c_char, a.as_ptr() as *const c_char, KEY_SIZE as size_t);
-                    strncpy(pv.as_ptr().offset(1) as *mut c_char, b.as_ptr() as *const c_char, KEY_SIZE as size_t);
-                    strncpy(pu.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
-                            internal_patch_id.as_ptr() as *const c_char,
-                            KEY_SIZE as size_t);
-                    strncpy(pv.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
-                            internal_patch_id.as_ptr() as *const c_char,
-                            KEY_SIZE as size_t);
+                    copy_nonoverlapping(a.as_ptr() as *const c_char,
+                         pu.as_ptr().offset(1) as *mut c_char,
+                         KEY_SIZE);
+                    copy_nonoverlapping(b.as_ptr() as *const c_char,
+                         pv.as_ptr().offset(1) as *mut c_char,
+                         KEY_SIZE);
+                    copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
+                         pu.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                         KEY_SIZE);
+                    copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
+                         pv.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                         KEY_SIZE);
                     k.mv_data= pu.as_ptr().offset(1) as *const c_void;
                     k.mv_size= KEY_SIZE as size_t;
                     v.mv_data= pv.as_ptr() as *const c_void;
@@ -1076,14 +1127,18 @@ fn connect_down(repo:&mut Repository, a:&[u8], b0:&[u8],internal_patch_id:&[u8])
                 pu[0]= PARENT_EDGE|PSEUDO_EDGE;
                 pv[0]= PSEUDO_EDGE;
                 unsafe {
-                    strncpy(pu.as_ptr().offset(1) as *mut c_char, a.as_ptr() as *const c_char, KEY_SIZE as size_t);
-                    strncpy(pv.as_ptr().offset(1) as *mut c_char, b.as_ptr() as *const c_char, KEY_SIZE as size_t);
-                    strncpy(pu.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
-                            internal_patch_id.as_ptr() as *const c_char,
-                            KEY_SIZE as size_t);
-                    strncpy(pv.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
-                            internal_patch_id.as_ptr() as *const c_char,
-                            KEY_SIZE as size_t);
+                    copy_nonoverlapping(a.as_ptr() as *const c_char,
+                         pu.as_ptr().offset(1) as *mut c_char,
+                                        KEY_SIZE);
+                    copy_nonoverlapping(b.as_ptr() as *const c_char,
+                                        pv.as_ptr().offset(1) as *mut c_char,
+                                        KEY_SIZE);
+                    copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
+                                        pu.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                                        KEY_SIZE);
+                    copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
+                                        pv.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                                        KEY_SIZE);
                     k.mv_data= pu.as_ptr().offset(1) as *const c_void;
                     k.mv_size= KEY_SIZE as size_t;
                     v.mv_data= pv.as_ptr() as *const c_void;
@@ -1108,27 +1163,28 @@ pub fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<Vec<
         match *change {
             Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
                 if flag&FOLDER_EDGE != 0 {
-                    let mut p2=vec![0;KEY_SIZE];
-                    unsafe { let _=strncpy(p2.as_ptr() as *mut c_char, internal_patch_id.as_ptr() as *const c_char, HASH_SIZE as size_t); }
+                    let mut node=[0;3+KEY_SIZE];
+                    unsafe { let _=copy_nonoverlapping(internal_patch_id.as_ptr(), node.as_mut_ptr().offset(3), HASH_SIZE); }
                     let mut l0=*line_num + 1;
-                    for i in 0..LINE_SIZE { p2[HASH_SIZE+i]=(l0&0xff) as u8; l0 = l0>>8 }
+                    for i in 0..LINE_SIZE { node[3+HASH_SIZE+i]=(l0&0xff) as u8; l0 = l0>>8 }
                     let mut inode=[0;INODE_SIZE];
-                    let inode_l2 = match updates.get(&p2) {
+                    let inode_l2 = match updates.get(&node[3..]) {
                         None => {
                             create_new_inode(repo, &mut inode[..]);
                             &inode[..]
                         },
                         Some(ref inode)=> &inode[..]
                     };
-                    let mut node=[0;3+KEY_SIZE];
+
                     unsafe {
                         node[1]=(nodes[0][0] & 0xff) as u8;
                         node[2]=(nodes[0][1] & 0xff) as u8;
-                        strncpy(node.as_ptr().offset(3) as *mut c_char, p2.as_ptr() as *const c_char, KEY_SIZE as size_t);
                         let mut k = MDB_val { mv_data:inode_l2.as_ptr() as *const c_void, mv_size:INODE_SIZE as size_t };
                         let mut v = MDB_val { mv_data:node.as_ptr() as *const c_void, mv_size:(3+KEY_SIZE) as size_t };
+                        println!("patch_id {}", internal_patch_id.to_hex());
+                        println!("synchronizing {} {}", inode_l2.to_hex(),node.to_hex());
                         mdb_put(repo.mdb_txn,repo.dbi(DBI::INODES), &mut k, &mut v, 0);
-                        k.mv_data=p2.as_ptr() as *mut c_void;
+                        k.mv_data=node.as_ptr().offset(3) as *mut c_void;
                         k.mv_size=KEY_SIZE as size_t;
                         v.mv_data=inode_l2.as_ptr() as *mut c_void;
                         v.mv_size=INODE_SIZE as size_t;
@@ -1150,4 +1206,40 @@ pub fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<Vec<
 
 pub fn output_repository(repo:&mut Repository, working_copy:&Path){
     unimplemented!()
+}
+
+
+pub fn debug<W>(repo:&mut Repository,w:&mut W) where W:Write {
+    let mut styles=Vec::with_capacity(16);
+    for i in 0..15 {
+        styles.push(("color=").to_string()
+                    +["red","blue","green","black"][(i >> 1)&3]
+                    +if (i as u8)&DELETED_EDGE!=0 { ", style=dashed"} else {""}
+                    +if (i as u8)&PSEUDO_EDGE!=0 { ", style=dotted"} else {""})
+    }
+    w.write(b"digraph{\n");
+    let curs=Cursor::new(repo.mdb_txn,repo.dbi(DBI::NODES)).unwrap();
+    unsafe {
+        let mut k:MDB_val=unsafe {std::mem::zeroed() };
+        let mut v:MDB_val=unsafe {std::mem::zeroed() };
+        let mut e=mdb_cursor_get(curs.cursor,&mut k,&mut v,MDB_cursor_op::MDB_FIRST as c_uint);
+        println!("debug e={}",e);
+        let cur=&[][..];
+        while e==0 {
+            let kk=slice::from_raw_parts(k.mv_data as *const u8,k.mv_size as usize);
+            let vv=slice::from_raw_parts(v.mv_data.offset(1) as *const u8,KEY_SIZE as usize);
+            if kk!=cur {
+                let mut ww:MDB_val=std::mem::zeroed();
+                let f=mdb_get(repo.mdb_txn,repo.dbi(DBI::CONTENTS), &mut k, &mut ww);
+                let cont:&[u8]=
+                    if f==0 { slice::from_raw_parts(ww.mv_data as *const u8,ww.mv_size as usize) } else { &[][..] };
+                write!(w,"n_{}[label=\"{}: {}\"];\n", (&kk).to_hex(), (&kk).to_hex(),
+                       match str::from_utf8(&cont) { Ok(x)=>x.to_string(), Err(_)=> (&cont).to_hex() });
+            }
+            let flag:u8= * (v.mv_data as *const u8);
+            write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", (&kk).to_hex(), (&vv).to_hex(), styles[(flag&0xff) as usize], flag);
+            e=mdb_cursor_get(curs.cursor,&mut k,&mut v,MDB_cursor_op::MDB_NEXT as c_uint);
+        }
+    }
+    w.write(b"}\n");
 }
