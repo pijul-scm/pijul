@@ -16,8 +16,6 @@
   You should have received a copy of the GNU Affero General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-#![feature(custom_derive, plugin)]
-extern crate serde;
 extern crate libc;
 use self::libc::{c_int, c_uint,c_char,c_uchar,c_void,size_t};
 use self::libc::types::os::arch::posix88::mode_t;
@@ -30,6 +28,7 @@ use std;
 use std::collections::HashMap;
 extern crate rand;
 use std::path::{PathBuf,Path};
+
 #[allow(missing_copy_implementations)]
 enum MdbEnv {}
 enum MdbTxn {}
@@ -38,7 +37,13 @@ use std::io::prelude::*;
 use std::io::Error;
 use std::marker::PhantomData;
 use std::collections::HashSet;
+use std::fs::{metadata};
 pub mod fs_representation;
+pub mod patch;
+
+use std::os::unix::fs::PermissionsExt;
+
+use self::patch::{Patch,Change};
 
 type MdbDbi=c_uint;
 #[repr(C)]
@@ -283,17 +288,6 @@ pub fn add_file(repo:&mut Repository, path:&std::path::Path, is_dir:bool)->Resul
     add_inode(repo,&None,path,is_dir)
 }
 
-#[derive(Serialize,Deserialize)]
-pub enum Change {
-    NewNodes{
-        up_context:Vec<Vec<u8>>,
-        down_context:Vec<Vec<u8>>,
-        flag:u8,
-        line_num:usize,
-        nodes:Vec<Vec<u8>>
-    },
-    Edges(Vec<(Vec<u8>, Vec<u8>, u8, Vec<u8>)>)
-}
 
 struct Cursor {
     cursor:*mut MdbCursor,
@@ -653,40 +647,55 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                         current_node
                     } else {
                         // File addition, create appropriate Newnodes.
-                        println!("file addition {:?}, realpath={:?}",current_inode, realpath);
-                        let mut nodes=Vec::new();
-                        let mut lnum= *line_num;
-                        for i in 0..(LINE_SIZE-1) { l2[i]=(lnum & 0xff) as u8; lnum=lnum>>8 }
-                        actions.push(
-                            Change::NewNodes { up_context: vec!(parent_node.unwrap().to_vec()),
-                                               line_num: *line_num,
-                                               down_context: vec!(),
-                                               nodes: vec!(basename.to_vec(),vec!()),
-                                               flag:FOLDER_EDGE }
-                            );
-                        *line_num += 2;
+                        match metadata(&realpath) {
+                            Ok(attr) => {
+                                println!("file addition {:?}, realpath={:?}",current_inode, realpath);
+                                let permissions=attr.permissions().mode();
+                                let is_dir= if attr.is_dir() { 1 } else { 0 };
+                                let mut nodes=Vec::new();
+                                let mut lnum= *line_num;
+                                for i in 0..(LINE_SIZE-1) { l2[i]=(lnum & 0xff) as u8; lnum=lnum>>8 }
 
-                        // Reading the file
-                        nodes.clear();
-                        let mut line=Vec::new();
-                        let f = std::fs::File::open(realpath.as_path());
-                        let mut f = std::io::BufReader::new(f.unwrap());
-                        loop {
-                            match f.read_until('\n' as u8,&mut line) {
-                                Ok(l) => if l>0 { nodes.push(line.clone()) } else { break },
-                                Err(_) => break
+                                let mut name=Vec::with_capacity(basename.len()+2);
+                                let int_attr=permissions | is_dir << 9;
+                                name.push(((int_attr >> 8) & 0xff) as u8);
+                                name.push((int_attr & 0xff) as u8);
+                                for c in basename { name.push(*c) }
+                                actions.push(
+                                    Change::NewNodes { up_context: vec!(parent_node.unwrap().to_vec()),
+                                                       line_num: *line_num,
+                                                       down_context: vec!(),
+                                                       nodes: vec!(name,vec!()),
+                                                       flag:FOLDER_EDGE }
+                                    );
+                                *line_num += 2;
+
+                                // Reading the file
+                                nodes.clear();
+                                let mut line=Vec::new();
+                                let f = std::fs::File::open(realpath.as_path());
+                                let mut f = std::io::BufReader::new(f.unwrap());
+                                loop {
+                                    match f.read_until('\n' as u8,&mut line) {
+                                        Ok(l) => if l>0 { nodes.push(line.clone()) } else { break },
+                                        Err(_) => break
+                                    }
+                                }
+                                let len=nodes.len();
+                                actions.push(
+                                    Change::NewNodes { up_context:vec!(l2.to_vec()),
+                                                       line_num: *line_num,
+                                                       down_context: vec!(),
+                                                       nodes: nodes,
+                                                       flag:0 }
+                                    );
+                                *line_num+=len;
+                                &l2[..]
+                            },
+                            Err(_)=>{
+                                panic!("error adding a file (metadata failed)")
                             }
                         }
-                        let len=nodes.len();
-                        actions.push(
-                            Change::NewNodes { up_context:vec!(l2.to_vec()),
-                                               line_num: *line_num,
-                                               down_context: vec!(),
-                                               nodes: nodes,
-                                               flag:0 }
-                            );
-                        *line_num+=len;
-                        &l2[..]
                     }
                 },
                 None => { root_key }
@@ -898,11 +907,6 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
     }
 }
 
-#[derive(Serialize,Deserialize)]
-pub struct Patch {
-    pub changes:Vec<Change>
-}
-
 
 fn new_internal(repo:&mut Repository,result:&mut[u8],external:&[u8]) {
     let curs=Cursor::new(repo.mdb_txn,repo.dbi(DBI::EXTERNALHASHES)).unwrap();
@@ -979,7 +983,9 @@ pub fn apply(repo:&mut Repository, changes:&[Change], external_id:&[u8], intid:&
                     }
                 }
             },
-            _ => { unimplemented!() } // c'est un conflit de toute façon
+            _ => {
+                //unimplemented!()
+            } // c'est un conflit de toute façon
         }
     }
 }

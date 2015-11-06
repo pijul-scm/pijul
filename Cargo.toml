@@ -10,7 +10,7 @@ clap = "*"
 rand="*"
 serde = "*"
 serde_macros = "*"
-serde_json = "*"
+serde_cbor = "*"
 rust-crypto = "*"
 
 [build-dependencies]

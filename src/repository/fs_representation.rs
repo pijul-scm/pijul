@@ -51,8 +51,9 @@ pub fn create(dir : &Path) -> io::Result<()> {
     let mut repo_dir = repo_dir(dir);
     try!(create_dir(&repo_dir));
     repo_dir.push("pristine");
-    create_dir(&repo_dir);
+    try!(create_dir(&repo_dir));
     repo_dir.pop();
     repo_dir.push("patches");
-    create_dir(&repo_dir)
+    try!(create_dir(&repo_dir));
+    Ok(())
 }

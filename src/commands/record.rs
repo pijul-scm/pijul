@@ -20,7 +20,8 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches};
 
 use commands::StaticSubcommand;
-use repository::{Repository,record,apply,sync_files,HASH_SIZE, Patch};
+use repository::{Repository,record,apply,sync_files,HASH_SIZE};
+use repository::patch::{Patch};
 use repository::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root};
 
 use std;
@@ -32,10 +33,12 @@ extern crate crypto;
 use crypto::digest::Digest;
 use crypto::sha2::Sha512;
 
-extern crate serde_json;
-use self::serde_json::Value;
+extern crate serde_cbor;
+
 use std::io::BufWriter;
 use std::fs::File;
+extern crate rand;
+use std::path::{Path};
 
 
 pub fn invocation() -> StaticSubcommand {
@@ -50,6 +53,7 @@ pub fn parse_args(_: &ArgMatches) -> () {}
 pub enum Error {
     NotInARepository,
     IoError(io::Error),
+    Serde(serde_cbor::error::Error),
 }
 
 impl fmt::Display for Error {
@@ -57,6 +61,7 @@ impl fmt::Display for Error {
         match *self {
             Error::NotInARepository => write!(f, "Not in a repository"),
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
+            Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
         }
     }
 }
@@ -66,12 +71,14 @@ impl error::Error for Error {
         match *self {
             Error::NotInARepository => "not in a repository",
             Error::IoError(ref err) => error::Error::description(err),
+            Error::Serde(ref err) => serde_cbor::error::Error::description(err),
         }
     }
 
     fn cause(&self) -> Option<&error::Error> {
         match *self {
             Error::IoError(ref err) => Some(err),
+            Error::Serde(ref err) => Some(err),
             Error::NotInARepository => None
         }
     }
@@ -81,6 +88,20 @@ impl From<io::Error> for Error {
     fn from(err: io::Error) -> Error {
         Error::IoError(err)
     }
+}
+
+fn write_patch<'a>(patch:&Patch,dir:&Path)->Result<String,Error>{
+    let mut name:[u8;20]=[0;20];
+    for i in 0..name.len() { let r:u8=rand::random(); name[i] = 97 + (r%26) }
+    let tmp=dir.join(std::str::from_utf8(&name[..]).unwrap());
+    let mut buffer = BufWriter::new(try!(File::create(&tmp))); // change to uuid
+    try!(serde_cbor::ser::to_writer(&mut buffer,&patch).map_err(Error::Serde));
+    // hash
+    let mut hasher = Sha512::new();
+    hasher.input_str("hello world");
+    let hash = hasher.result_str();
+    try!(std::fs::rename(tmp,dir.join(&hash).with_extension("cbor")).map_err(Error::IoError));
+    Ok(hash)
 }
 
 pub fn run(_ : &()) -> Result<Option<()>, Error> {
@@ -101,20 +122,13 @@ pub fn run(_ : &()) -> Result<Option<()>, Error> {
                 let patch = Patch { changes:changes };
                 // save patch
                 let patches_dir=patches_dir(r);
-                let tmp=patches_dir.join("patch");
-                println!("{:?}",tmp);
-                let mut buffer = BufWriter::new(try!(File::create(tmp))); // change to uuid
-                serde_json::ser::to_writer(&mut buffer,&patch);
+                let hash=write_patch(&patch,&patches_dir).unwrap();
 
-                // hash
-                let mut hasher = Sha512::new();
-                hasher.input_str("hello world");
-                let hash = hasher.result_str();
 
                 let mut repo = try!(Repository::new(&repo_dir));
 
                 let mut intid=[0;HASH_SIZE];
-                apply(&mut repo, &patch.changes[..], hash.as_bytes(), &mut intid[..]);
+                apply(&mut repo, &patch.changes[..], hash[..].as_bytes(), &mut intid[..]);
                 sync_files(&mut repo,&patch.changes[..],&syncs, &[0;HASH_SIZE][..]);
                 Ok(Some(()))
             }
