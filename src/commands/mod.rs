@@ -7,6 +7,7 @@ pub mod check;
 pub mod init;
 pub mod record;
 pub mod add;
+mod test;
 
 pub fn all_command_invocations() -> Vec<StaticSubcommand> {
     return vec![

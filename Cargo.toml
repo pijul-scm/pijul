@@ -13,6 +13,7 @@ serde_macros = "*"
 serde_cbor = "*"
 rust-crypto = "*"
 rustc-serialize = "*"
+tempdir="*"
 
 [build-dependencies]
 gcc="*"
