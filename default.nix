@@ -1,6 +1,6 @@
 with (import <nixpkgs> {});
 
-rustPlatform.buildRustPackage rec {
+rustUnstable.buildRustPackage rec {
   name = "rust-pijul-${version}";
   version = "0.0";
   src = ./.;
