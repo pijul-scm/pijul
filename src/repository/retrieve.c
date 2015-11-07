@@ -136,15 +136,19 @@ int get(struct hashtable*t,char*key,void**value){
 #define PARENT_EDGE 4
 #define DELETED_EDGE 8
 
-int c_retrieve(MDB_txn* txn,MDB_dbi dbi,char*key, struct c_line**result){
+struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi,unsigned char*key){
   struct hashtable*cache=new_hashtable(1024);
 
-  struct c_line* retrieve_dfs(char*key) {
+
+  struct c_line* retrieve_dfs(unsigned char*key) {
+    //printf("retrieve_dfs: /");
+    //int i;for(i=0;i<KEY_SIZE;i++) printf("%02x", key[i]); printf("\n");
     struct c_line* l;
     int ret=get(cache,key,(void*) &l);
-    if(ret){
+    if(ret==0){
       return l;
     } else {
+      //printf("not found\n");
       l=malloc(sizeof(struct c_line));
       memset(l,0,sizeof(struct c_line));
       l->key=key;
@@ -159,15 +163,18 @@ int c_retrieve(MDB_txn* txn,MDB_dbi dbi,char*key, struct c_line**result){
       k.mv_data=l->key;
       k.mv_size=KEY_SIZE;
       ret=mdb_cursor_get(curs,&k,&v,MDB_GET_BOTH_RANGE);
+      //printf("ret=%d\n",ret);
       while(!ret && (((char*)v.mv_data)[0]==0 || ((char*)v.mv_data)[0]==PSEUDO_EDGE)){
-        push_children(l,retrieve_dfs(v.mv_data));
+        //printf("ret=%d\n",ret);
+        push_children(l,retrieve_dfs(v.mv_data+1));
         ret=mdb_cursor_get(curs,&k,&v,MDB_NEXT_DUP);
       }
       mdb_cursor_close(curs);
       return l;
     }
   }
-  *result=retrieve_dfs(key);
+  struct c_line *result=retrieve_dfs(key);
+  //printf("retrieved\n");
   free_hashtable(cache);
-  if(*result) return 0; else return 1;
+  return result;
 }

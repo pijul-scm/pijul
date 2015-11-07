@@ -24,6 +24,14 @@ pub type ExternalHash=Vec<u8>;
 pub type Flag=u8;
 
 #[derive(Serialize,Deserialize,Debug)]
+pub struct Edge {
+    pub from:ExternalKey,
+    pub to:ExternalKey,
+    pub flag:Flag,
+    pub introduced_by:ExternalHash
+}
+
+#[derive(Serialize,Deserialize,Debug)]
 pub enum Change {
     NewNodes{
         up_context:Vec<ExternalKey>,
@@ -32,7 +40,7 @@ pub enum Change {
         line_num:usize,
         nodes:Vec<Vec<u8>>
     },
-    Edges(Vec<(ExternalKey, ExternalKey, Flag, ExternalHash)>)
+    Edges(Vec<Edge>)
 }
 
 #[derive(Serialize,Deserialize,Debug)]
