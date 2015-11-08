@@ -91,7 +91,7 @@ extern "C" {
     fn mdb_reader_check(env:*mut MdbEnv,dead:*mut c_int)->c_int;
     fn mdb_txn_begin(env: *mut MdbEnv,parent: *mut MdbTxn, flags:c_uint, txn: *mut *mut MdbTxn)->c_int;
     fn mdb_txn_commit(txn: *mut MdbTxn)->c_int;
-    //fn mdb_txn_abort(txn: *mut MdbTxn);
+    fn mdb_txn_abort(txn: *mut MdbTxn);
     fn mdb_dbi_open(txn: *mut MdbTxn, name: *const c_char, flags:c_uint, dbi:*mut MdbDbi)->c_int;
     fn mdb_get(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
     fn mdb_put(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
@@ -206,8 +206,11 @@ impl Repository {
 impl Drop for Repository {
     fn drop(&mut self){
         unsafe {
-            println!("commiting transaction");
-            mdb_txn_commit(self.mdb_txn);
+            if std::thread::panicking() {
+                mdb_txn_abort(self.mdb_txn);
+            } else {
+                mdb_txn_commit(self.mdb_txn);
+            }
             mdb_env_close(self.mdb_env)
         }
     }
@@ -269,11 +272,11 @@ fn add_inode(repo:&mut Repository, inode:&Option<[u8;INODE_SIZE]>, path:&std::pa
                     };
                     v.mv_data=inode.as_ptr() as *const c_void;
                     v.mv_size=INODE_SIZE as size_t;
-                    println!("add_inode.adding {:?} !",buf);
+                    //println!("add_inode.adding {:?} !",buf);
                     let mut e=unsafe { mdb_put(repo.mdb_txn,repo.dbi(DBI::TREE),&mut k,&mut v,0) };
-                    println!("adding e={}",e);
+                    //println!("adding e={}",e);
                     e= unsafe { mdb_put(repo.mdb_txn,repo.dbi(DBI::REVTREE),&mut v,&mut k,0) };
-                    println!("adding e={}",e);
+                    //println!("adding e={}",e);
                     if cs.is_some() || is_dir {
                         k.mv_data="".as_ptr() as *const c_void;
                         k.mv_size=0;
@@ -293,7 +296,7 @@ fn add_inode(repo:&mut Repository, inode:&Option<[u8;INODE_SIZE]>, path:&std::pa
 }
 
 pub fn add_file(repo:&mut Repository, path:&std::path::Path, is_dir:bool)->Result<(),()>{
-    println!("Adding {:?}",path);
+    //println!("Adding {:?}",path);
     add_inode(repo,&None,path,is_dir)
 }
 
@@ -501,7 +504,7 @@ fn external_key(repo:&mut Repository,key:&[u8])->Vec<u8> {
             if key.len()==KEY_SIZE { for c in &key[HASH_SIZE..KEY_SIZE] { result.push(*c) } }
             result
         } else {
-            println!("internal key:{:?}",key);
+            //println!("internal key:{:?}",key);
             panic!("external key not found !")
         }
     }
@@ -509,7 +512,7 @@ fn external_key(repo:&mut Repository,key:&[u8])->Vec<u8> {
 
 fn delete_edges<'a>(repo:&mut Repository, edges:&mut Vec<Edge>, key:&'a[u8]){
     // Get external key for "key"
-    println!("delete key: {}",key.to_hex());
+    //println!("delete key: {}",key.to_hex());
     let ext_key=external_key(repo,key);
 
     // Then collect edges to delete
@@ -520,7 +523,7 @@ fn delete_edges<'a>(repo:&mut Repository, edges:&mut Vec<Edge>, key:&'a[u8]){
             let mut v = MDB_val{ mv_data:(c as *const c_uchar) as *const c_void, mv_size:1 };
             let mut e= mdb_cursor_get(curs.cursor, &mut k,&mut v,MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint);
             // take all parent or folder-parent edges:
-            println!("e={}",e);
+            //println!("e={}",e);
             while e==0 && v.mv_size>0 && *(v.mv_data as (*mut c_uchar)) == *c {
                 if (v.mv_size as usize) < 1+HASH_SIZE+KEY_SIZE {
                     panic!("Wrong encoding in delete_edges")
@@ -528,9 +531,9 @@ fn delete_edges<'a>(repo:&mut Repository, edges:&mut Vec<Edge>, key:&'a[u8]){
                 // look up the external hash up.
                 let pv=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1), KEY_SIZE as usize);
                 let pp=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1+KEY_SIZE as isize), HASH_SIZE as usize);
-                println!("get key pv");
+                //println!("get key pv");
                 let _=external_key(repo,pv);
-                println!("get key pp");
+                //println!("get key pp");
                 let _=external_key(repo,pp);
 
                 edges.push(Edge { from:ext_key.clone(), to:external_key(repo,pv), flag:(*c)^DELETED_EDGE, introduced_by:external_key(repo,pp) });
@@ -604,31 +607,60 @@ fn diff(repo:&mut Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&m
             }
             actions.push(Change::Edges(edges))
         }
+        let mut oi=None;
+        let mut oj=None;
         while i<contents_a.len() && j<b.len() {
             if contents_a[i]==b[j] {
-                //println!("contents{} {}/{}=={},{}",i,j,b.len(),str::from_utf8(contents_a[i]).unwrap(),str::from_utf8(b[j]).unwrap());
-                i+=1; j+=1
-            }
-            else {
-                let i0=i;
-                while i<contents_a.len() && opt[i+1][j]>=opt[i][j+1] { i+=1 };
-                if i>i0 {
-                    delete_lines(repo,actions, &lines_a[i0..i-1])
+                if let Some(i0)=oi {
+                    delete_lines(repo,actions, &lines_a[i0..i]);
+                    oi=None
+                } else if let Some(j0)=oj {
+                    add_lines(repo,actions, line_num,
+                              lines_a[i-1], // up context
+                              &lines_a[i..i+1], // down context
+                              &b[j0..j]);
+                    oj=None
                 }
-                if i<contents_a.len() {
-                    let j0=j;
-                    while j<b.len() && opt[i+1][j] < opt[i][j+1] { j+=1 };
-                    if j>j0 { add_lines(repo,actions, line_num, lines_a[i-1], if i<lines_a.len() {&lines_a[i..i+1]} else { &[][..] }, &b[j0..j]) }
+                i+=1; j+=1;
+            } else {
+                if opt[i+1][j] >= opt[i][j+1] {
+                    if let Some(j0)=oj {
+                        add_lines(repo,actions, line_num,
+                                  lines_a[i-1], // up context
+                                  &lines_a[i..i+1], // down context
+                                  &b[j0..j]);
+                        oj=None
+                    }
+                    if oi.is_none() { oi=Some(i) }
+                    i+=1
+                } else {
+                    if let Some(i0)=oi {
+                        delete_lines(repo,actions, &lines_a[i0..i]);
+                        oi=None
+                    }
+                    if oj.is_none() { oj=Some(j) }
+                    j+=1
                 }
             }
         }
-        if i < lines_a.len() { delete_lines(repo,actions, &lines_a[i..lines_a.len()]) }
-        else if j+1 < b.len() { add_lines(repo,actions, line_num, lines_a[i-1], &[][..], &b[j+1..b.len()]) }
+        if i < lines_a.len() {
+            if let Some(j0)=oj {
+                add_lines(repo,actions, line_num,
+                          lines_a[i-1], // up context
+                          &lines_a[i..i+1], // down context
+                          &b[j0..j])
+            }
+            delete_lines(repo,actions, &lines_a[i..lines_a.len()])
+        } else if j < b.len() {
+            if let Some(i0)=oi {
+                delete_lines(repo,actions, &lines_a[i0..i]);
+            }
+            add_lines(repo,actions, line_num, lines_a[i-1], &[][..], &b[j..b.len()])
+        }
     }
     match err {
         Ok(_)=>{
             local_diff(repo,actions, line_num, &lines_a,&contents_a,&lines_b[..]);
-            println!("diff done");
             Ok(())
         },
         Err(e)=>Err(e)
@@ -657,7 +689,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
         let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
         let root_key=&ROOT_KEY[..];
         let mut l2=[0;LINE_SIZE];
-        println!("record, cur={}",current_inode.to_hex());
+        //println!("record, cur={}",current_inode.to_hex());
         let current_node=
             match parent_inode {
                 Some(parent_inode) => {
@@ -666,7 +698,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                     let e = unsafe { mdb_get(repo.mdb_txn,repo.dbi(DBI::INODES),&mut k, &mut v) };
                     if e==0 { // This inode already has a corresponding node
                         let current_node=unsafe { slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize) };
-                        println!("Existing node: {}",current_node.to_hex());
+                        //println!("Existing node: {}",current_node.to_hex());
                         if current_node[0]==1 {
                             // file moved
                         } else if current_node[0]==2 {
@@ -674,7 +706,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                         } else if current_node[0]==0 {
                             // file not moved, we need to diff
                             let ret=retrieve(repo,&current_node[3..]);
-                            println!("retrieved");
+                            //println!("retrieved");
                             diff(repo,line_num,actions, &mut ret.unwrap(), realpath.as_path()).unwrap()
                         } else {
                             panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
@@ -684,7 +716,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                         // File addition, create appropriate Newnodes.
                         match metadata(&realpath) {
                             Ok(attr) => {
-                                println!("file addition, realpath={:?}", realpath);
+                                //println!("file addition, realpath={:?}", realpath);
                                 let permissions=attr.permissions().mode();
                                 let is_dir= if attr.is_dir() { 1 } else { 0 };
                                 let mut nodes=Vec::new();
@@ -747,7 +779,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
 
             if k.mv_size>INODE_SIZE as size_t {
                 let (_,next_basename)=(unsafe {slice::from_raw_parts(k.mv_data as *const u8,k.mv_size as usize)}).split_at(INODE_SIZE);
-                println!("next_basename={:?}",String::from_utf8_lossy(next_basename));
+                //println!("next_basename={:?}",String::from_utf8_lossy(next_basename));
                 let _=
                     dfs(repo, actions,line_num,updatables,
                         Some(current_inode), // parent_inode
@@ -769,7 +801,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
     dfs(repo,&mut actions,&mut line_num,&mut updatables,
         None,None,&ROOT_INODE[..],&mut realpath,
         &[][..]);
-    println!("record done");
+    //println!("record done");
     Ok((actions,updatables))
 }
 
@@ -785,7 +817,7 @@ fn internal_hash<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&'a [u8])->&'a [u8] {
             if e==0 {
                 slice::from_raw_parts(v.mv_data as *const c_uchar, v.mv_size as usize)
             } else {
-                println!("external key:{}",key.to_hex());
+                //println!("external key:{}",key.to_hex());
                 panic!("internal key not found !")
             }
         }
@@ -885,13 +917,13 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                         let mut v1 = MDB_val { mv_data:pv.as_ptr() as *const c_void,
                                                mv_size:(1+KEY_SIZE+HASH_SIZE) as size_t };
                         {
-                            println!("c.len={}, LINE_SIZE={}",c.len(), LINE_SIZE);
+                            //println!("c.len={}, LINE_SIZE={}",c.len(), LINE_SIZE);
                             let u= if c.len()>LINE_SIZE {
                                 internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&c[0..(c.len()-LINE_SIZE)])
                             } else {
                                 internal_patch_id
                             };
-                            println!("u={}",u.to_hex());
+                            //println!("u={}",u.to_hex());
                             copy_nonoverlapping(u.as_ptr() as *const c_char,
                                  pu.as_ptr().offset(1) as *mut c_char,
                                  HASH_SIZE);
@@ -968,7 +1000,7 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                             };
                             copy_nonoverlapping(u.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE)
                         }
-                        println!("c.len={}",c.len());
+                        //println!("c.len={}",c.len());
                         copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize) as *const c_char,
                                             pu.as_ptr().offset((1+HASH_SIZE) as isize) as *mut c_char,
                                             LINE_SIZE);
@@ -1016,8 +1048,8 @@ fn new_internal(repo:&mut Repository,result:&mut[u8],external:&[u8]) {
     }
     create_new(result,last,last.len()-1);
     unsafe {
-        println!("apply:registering external {}",external.to_hex());
-        println!("apply:registering external {}",result.to_hex());
+        //println!("apply:registering external {}",external.to_hex());
+        //println!("apply:registering external {}",result.to_hex());
         let mut exter = MDB_val { mv_data:external.as_ptr() as *const c_void, mv_size:external.len() as size_t };
         let mut inter = MDB_val { mv_data:result.as_ptr() as *const c_void, mv_size:HASH_SIZE as size_t};
         let _=mdb_put(repo.mdb_txn,repo.dbi(DBI::EXTERNALHASHES),&mut inter, &mut exter, MDB_NODUPDATA);
@@ -1201,7 +1233,7 @@ pub fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<Vec<
                     let mut l0=*line_num + 1;
                     for i in 0..LINE_SIZE { node[3+HASH_SIZE+i]=(l0&0xff) as u8; l0 = l0>>8 }
                     let mut inode=[0;INODE_SIZE];
-                    println!("node={}", node[3..].to_hex());
+                    //println!("node={}", node[3..].to_hex());
                     let inode_l2 = match updates.get(&node[(3+HASH_SIZE)..]) {
                         None => {
                             create_new_inode(repo, &mut inode[..]);
@@ -1215,8 +1247,8 @@ pub fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<Vec<
                         node[2]=(nodes[0][1] & 0xff) as u8;
                         let mut k = MDB_val { mv_data:inode_l2.as_ptr() as *const c_void, mv_size:INODE_SIZE as size_t };
                         let mut v = MDB_val { mv_data:node.as_ptr() as *const c_void, mv_size:(3+KEY_SIZE) as size_t };
-                        println!("patch_id {}", internal_patch_id.to_hex());
-                        println!("synchronizing {} {}", inode_l2.to_hex(),node.to_hex());
+                        //println!("patch_id {}", internal_patch_id.to_hex());
+                        //println!("synchronizing {} {}", inode_l2.to_hex(),node.to_hex());
                         mdb_put(repo.mdb_txn,repo.dbi(DBI::INODES), &mut k, &mut v, 0);
                         k.mv_data=node.as_ptr().offset(3) as *mut c_void;
                         k.mv_size=KEY_SIZE as size_t;
@@ -1256,7 +1288,7 @@ pub fn debug<W>(repo:&mut Repository,w:&mut W) where W:Write {
         let mut k:MDB_val=unsafe {std::mem::zeroed() };
         let mut v:MDB_val=unsafe {std::mem::zeroed() };
         let mut e=mdb_cursor_get(curs.cursor,&mut k,&mut v,MDB_cursor_op::MDB_FIRST as c_uint);
-        println!("debug e={}",e);
+        //println!("debug e={}",e);
         let cur=&[][..];
         while e==0 {
             let kk=slice::from_raw_parts(k.mv_data as *const u8,k.mv_size as usize);
