@@ -44,12 +44,12 @@ pub mod patch;
 
 use std::os::unix::fs::PermissionsExt;
 
-use self::patch::{Patch,Change,Edge};
+use self::patch::{Change,Edge};
 
 
 extern crate rustc_serialize;
 
-use self::rustc_serialize::hex::{FromHex, ToHex};
+use self::rustc_serialize::hex::{ToHex};
 
 
 
@@ -273,9 +273,9 @@ fn add_inode(repo:&mut Repository, inode:&Option<[u8;INODE_SIZE]>, path:&std::pa
                     v.mv_data=inode.as_ptr() as *const c_void;
                     v.mv_size=INODE_SIZE as size_t;
                     //println!("add_inode.adding {:?} !",buf);
-                    let mut e=unsafe { mdb_put(repo.mdb_txn,repo.dbi(DBI::TREE),&mut k,&mut v,0) };
+                    unsafe { mdb_put(repo.mdb_txn,repo.dbi(DBI::TREE),&mut k,&mut v,0) };
                     //println!("adding e={}",e);
-                    e= unsafe { mdb_put(repo.mdb_txn,repo.dbi(DBI::REVTREE),&mut v,&mut k,0) };
+                    unsafe { mdb_put(repo.mdb_txn,repo.dbi(DBI::REVTREE),&mut v,&mut k,0) };
                     //println!("adding e={}",e);
                     if cs.is_some() || is_dir {
                         k.mv_data="".as_ptr() as *const c_void;
@@ -320,6 +320,7 @@ impl Drop for Cursor {
     }
 }
 
+const LINE_HALF_DELETED:c_uchar=16;
 const LINE_VISITED:c_uchar=8;
 const LINE_ONSTACK:c_uchar=4;
 const LINE_SPIT:c_uchar=2;
@@ -396,7 +397,9 @@ struct Proj<'a> {
     counts:Vec<usize>,
     lines:Vec<Vec<*mut c_line>>,
     i:usize,
-    phantom: PhantomData<&'a()>
+    phantom: PhantomData<&'a()>,
+    visited:HashSet<*const c_line>,
+    nodes:Vec<&'a[u8]>
 }
 
 impl<'a> Proj<'a> {
@@ -441,24 +444,68 @@ impl<'a> Proj<'a> {
             counts:counts,
             lines:lines,
             i:0,
-            phantom:PhantomData
+            phantom:PhantomData,
+            visited:HashSet::new(),
+            nodes:Vec::new()
         }
     }
 }
 
 
 impl <'a> Iterator for Proj<'a> {
-    type Item = Vec<&'a[u8]>;
-    fn next(&mut self)->Option<Vec<&'a[u8]>>{
+    type Item = Vec<Vec<&'a[u8]>>;
+    fn next(&mut self)->Option<Vec<Vec<&'a[u8]>>>{
         if self.i >= self.counts.len() { None } else {
             unsafe {
                 if *self.counts.get_unchecked(self.i) == 1 {
                     let l = self.lines.get_unchecked(self.i) [0];
                     self.i+=1;
-                    Some(vec!(slice::from_raw_parts((*l).key as *const u8, KEY_SIZE)))
+                    Some(vec!(vec!(slice::from_raw_parts((*l).key as *const u8, KEY_SIZE))))
                 } else {
                     // conflit
-                    unimplemented!()
+                    fn get_conflict<'a>(counts:&Vec<usize>, l:*const c_line, conflict:&mut Vec<Vec<&'a[u8]>>,
+                                        nodes:&mut Vec<&'a[u8]>, visited:&mut HashSet<*const c_line>, next:&mut usize) {
+                        unsafe {
+                            if counts[(*l).lowlink as usize] <= 1 {
+                                conflict.push(nodes.clone());
+                                *next=(*l).lowlink as usize
+                            } else {
+                                if !visited.contains(&l) {
+                                    visited.insert(l);
+                                    let mut min_order=None;
+                                    for c in 0..(*l).children_off {
+                                        let ll=(**((*l).children.offset(c as isize))).lowlink;
+                                        min_order=Some(match min_order { None=>ll, Some(m)=>std::cmp::min(m,ll) })
+                                    }
+                                    match min_order {
+                                        None=>(),
+                                        Some(m)=>{
+                                            if (*l).flags & LINE_HALF_DELETED != 0 {
+                                                for c in 0..(*l).children_off {
+                                                    let chi=*((*l).children.offset(c as isize));
+                                                    if (*chi).lowlink==m { get_conflict(counts,chi,conflict,nodes,visited,next) }
+                                                }
+                                            }
+                                            nodes.push(slice::from_raw_parts((*l).key as *const u8, KEY_SIZE));
+                                            for c in 0..(*l).children_off {
+                                                let chi=*((*l).children.offset(c as isize));
+                                                if (*chi).lowlink==m { get_conflict(counts,chi,conflict,nodes,visited,next) }
+                                            }
+                                            let _=nodes.pop();
+                                        }
+                                    }
+                                    let _=visited.remove(&l);
+                                }
+                            }
+                        }
+                    }
+                    let mut conflict=Vec::new();
+                    for j in 0..(self.lines.len()) {
+                        self.visited.clear();
+                        self.nodes.clear();
+                        get_conflict(&self.counts,self.lines[self.i][j], &mut conflict, &mut self.nodes, &mut self.visited,&mut self.i)
+                    }
+                    Some(conflict)
                 }
             }
         }
@@ -481,14 +528,28 @@ fn contents<'a>(repo:&mut Repository, key:&'a[u8])->&'a[u8] {
     }
 }
 
-fn push_conflict<'a>(repo:&mut Repository,lines_a:&mut Vec<&'a[u8]>, contents_a:&mut Vec<&'a[u8]>, l:Vec<&'a[u8]>) {
-    if l.len()==1 {
-        lines_a.push(&l[0]);
-        let cont=contents(repo,&l[0]);
-        //println!("cont={}",str::from_utf8(cont).unwrap());
-        contents_a.push(cont)
-    } else {
-        unimplemented!()
+fn push_conflict<'a>(repo:&mut Repository,lines_a:&mut Vec<&'a[u8]>, contents_a:&mut Vec<&'a[u8]>, l:Vec<Vec<&'a[u8]>>) {
+    if l.len()>0 {
+        if l[0].len()==1 {
+            lines_a.push(&l[0][0]);
+            let cont=contents(repo,&l[0][0]);
+            contents_a.push(cont)
+        } else {
+            lines_a.push(&[][..]);
+            contents_a.push(b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
+            for i in 0..l.len() {
+                if i>0 {
+                    lines_a.push(&[][..]);
+                    contents_a.push(b"================================")
+                }
+                for j in 0..l[i].len() {
+                    lines_a.push(l[i][j]);
+                    contents_a.push(contents(repo,l[i][j]))
+                }
+            }
+            lines_a.push(&[][..]);
+            contents_a.push(b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
+        }
     }
 }
 
@@ -815,7 +876,7 @@ fn internal_hash<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&'a [u8])->&'a [u8] {
             let mut v:MDB_val =std::mem::zeroed();
             let e = mdb_get(txn,dbi,&mut k, &mut v);
             if e==0 {
-                slice::from_raw_parts(v.mv_data as *const c_uchar, v.mv_size as usize)
+                slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)
             } else {
                 //println!("external key:{}",key.to_hex());
                 panic!("internal key not found !")
@@ -841,24 +902,24 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                     pv[0]=e.flag ^ DELETED_EDGE;
                     let _=unsafe {
                         let u=internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&e.from[0..(e.from.len()-LINE_SIZE)]);
-                        copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize) as *const c_char,
-                                            pu.as_ptr().offset(1+HASH_SIZE as isize) as *mut c_char, LINE_SIZE);
-                        copy_nonoverlapping(u.as_ptr() as *const c_char,pu.as_ptr().offset(1) as *mut c_char, HASH_SIZE)
+                        copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize),
+                                            pu.as_mut_ptr().offset(1+HASH_SIZE as isize), LINE_SIZE);
+                        copy_nonoverlapping(u.as_ptr(),pu.as_mut_ptr().offset(1), HASH_SIZE)
                     };
                     let _=unsafe {
                         let v=internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&e.to[0..(e.to.len()-LINE_SIZE)]);
-                        copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize) as *const c_char,
-                                            pv.as_ptr().offset(1+HASH_SIZE as isize) as *mut c_char, LINE_SIZE);
-                        copy_nonoverlapping(v.as_ptr() as *const c_char,pv.as_ptr().offset(1) as *mut c_char, HASH_SIZE)
+                        copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize),
+                                            pv.as_mut_ptr().offset(1+HASH_SIZE as isize), LINE_SIZE);
+                        copy_nonoverlapping(v.as_ptr(),pv.as_mut_ptr().offset(1), HASH_SIZE)
                     };
                     //println!("internal: {}\n          {}",pu.to_hex(),pv.to_hex());
                     let _=unsafe {
                         let p=internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&e.introduced_by[..]);
-                        copy_nonoverlapping(p.as_ptr() as *const c_char,
-                             pu.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                        copy_nonoverlapping(p.as_ptr(),
+                             pu.as_mut_ptr().offset(1+KEY_SIZE as isize),
                              HASH_SIZE);
-                        copy_nonoverlapping(p.as_ptr() as *const c_char,
-                             pv.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                        copy_nonoverlapping(p.as_ptr(),
+                             pv.as_mut_ptr().offset(1+KEY_SIZE as isize),
                              HASH_SIZE)
                     };
                     let _=unsafe {
@@ -898,14 +959,14 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                 let mut lnum0= *line_num;
                 for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
                 let _= unsafe {
-                    copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
-                         pu.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                    copy_nonoverlapping(internal_patch_id.as_ptr(),
+                         pu.as_mut_ptr().offset(1+KEY_SIZE as isize),
                          HASH_SIZE);
-                    copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
-                         pv.as_ptr().offset(1+KEY_SIZE as isize) as *mut c_char,
+                    copy_nonoverlapping(internal_patch_id.as_ptr(),
+                         pv.as_mut_ptr().offset(1+KEY_SIZE as isize),
                          HASH_SIZE);
-                    copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
-                         pv.as_ptr().offset(1) as *mut c_char,
+                    copy_nonoverlapping(internal_patch_id.as_ptr(),
+                         pv.as_mut_ptr().offset(1),
                          HASH_SIZE)
                 };
                 //println!("pu={}",pu.to_hex());
@@ -928,18 +989,18 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                                  pu.as_ptr().offset(1) as *mut c_char,
                                  HASH_SIZE);
                         }
-                        copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize) as *const c_char,
-                                            pu.as_ptr().offset((1+HASH_SIZE) as isize) as *mut c_char,
+                        copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
+                                            pu.as_mut_ptr().offset((1+HASH_SIZE) as isize),
                                             LINE_SIZE);
                         pu[0]= (*flag) ^ PARENT_EDGE;
                         pv[0]= *flag;
-                        let e=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                        mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
                         v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
                         v0.mv_size=KEY_SIZE as size_t;
                         v1.mv_data=pu.as_ptr() as *const c_void;
                         v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
                         //println!("put (up): {}",pu.to_hex());
-                        let e=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                        mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
                         //println!("put e={}",e);
                     }
                 }
@@ -951,7 +1012,6 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                 }
 
                 let mut lnum= *line_num + 1;
-                let mut uv=false;
                 let mut v0:MDB_val = unsafe { std::mem::zeroed () };
                 let mut v1:MDB_val = unsafe { std::mem::zeroed () };
                 unsafe {
@@ -959,7 +1019,7 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                     v0.mv_size=KEY_SIZE as size_t;
                     v1.mv_data=nodes[0].as_ptr() as *const c_void;
                     v1.mv_size=nodes[0].len() as size_t;
-                    let e=mdb_put(repo.mdb_txn,repo.dbi(DBI::CONTENTS),&mut v0, &mut v1, 0);
+                    mdb_put(repo.mdb_txn,repo.dbi(DBI::CONTENTS),&mut v0, &mut v1, 0);
                 }
                 for n in &nodes[1..] {
                     let mut lnum0=lnum-1;
@@ -980,12 +1040,12 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                         v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
                         //println!("lnum={}",lnum);
                         //println!("adding node {} -> {}", pu.to_hex(), pv.to_hex());
-                        let e=mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
+                        mdb_put(repo.mdb_txn,repo.dbi(DBI::NODES),&mut v0, &mut v1, MDB_NODUPDATA);
                         v1.mv_data=n.as_ptr() as *const c_void;
                         v1.mv_size=n.len() as size_t;
                         v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
                         v0.mv_size=KEY_SIZE as size_t;
-                        let e=mdb_put(repo.mdb_txn,repo.dbi(DBI::CONTENTS),&mut v0, &mut v1, 0);
+                        mdb_put(repo.mdb_txn,repo.dbi(DBI::CONTENTS),&mut v0, &mut v1, 0);
                     }
                     lnum = lnum+1;
                 }
@@ -1031,8 +1091,8 @@ fn new_internal(repo:&mut Repository,result:&mut[u8],external:&[u8]) {
     let root_key=&ROOT_KEY[0..HASH_SIZE];
     let last=
         unsafe {
-            let mut k:MDB_val=unsafe {std::mem::zeroed() };
-            let mut v:MDB_val=unsafe {std::mem::zeroed() };
+            let mut k:MDB_val=std::mem::zeroed();
+            let mut v:MDB_val=std::mem::zeroed();
             let e=mdb_cursor_get(curs.cursor,&mut k,&mut v, MDB_cursor_op::MDB_LAST as c_uint);
             if e==0 && (k.mv_size as usize)>=HASH_SIZE {
                 slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize)
@@ -1113,9 +1173,41 @@ pub fn apply(repo:&mut Repository, changes:&[Change], external_id:&[u8], intid:&
                     }
                 }
             },
-            _ => {
-                //unimplemented!()
-            } // c'est un conflit de toute façon
+            Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
+                let mut pu:[u8;KEY_SIZE]=[0;KEY_SIZE];
+                let mut pv:[u8;KEY_SIZE]=[0;KEY_SIZE];
+                let mut lnum0= *line_num;
+                for i in 0..LINE_SIZE { pv[HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
+                let _= unsafe {
+                    copy_nonoverlapping(intid.as_ptr(),
+                                        pv.as_mut_ptr(),
+                                        HASH_SIZE)
+                };
+                for c in up_context {
+                    unsafe {
+                        let u= if c.len()>LINE_SIZE {
+                            internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&c[0..(c.len()-LINE_SIZE)])
+                        } else {
+                            intid as &[u8]
+                        };
+                        copy_nonoverlapping(u.as_ptr(), pu.as_mut_ptr(), HASH_SIZE);
+                        connect_up(repo,&pu,&pv,&intid)
+                    }
+                }
+                lnum0= (*line_num)+nodes.len()-1;
+                for i in 0..LINE_SIZE { pv[HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
+                for c in down_context {
+                    unsafe {
+                        let u= if c.len()>LINE_SIZE {
+                            internal_hash(repo.mdb_txn,repo.dbi(DBI::INTERNALHASHES),&c[0..(c.len()-LINE_SIZE)])
+                        } else {
+                            intid as &[u8]
+                        };
+                        copy_nonoverlapping(u.as_ptr(), pv.as_mut_ptr(), HASH_SIZE);
+                        connect_down(repo,&pv,&pu,&intid)
+                    }
+                }
+            }
         }
     }
 }
@@ -1144,36 +1236,35 @@ fn reconnect(repo:&mut Repository,pu:&mut [u8], buf:&[u8]){
 }
 
 fn connect_up(repo:&mut Repository, a0:&[u8], b:&[u8],internal_patch_id:&[u8]) {
-    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, txn:*mut MdbTxn, dbi:MdbDbi, a:&'a[u8], b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>) {
-        if !visited.contains(b) {
-            visited.insert(b);
+    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, txn:*mut MdbTxn, dbi:MdbDbi, a:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>) {
+        if !visited.contains(a) {
+            visited.insert(a);
             let cursor=Cursor::new(txn,dbi).unwrap();
             let flag= PARENT_EDGE|DELETED_EDGE;
-            let mut k= MDB_val { mv_data:b.as_ptr() as *const c_void, mv_size:b.len() as size_t };
+            let mut k= MDB_val { mv_data:a.as_ptr() as *const c_void, mv_size:a.len() as size_t };
             let mut v= MDB_val { mv_data:[flag].as_ptr() as *const c_void, mv_size:1 };
             let mut e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
             while e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == flag }) {
                 let a1= unsafe {slice::from_raw_parts( (v.mv_data as *const u8).offset(1), KEY_SIZE ) };
-                connect(visited,txn,dbi,a1,b,internal_patch_id,buf);
+                connect(visited,txn,dbi,a1,internal_patch_id,buf);
                 e = unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_NEXT_DUP as c_uint) };
             }
             // test for life
             let flag=[PARENT_EDGE];
-            let mut k= MDB_val { mv_data:b.as_ptr() as *const c_void, mv_size:b.len() as size_t };
+            let mut k= MDB_val { mv_data:a.as_ptr() as *const c_void, mv_size:a.len() as size_t };
             let mut v= MDB_val { mv_data:flag.as_ptr() as *const c_void, mv_size:1 };
             e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
             if e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == PARENT_EDGE }) {
                 // If there needs to be a pseudo-edge here
                 buf.push(PSEUDO_EDGE|PARENT_EDGE);
-                for i in 0..KEY_SIZE { buf.push(b[i]) }
+                for i in 0..KEY_SIZE { buf.push(a[i]) }
                 for i in 0..HASH_SIZE { buf.push(internal_patch_id[i]) }
             }
         }
     }
     let mut visited=HashSet::new();
     let mut buf=Vec::new();
-    connect(&mut visited, repo.mdb_txn,repo.dbi(DBI::NODES),a0,b,internal_patch_id,&mut buf);
-    let mut i=0;
+    connect(&mut visited, repo.mdb_txn,repo.dbi(DBI::NODES),a0,internal_patch_id,&mut buf);
     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
     unsafe {
         copy_nonoverlapping(b.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
@@ -1184,7 +1275,7 @@ fn connect_up(repo:&mut Repository, a0:&[u8], b:&[u8],internal_patch_id:&[u8]) {
 
 
 fn connect_down(repo:&mut Repository, a:&[u8], b0:&[u8],internal_patch_id:&[u8]) {
-    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, txn:*mut MdbTxn, dbi:MdbDbi, a:&'a[u8], b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>) {
+    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, txn:*mut MdbTxn, dbi:MdbDbi, b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>) {
         if !visited.contains(b) {
             visited.insert(b);
             let cursor=Cursor::new(txn,dbi).unwrap();
@@ -1194,7 +1285,7 @@ fn connect_down(repo:&mut Repository, a:&[u8], b0:&[u8],internal_patch_id:&[u8])
             let mut e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
             while e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == flag }) {
                 let b1= unsafe {slice::from_raw_parts( (v.mv_data as *const u8).offset(1), KEY_SIZE ) };
-                connect(visited,txn,dbi,a,b1,internal_patch_id,buf);
+                connect(visited,txn,dbi,b1,internal_patch_id,buf);
                 e = unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_NEXT_DUP as c_uint) };
             }
             let flag=[PARENT_EDGE];
@@ -1211,8 +1302,7 @@ fn connect_down(repo:&mut Repository, a:&[u8], b0:&[u8],internal_patch_id:&[u8])
     }
     let mut visited=HashSet::new();
     let mut buf=Vec::new();
-    connect(&mut visited, repo.mdb_txn,repo.dbi(DBI::NODES),a,b0,internal_patch_id,&mut buf);
-    let mut i=0;
+    connect(&mut visited, repo.mdb_txn,repo.dbi(DBI::NODES),b0,internal_patch_id,&mut buf);
     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
     unsafe {
         copy_nonoverlapping(a.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
@@ -1285,8 +1375,8 @@ pub fn debug<W>(repo:&mut Repository,w:&mut W) where W:Write {
     w.write(b"digraph{\n");
     let curs=Cursor::new(repo.mdb_txn,repo.dbi(DBI::NODES)).unwrap();
     unsafe {
-        let mut k:MDB_val=unsafe {std::mem::zeroed() };
-        let mut v:MDB_val=unsafe {std::mem::zeroed() };
+        let mut k:MDB_val=std::mem::zeroed();
+        let mut v:MDB_val=std::mem::zeroed();
         let mut e=mdb_cursor_get(curs.cursor,&mut k,&mut v,MDB_cursor_op::MDB_FIRST as c_uint);
         //println!("debug e={}",e);
         let cur=&[][..];
