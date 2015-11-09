@@ -1368,49 +1368,59 @@ pub fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<Vec<
                     }
                 }
             },
-            Change::Edges(ref e) => {
-                for edge in e {
-                    if edge.flag&FOLDER_EDGE != 0 && edge.flag&DELETED_EDGE!=0 {
-                        let del= if edge.flag&PARENT_EDGE != 0 { &edge.from } else { &edge.to };
-                        unsafe {
-                            let intkey:[u8;KEY_SIZE]=[0;KEY_SIZE];
-                            let mut node=MDB_val { mv_data:intkey.as_ptr() as *const c_void, mv_size:KEY_SIZE as size_t};
-                            let mut inode:MDB_val=std::mem::zeroed();
-                            let e=mdb_get(repo.mdb_txn,repo.dbi_revinodes,&mut node,&mut inode);
-                            if e==0 {
-                                let inode=slice::from_raw_parts(inode.mv_data as *const u8, inode.mv_size as usize);
-                                let curs=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-                                let has_parents:bool= {
-                                    let mut c=PARENT_EDGE;
-                                    node.mv_data=intkey.as_ptr() as *const c_void;
-                                    node.mv_size=KEY_SIZE as size_t;
-                                    let mut mc=MDB_val { mv_data:[c].as_ptr() as *const c_void, mv_size:1 };
-                                    let e=mdb_cursor_get(curs.cursor, &mut node, &mut mc,
-                                                         MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint);
-                                    if e==0 && mc.mv_size>0 && *(mc.mv_data as *const u8) == c {
-                                        true
-                                    } else {
-                                        node.mv_data=intkey.as_ptr() as *const c_void;
-                                        node.mv_size=KEY_SIZE as size_t;
-                                        c=PARENT_EDGE|FOLDER_EDGE;
-                                        mc.mv_data=[c].as_ptr() as *const c_void;
-                                        mc.mv_size=1;
-                                        let e=mdb_cursor_get(curs.cursor, &mut node, &mut mc,
-                                                             MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint);
-                                        mc.mv_size>0 && *(mc.mv_data as *const u8) == c
-                                    }
-                                };
-                                if ! has_parents { // then we can delete it, along with all its children.
-                                    // The OCaml version seems incorrect, it stops tracking all children. Maybe some local children are still tracked. That's a conflict.
-                                    unimplemented!()
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            Change::Edges(ref e) => {}
         }
     }
+
+    fn dfs_tree(repo:&mut Repository,current_inode:&[u8])->bool {
+        let mut k:MDB_val=unsafe { std::mem::zeroed() };
+        let mut v:MDB_val=unsafe { std::mem::zeroed() };
+
+        let curs=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+        let has_parents:bool= {
+            k.mv_data=current_inode.as_ptr() as *const c_void;
+            k.mv_size=INODE_SIZE as size_t;
+            unsafe {
+                let e= mdb_get(repo.mdb_txn,repo.dbi_revinodes,&mut k,&mut v);
+                if e==0 {
+                    let mut c=PARENT_EDGE;
+                    k.mv_data=[c].as_ptr() as *const c_void;
+                    k.mv_size=1;
+                    let e=mdb_cursor_get(curs.cursor, &mut v, &mut k,
+                                         MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint);
+                    if e==0 && k.mv_size>0 && *(k.mv_data as *const u8) == c {
+                        true
+                    } else {
+                        c=PARENT_EDGE | FOLDER_EDGE;
+                        let e=mdb_cursor_get(curs.cursor, &mut v, &mut k,
+                                             MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint);
+                        (e==0 && k.mv_size>0 && *(k.mv_data as *const u8) == c)
+                    }
+                } else { false }
+            }
+        };
+        // check whether alive. If so, return "true", else, check children and return "all dead && current dead".
+        if has_parents {
+            true
+        } else {
+            let curs_tree=Cursor::new(repo.mdb_txn,repo.dbi_tree).unwrap();
+            let mut e= unsafe { mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_SET_RANGE as c_uint) };
+            let mut children_alive=false;
+            while (!children_alive) && e==0 && unsafe { libc::strncmp(k.mv_data as *const c_char,
+                                                                      current_inode.as_ptr() as *const c_char,
+                                                                      INODE_SIZE as size_t) } == 0 {
+                unsafe {
+                    if v.mv_size as usize>=INODE_SIZE {
+                        let next=slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize);
+                        children_alive=children_alive || dfs_tree(repo,next);
+                    }
+                    e=mdb_cursor_get(curs_tree.cursor,&mut k,&mut v,MDB_cursor_op::MDB_NEXT as c_uint);
+                }
+            }
+            children_alive
+        }
+    }
+    dfs_tree(repo,&ROOT_INODE[..]);
 }
 
 pub fn output_repository(repo:&mut Repository, working_copy:&Path){
