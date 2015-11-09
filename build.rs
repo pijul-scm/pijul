@@ -1,8 +1,5 @@
 extern crate gcc;
 
-use std::env;
-use std::path::Path;
-
 fn main() {
     gcc::Config::new()
         .file("src/repository/retrieve.c")

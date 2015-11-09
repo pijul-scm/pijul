@@ -49,16 +49,6 @@ void c_free_line(struct c_line* line){
   }
 }
 
-
-void push_children(struct c_line* line, struct c_line* child){
-  if(line->children_off >= line->children_capacity){
-    line->children_capacity=(line->children_capacity>0) ? (line->children_capacity << 1) : 1;
-    line->children=realloc(line->children,line->children_capacity);
-  }
-  line->children[line->children_off]=child;
-  line->children_off++;
-}
-
 #define HASH_SIZE 20
 #define LINE_SIZE 4
 #define KEY_SIZE (HASH_SIZE+LINE_SIZE)
@@ -79,25 +69,13 @@ struct hashtable {
   size_t elements;
 };
 
-struct hashtable* new_hashtable(int size){
-  struct hashtable* t=malloc(sizeof(struct hashtable));
-  t->table=malloc(2*size*sizeof(void*));
-  t->size=size;
-  t->elements=0;
-  return t;
-}
-void free_hashtable(struct hashtable*t){
-  free(t->table);
-  free(t);
-}
-void insert(struct hashtable*,char*,void*);
+void insert(struct hashtable*,char*,struct c_line*);
 void rehash(struct hashtable*t){
-  void** table=malloc(t->size*2*sizeof(void*));
   void** old=t->table;
   int oldsize=t->size;
-  t->table=table;
   t->size*=2;
   t->elements=0;
+  t->table=calloc(t->size*2,sizeof(void*));
   int i;
   for(i=0;i<oldsize*2;i+=2){
     if(old[i])
@@ -106,10 +84,10 @@ void rehash(struct hashtable*t){
   free(old);
 }
 
-void insert(struct hashtable*t,char*key,void*value){
+void insert(struct hashtable*t,char*key,struct c_line*value){
   int h=(hash_key(key) % t->size);
   while((t->table[2*h]) && (strncmp(t->table [2*h], key, KEY_SIZE) != 0)) {
-    h += (h+1) % t->size;
+    h = (h+1) % t->size;
   }
   if(!(t->table[2*h]))
     t->elements++; // This is an actual insertion (else it is a replacement).
@@ -119,10 +97,10 @@ void insert(struct hashtable*t,char*key,void*value){
 }
 
 #define PIJUL_NOTFOUND -1
-int get(struct hashtable*t,char*key,void**value){
+int get(struct hashtable*t,char*key,struct c_line**value){
   int h=(hash_key(key) % t->size);
   while((t->table[2*h] != NULL) && (strncmp(t->table [2*h], key, KEY_SIZE) != 0)) {
-    h+=(h+1) % t->size;
+    h=(h+1) % t->size;
   }
   if((t->table[2*h]) == NULL)
     return PIJUL_NOTFOUND;
@@ -137,26 +115,27 @@ int get(struct hashtable*t,char*key,void**value){
 #define PARENT_EDGE 4
 #define DELETED_EDGE 8
 
-struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi,unsigned char*key){
-  struct hashtable*cache=new_hashtable(1024);
+struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi_nodes,MDB_dbi dbi_branches,MDB_val*branch, unsigned char*key){
+  struct hashtable cache;
+  unsigned int size=1024;
+  cache.table=calloc(2*size,sizeof(void*));
+  cache.size=size;
+  cache.elements=0;
 
-
+  MDB_cursor* curs;
+  int e=mdb_cursor_open(txn,dbi_nodes,&curs);
   struct c_line* retrieve_dfs(unsigned char*key) {
-    //printf("retrieve_dfs: /");
-    //int i;for(i=0;i<KEY_SIZE;i++) printf("%02x", key[i]); printf("\n");
     struct c_line* l;
-    int ret=get(cache,key,(void*) &l);
+    int ret=get(&cache,key,(void*) &l);
     if(ret==0){
       return l;
     } else {
-      //printf("not found\n");
       l=malloc(sizeof(struct c_line));
       memset(l,0,sizeof(struct c_line));
       l->key=key;
       l->index= -1;
-      insert(cache,key,l);
-      MDB_cursor* curs;
-      mdb_cursor_open(txn,dbi,&curs);
+      insert(&cache,key,l);
+
       MDB_val k,v;
       char children_edge=PARENT_EDGE | DELETED_EDGE;
       v.mv_data=&children_edge;
@@ -173,18 +152,31 @@ struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi,unsigned char*key){
       k.mv_data=l->key;
       k.mv_size=KEY_SIZE;
       ret=mdb_cursor_get(curs,&k,&v,MDB_GET_BOTH_RANGE);
-      //printf("ret=%d\n",ret);
       while(!ret && (((char*)v.mv_data)[0]==0 || ((char*)v.mv_data)[0]==PSEUDO_EDGE)){
-        //printf("ret=%d\n",ret);
-        push_children(l,retrieve_dfs(v.mv_data+1));
+        MDB_val patch;
+        patch.mv_size=HASH_SIZE;
+        patch.mv_data=((char*)v.mv_data) + 1+KEY_SIZE;
+        int br=mdb_get(txn,dbi_branches,branch,&patch);
+        if(br==0) { // If the current branch knows about this edge, follow it.
+          if(l->children_off >= l->children_capacity) {
+            l->children_capacity = l->children_capacity>0 ? (2*l->children_capacity) : 1;
+            l->children=realloc(l->children,l->children_capacity * sizeof(void*));
+          }
+          l->children [l->children_off] = v.mv_data;
+          l->children_off++;
+        }
         ret=mdb_cursor_get(curs,&k,&v,MDB_NEXT_DUP);
       }
-      mdb_cursor_close(curs);
+      int i;
+      for(i=0;i<l->children_off;i++){
+        char* dat=v.mv_data;
+        l->children[i] = retrieve_dfs(dat+1);
+      }
       return l;
     }
   }
   struct c_line *result=retrieve_dfs(key);
-  //printf("retrieved\n");
-  free_hashtable(cache);
+  mdb_cursor_close(curs);
+  free(cache.table);
   return result;
 }

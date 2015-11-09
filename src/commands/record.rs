@@ -41,7 +41,8 @@ extern crate rand;
 use std::path::{Path};
 extern crate rustc_serialize;
 use self::rustc_serialize::hex::{FromHex, ToHex};
-
+extern crate libc;
+use self::libc::funcs::posix88::unistd::{getpid};
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -126,27 +127,30 @@ pub fn run(_ : &()) -> Result<Option<()>, Error> {
                 let mut repo = try!(Repository::new(&repo_dir));
                 try!(record(&mut repo, &r))
             };
+            //println!("recorded");
+            println!("pid= {}",unsafe {libc::funcs::posix88::unistd::getpid() });
             if changes.is_empty() {
                 println!("Nothing to record");
                 Ok(None)
             } else {
-                println!("patch: {:?}",changes);
+                //println!("patch: {:?}",changes);
                 let patch = Patch { changes:changes };
                 // save patch
                 let patches_dir=patches_dir(r);
                 let hash=write_patch(&patch,&patches_dir).unwrap();
-                println!("hash={}",hash.as_bytes().to_hex());
+                //println!("hash={}",hash.as_bytes().to_hex());
                 {
                     let mut repo = try!(Repository::new(&repo_dir));
                     let mut intid=[0;HASH_SIZE];
                     let internal=apply(&mut repo, &patch.changes[..], hash[..].as_bytes(), &mut intid[..]);
                     sync_files(&mut repo,&patch.changes[..],&syncs, &intid);
                 }
+                /*
                 println!("Debugging");
                 let mut repo = try!(Repository::new(&repo_dir));
                 let mut buffer = BufWriter::new(File::create("debug").unwrap()); // change to uuid
                 debug(&mut repo,&mut buffer);
-
+                */
                 Ok(Some(()))
             }
         }

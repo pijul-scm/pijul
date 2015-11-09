@@ -17,4 +17,3 @@ tempdir="*"
 
 [build-dependencies]
 gcc="*"
-
