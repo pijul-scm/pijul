@@ -20,15 +20,16 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches};
 
 use commands::StaticSubcommand;
-use repository::{Repository,record,apply,sync_file_additions,debug,HASH_SIZE};
+use repository::{Repository,record,apply,sync_file_additions,debug,HASH_SIZE,new_internal,register_hash};
 use repository::patch::{Patch};
 use repository::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root};
+use std::sync::Arc;
 
 use std;
 use std::io;
 use std::fmt;
 use std::error;
-
+use std::thread;
 extern crate crypto;
 use crypto::digest::Digest;
 use crypto::sha2::Sha512;
@@ -136,15 +137,22 @@ pub fn run(_ : &()) -> Result<Option<()>, Error> {
                 //println!("patch: {:?}",changes);
                 let patch = Patch { changes:changes };
                 // save patch
+
+                let patch_arc=Arc::new(patch);
+                let child_patch=patch_arc.clone();
                 let patches_dir=patches_dir(r);
-                let hash=write_patch(&patch,&patches_dir).unwrap();
-                //println!("hash={}",hash.as_bytes().to_hex());
-                {
-                    let mut repo = try!(Repository::new(&repo_dir));
-                    let mut intid=[0;HASH_SIZE];
-                    let internal=apply(&mut repo, &patch.changes[..], hash[..].as_bytes(), &mut intid[..]);
-                    sync_file_additions(&mut repo,&patch.changes[..],&syncs, &intid);
-                }
+                let hash_child=thread::spawn(move || {
+                    write_patch(&child_patch,&patches_dir).unwrap()
+                });
+                let mut internal=[0;HASH_SIZE];
+                let mut repo = try!(Repository::new(&repo_dir));
+                new_internal(&mut repo,&mut internal);
+                apply(&mut repo, &patch_arc.changes[..], &internal[..]);
+                sync_file_additions(&mut repo,&patch_arc.changes[..],&syncs, &internal);
+
+                let hash:String=hash_child.join().unwrap();
+                register_hash(&mut repo,&internal[..],hash.as_bytes());
+
                 /*
                 println!("Debugging");
                 let mut repo = try!(Repository::new(&repo_dir));

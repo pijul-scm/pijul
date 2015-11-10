@@ -17,3 +17,7 @@ tempdir="*"
 
 [build-dependencies]
 gcc="*"
+
+[[bin]]
+name="main"
+doc=false
