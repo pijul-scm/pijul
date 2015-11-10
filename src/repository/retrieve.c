@@ -125,6 +125,10 @@ struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi_nodes,MDB_dbi dbi_branches,MD
   MDB_cursor* curs;
   int e=mdb_cursor_open(txn,dbi_nodes,&curs);
   struct c_line* retrieve_dfs(unsigned char*key) {
+    printf("retrieving ");
+    int i;
+    for(i=0;i<KEY_SIZE;i++) printf("%02x",key[i]);
+    printf("\n");
     struct c_line* l;
     int ret=get(&cache,key,(void*) &l);
     if(ret==0){
@@ -169,7 +173,7 @@ struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi_nodes,MDB_dbi dbi_branches,MD
       }
       int i;
       for(i=0;i<l->children_off;i++){
-        char* dat=v.mv_data;
+        char* dat=l->children[i];
         l->children[i] = retrieve_dfs(dat+1);
       }
       return l;

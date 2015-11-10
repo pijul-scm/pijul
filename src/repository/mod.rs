@@ -19,7 +19,7 @@
 extern crate libc;
 use self::libc::{c_int, c_uint,c_char,c_uchar,c_void,size_t};
 use self::libc::types::os::arch::posix88::mode_t;
-use self::libc::funcs::c95::string::{strncmp};
+use self::libc::{memcmp};
 use std::ptr::{copy_nonoverlapping};
 use std::ptr;
 
@@ -44,15 +44,13 @@ pub mod patch;
 
 use std::os::unix::fs::PermissionsExt;
 
-use self::patch::{Change,Edge};
+use self::patch::{Change,Edge,LocalKey,ExternalKey,ExternalHash,Flag};
 
 
 extern crate rustc_serialize;
 
 use self::rustc_serialize::hex::{ToHex};
-
-
-
+use std::fs;
 
 type MdbDbi=c_uint;
 #[repr(C)]
@@ -115,6 +113,7 @@ const MDB_NOTFOUND: c_int = -30798;
 
 const MDB_NODUPDATA:c_uint = 0x20;
 
+/// The repository structure, on which most functions work.
 pub struct Repository{
     mdb_env:*mut MdbEnv,
     mdb_txn:*mut MdbTxn,
@@ -199,6 +198,7 @@ impl Drop for Repository {
 }
 
 const INODE_SIZE:usize=16;
+/// The size of internal patch id. Allocate a buffer of this size when calling e.g. apply.
 pub const HASH_SIZE:usize=20; // pub temporaire
 const LINE_SIZE:usize=4;
 const KEY_SIZE:usize=HASH_SIZE+LINE_SIZE;
@@ -216,7 +216,7 @@ fn create_new_inode(repo:&Repository,buf:&mut [u8]){
         if e==MDB_NOTFOUND { break }
         else if e==0 {
             if (k.mv_size as usize)>=INODE_SIZE {
-                if unsafe { strncmp(buf.as_ptr() as *const c_char, k.mv_size as *const c_char, INODE_SIZE as size_t) } != 0 { break }
+                if unsafe { memcmp(buf.as_ptr() as *const c_void, k.mv_size as *const c_void, INODE_SIZE as size_t) } != 0 { break }
             } else {
                 panic!("Wrong encoding in create_new_inode")
             }
@@ -227,7 +227,7 @@ fn create_new_inode(repo:&Repository,buf:&mut [u8]){
 }
 
 fn add_inode(repo:&mut Repository, inode:&Option<[u8;INODE_SIZE]>, path:&std::path::Path, is_dir:bool)->Result<(),()>{
-    let mut buf:Vec<u8>=vec![0;INODE_SIZE];
+    let mut buf:Inode=vec![0;INODE_SIZE];
     let mut components=path.components();
     let mut cs=components.next();
     while let Some(s)=cs { // need to peek at the next element, so no for.
@@ -277,6 +277,8 @@ fn add_inode(repo:&mut Repository, inode:&Option<[u8;INODE_SIZE]>, path:&std::pa
     Ok(())
 }
 
+/// Adds a file in the repository. Additions need to be recorded in
+/// order to produce a patch.
 pub fn add_file(repo:&mut Repository, path:&std::path::Path, is_dir:bool)->Result<(),()>{
     //println!("Adding {:?}",path);
     add_inode(repo,&None,path,is_dir)
@@ -322,7 +324,7 @@ struct c_line {
 extern "C"{
     // retrieve uses hash tables growing monotonically. For time and
     // memory, we need it in C (or with fast hashtables and no copy of
-    // anything).
+    // anything) + free without RC.
     fn c_retrieve(txn:*mut MdbTxn,dbi_nodes:MdbDbi,dbi_branches:MdbDbi,
                   branch:*const MDB_val, key:*const c_char) -> *mut c_line;
     fn c_free_line(c_line:*mut c_line);
@@ -397,175 +399,158 @@ fn tarjan(line:&mut Line)->usize{
     index-1
 }
 
-// Iterator over projections
-struct Proj<'a> {
-    counts:Vec<usize>,
-    lines:Vec<Vec<*mut c_line>>,
-    i:usize,
-    phantom: PhantomData<&'a()>,
-    visited:HashSet<*const c_line>,
-    nodes:Vec<&'a[u8]>
-}
 
-impl<'a> Proj<'a> {
-    fn new(file:&'a mut Line)->Proj<'a> {
-        let max_level=tarjan(file);
-        let mut counts=vec![0;max_level+1];
-        let mut lines:Vec<Vec<*mut c_line>>=vec![vec!();max_level+1];
-        for i in 0..counts.len() { lines[i]=Vec::new() }
-
-        // First task: add number of lines and list of lines for each level.
-        fn fill_lines(counts:&mut Vec<usize>,
-                      lines:&mut Vec<Vec<*mut c_line>>,
-                      cl:*mut c_line){
-            unsafe {
-                //println!("fill_lines");
-                if (*cl).flags & LINE_SPIT == 0 {
-                    (*cl).flags |= LINE_SPIT;
-                    (*counts.get_unchecked_mut((*cl).lowlink as usize)) += 1;
-                    (*lines.get_unchecked_mut((*cl).lowlink as usize)).push (cl);
-                    let children:&[*mut c_line]=slice::from_raw_parts((*cl).children, (*cl).children_off as usize);
-                    for child in children {
-                        fill_lines(counts,lines,*child)
-                    }
+fn output_file<'a,B>(repo:&'a Repository,buf:&mut B,file:&'a mut Line) where B:LineBuffer<'a> {
+    let mut i=0;
+    let max_level=tarjan(file);
+    let mut counts=vec![0;max_level+1];
+    let mut lines=vec![vec!();max_level+1];
+    for i in 0..lines.len() { lines[i]=Vec::new() }
+    fn fill_lines(counts:&mut Vec<usize>,
+                  lines:&mut Vec<Vec<*mut c_line>>,
+                  cl:*mut c_line){
+        unsafe {
+            //println!("fill_lines");
+            if (*cl).flags & LINE_SPIT == 0 {
+                (*cl).flags |= LINE_SPIT;
+                (*counts.get_unchecked_mut((*cl).lowlink as usize)) += 1;
+                (*lines.get_unchecked_mut((*cl).lowlink as usize)).push (cl);
+                let children:&[*mut c_line]=slice::from_raw_parts((*cl).children, (*cl).children_off as usize);
+                for child in children {
+                    fill_lines(counts,lines,*child)
                 }
             }
         }
-        fill_lines(&mut counts, &mut lines, file.c_line);
-
-        // Then add "undetected conflicts"
-        unsafe  {
-            for i in 0..counts.len() {
-                if *counts.get_unchecked(i) > 1 {
-                    for line in lines.get_unchecked(i) {
-                        let children:&[*mut c_line]=slice::from_raw_parts((**line).children, (**line).children_off as usize);
-                        for child in children {
-                            for j in (**line).lowlink+1 .. (**child).lowlink {
-                                (*counts.get_unchecked_mut(j as usize)) += 1
-                            }}}}}
-        }
-        //println!("proj ok");
-        Proj {
-            counts:counts,
-            lines:lines,
-            i:0,
-            phantom:PhantomData,
-            visited:HashSet::new(),
-            nodes:Vec::new()
+    }
+    fill_lines(&mut counts, &mut lines, file.c_line);
+    // Then add undetected conflicts.
+    unsafe  {
+        for i in 0..counts.len() {
+            if *counts.get_unchecked(i) > 1 {
+                for line in lines.get_unchecked(i) {
+                    let children:&[*mut c_line]=slice::from_raw_parts((**line).children, (**line).children_off as usize);
+                    for child in children {
+                        for j in (**line).lowlink+1 .. (**child).lowlink {
+                            (*counts.get_unchecked_mut(j as usize)) += 1
+                        }}}}}
+    }
+    fn contents<'a>(repo:&'a Repository,key:&'a[u8]) -> &'a[u8] {
+        unsafe {
+            let mut k : MDB_val = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size: key.len() as size_t };
+            let mut v : MDB_val = std::mem::zeroed();
+            let e=mdb_get(repo.mdb_txn, repo.dbi_contents, &mut k, &mut v);
+            if e==0 {
+                slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)
+            } else {
+                &[][..]
+            }
         }
     }
-}
 
-
-impl <'a> Iterator for Proj<'a> {
-    type Item = Vec<Vec<&'a[u8]>>;
-    fn next(&mut self)->Option<Vec<Vec<&'a[u8]>>>{
-        if self.i >= self.counts.len() { None } else {
-            unsafe {
-                if *self.counts.get_unchecked(self.i) == 1 {
-                    let l = self.lines.get_unchecked(self.i) [0];
-                    self.i+=1;
-                    Some(vec!(vec!(slice::from_raw_parts((*l).key as *const u8, KEY_SIZE))))
-                } else if *self.counts.get_unchecked(self.i)==0 {
-                    None
-                } else {
-                    // conflit
-                    //println!("get_conflict {} {}",self.i,*self.counts.get_unchecked(self.i));
-                    fn get_conflict<'a>(counts:&Vec<usize>, l:*const c_line, conflict:&mut Vec<Vec<&'a[u8]>>,
-                                        nodes:&mut Vec<&'a[u8]>, visited:&mut HashSet<*const c_line>, next:&mut usize) {
-                        unsafe {
-                            if counts[(*l).lowlink as usize] <= 1 {
-                                conflict.push(nodes.clone());
-                                *next=(*l).lowlink as usize
-                            } else {
-                                if !visited.contains(&l) {
-                                    visited.insert(l);
-                                    let mut min_order=None;
-                                    for c in 0..(*l).children_off {
-                                        let ll=(**((*l).children.offset(c as isize))).lowlink;
-                                        min_order=Some(match min_order { None=>ll, Some(m)=>std::cmp::min(m,ll) })
-                                    }
-                                    match min_order {
-                                        None=>(),
-                                        Some(m)=>{
-                                            if (*l).flags & LINE_HALF_DELETED != 0 {
-                                                for c in 0..(*l).children_off {
-                                                    let chi=*((*l).children.offset(c as isize));
-                                                    if (*chi).lowlink==m { get_conflict(counts,chi,conflict,nodes,visited,next) }
-                                                }
+    // Finally, output everybody.
+    let mut i=0;
+    let mut nodes=Vec::new();
+    let mut visited=HashSet::new();
+    while i<counts.len() {
+        assert!(counts[i]>=1);
+        if counts[i] == 1 {
+            let key= unsafe { slice::from_raw_parts((*lines[i][0]).key as *const u8, KEY_SIZE as usize) };
+            unsafe { println!("outputting {:?} {}",key,str::from_utf8_unchecked(contents(repo,key))) };
+            buf.output_line(&key,contents(repo,key));
+            i+=1
+        } else {
+            fn get_conflict<'a,B>(repo:&'a Repository, counts:&Vec<usize>, l:*const c_line, b:&mut B,
+                                  nodes:&mut Vec<&'a[u8]>, visited:&mut HashSet<*const c_line>,
+                                  is_first:&mut bool,
+                                  next:&mut usize)
+            where B:LineBuffer<'a> {
+                unsafe {
+                    if counts[(*l).lowlink as usize] <= 1 {
+                        if ! *is_first {b.output_line(&[][..],b"================================");}else{*is_first=false}
+                        for key in nodes {
+                            b.output_line(key,contents(repo,key))
+                        }
+                        *next=(*l).lowlink as usize
+                    } else {
+                        if !visited.contains(&l) {
+                            visited.insert(l);
+                            let mut min_order=None;
+                            for c in 0..(*l).children_off {
+                                let ll=(**((*l).children.offset(c as isize))).lowlink;
+                                min_order=Some(match min_order { None=>ll, Some(m)=>std::cmp::min(m,ll) })
+                            }
+                            match min_order {
+                                None=>(),
+                                Some(m)=>{
+                                    if (*l).flags & LINE_HALF_DELETED != 0 {
+                                        for c in 0..(*l).children_off {
+                                            let chi=*((*l).children.offset(c as isize));
+                                            if (*chi).lowlink==m {
+                                                get_conflict(repo,counts,chi,b,nodes,visited,is_first,next)
                                             }
-                                            nodes.push(slice::from_raw_parts((*l).key as *const u8, KEY_SIZE));
-                                            for c in 0..(*l).children_off {
-                                                let chi=*((*l).children.offset(c as isize));
-                                                if (*chi).lowlink==m { get_conflict(counts,chi,conflict,nodes,visited,next) }
-                                            }
-                                            let _=nodes.pop();
                                         }
                                     }
-                                    let _=visited.remove(&l);
+                                    nodes.push(slice::from_raw_parts((*l).key as *const u8, KEY_SIZE));
+                                    for c in 0..(*l).children_off {
+                                        let chi=*((*l).children.offset(c as isize));
+                                        if (*chi).lowlink==m {
+                                            get_conflict(repo,counts,chi,b,nodes,visited,is_first,next)
+                                        }
+                                    }
+                                    let _=nodes.pop();
                                 }
                             }
+                            let _=visited.remove(&l);
                         }
                     }
-                    let mut conflict=Vec::new();
-                    let mut next=0;
-                    for j in 0..(self.lines[self.i].len()) {
-                        self.visited.clear();
-                        self.nodes.clear();
-                        get_conflict(&self.counts,self.lines[self.i][j], &mut conflict, &mut self.nodes, &mut self.visited,&mut next)
-                    }
-                    self.i=std::cmp::max(next,self.i+1);
-                    Some(conflict)
                 }
             }
-        }
-    }
-}
-
-
-fn contents<'a>(repo:&Repository, key:&'a[u8])->&'a[u8] {
-    unsafe {
-        let mdb_txn=repo.mdb_txn;
-        let mdb_dbi=repo.dbi_contents;
-        let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
-        let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
-        let e=mdb_get(mdb_txn, mdb_dbi, &mut k, &mut v);
-        if e==0 {
-            slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)
-        } else {
-            &[][..]
-        }
-    }
-}
-
-fn push_conflict<'a>(repo:&Repository,lines_a:&mut Vec<&'a[u8]>, contents_a:&mut Vec<&'a[u8]>, l:Vec<Vec<&'a[u8]>>) {
-    if l.len()>0 {
-        if l[0].len()==1 {
-            lines_a.push(&l[0][0]);
-            let cont=contents(repo,&l[0][0]);
-            contents_a.push(cont)
-        } else {
-            lines_a.push(&[][..]);
-            contents_a.push(b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
-            for i in 0..l.len() {
-                if i>0 {
-                    lines_a.push(&[][..]);
-                    contents_a.push(b"================================")
-                }
-                for j in 0..l[i].len() {
-                    lines_a.push(l[i][j]);
-                    contents_a.push(contents(repo,l[i][j]))
-                }
+            let mut next=0;
+            buf.output_line(&[][..],b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
+            let mut is_first=true;
+            for j in 0..(lines[i].len()) {
+                visited.clear();
+                nodes.clear();
+                get_conflict(repo, &counts,lines[i][j], buf, &mut nodes, &mut visited, &mut is_first, &mut next)
             }
-            lines_a.push(&[][..]);
-            contents_a.push(b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
+            buf.output_line(&[][..],b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
+            i=std::cmp::max(next,i+1);
         }
     }
 }
 
-fn external_key(repo:&Repository,key:&[u8])->Vec<u8> {
+
+
+trait LineBuffer<'a> {
+    fn output_line(&mut self,&'a[u8],&'a[u8]) -> ();
+}
+
+struct Diff<'a> {
+    lines_a:Vec<&'a[u8]>,
+    contents_a:Vec<&'a[u8]>
+}
+
+impl <'a> LineBuffer<'a> for Diff<'a> {
+    fn output_line(&mut self,k:&'a[u8],c:&'a[u8]) {
+        self.lines_a.push(k);
+        self.contents_a.push(c);
+    }
+}
+
+impl <'a,W> LineBuffer<'a> for W where W:std::io::Write {
+    fn output_line(&mut self,k:&'a[u8],c:&'a[u8]) {
+        self.write(c).expect("output_line: could not write");
+    }
+}
+
+/// Gets the external key corresponding to the given key, returning an
+/// owned vector. If the key is just a patch id, it returns the
+/// corresponding external hash.
+fn external_key(repo:&Repository,key:&[u8])->ExternalKey {
     unsafe {
-        if strncmp(key.as_ptr() as *const c_char,ROOT_KEY.as_ptr() as *const c_char,HASH_SIZE as size_t)==0 {
+        println!("internal key:{:?}",&key[0..HASH_SIZE]);
+        if memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t)==0 {
+            println!("is root key");
             ROOT_KEY.to_vec()
         } else {
             let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:HASH_SIZE as size_t };
@@ -619,34 +604,7 @@ fn delete_edges<'a>(repo:&'a Repository, edges:&mut Vec<Edge>, key:&'a[u8]){
 }
 
 fn diff(repo:&Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut Line, b:&Path)->Result<(),std::io::Error> {
-    //println!("diff");
-    let mut lines_a=Vec::new();
-    let mut contents_a=Vec::new();
-    let it=Proj::new(a);
-    for l in it {
-        push_conflict(repo, &mut lines_a, &mut contents_a, l)
-    }
-
-    let mut buf_b=Vec::new();
-    let mut lines_b=Vec::new();
-    let err={
-        let f = std::fs::File::open(b);
-        let mut f = std::io::BufReader::new(f.unwrap());
-        let err=f.read_to_end(&mut buf_b);
-        let mut i=0;
-        let mut j=0;
-        while j<buf_b.len() {
-            if buf_b[j]==0xa {
-                lines_b.push(&buf_b[i..j+1]);
-                i=j+1
-            }
-            j+=1;
-        }
-        if i<j { lines_b.push(&buf_b[i..j]) }
-        err
-    };
     fn local_diff(repo:&Repository,actions:&mut Vec<Change>,line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[&[u8]], b:&[&[u8]]) {
-        //let mut opt:Vec<Vec<usize>>=Vec::with_capacity(a.len()+1);
         let mut opt=vec![vec!();contents_a.len()+1];
         for i in 0..opt.len() { opt[i]=vec![0;b.len()+1] }
         // opt
@@ -656,23 +614,17 @@ fn diff(repo:&Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut L
                     if contents_a[i]==b[j] { opt[i+1][j+1]+1 } else { std::cmp::max(opt[i+1][j], opt[i][j+1]) }
             }
         }
-        let mut i=0;
+        let mut i=1;
         let mut j=0;
         fn add_lines(repo:&Repository,actions:&mut Vec<Change>, line_num:&mut usize,
                      up_context:&[u8],down_context:&[&[u8]],lines:&[&[u8]]){
             actions.push(
                 Change::NewNodes {
                     up_context:vec!(external_key(repo,up_context)),
-                    down_context:{ let mut d=Vec::with_capacity(down_context.len());
-                                   for c in down_context { d.push(external_key(repo,c)) };
-                                   d },
+                    down_context:down_context.iter().map(|x|{external_key(repo,x)}).collect(),
                     line_num: *line_num,
                     flag:0,
-                    nodes:{
-                        let mut nodes=Vec::with_capacity(lines.len());
-                        for l in lines { nodes.push(l.to_vec()) }
-                        nodes
-                    }
+                    nodes:lines.iter().map(|x|{x.to_vec()}).collect()
                 });
             *line_num += lines.len()
         }
@@ -734,16 +686,34 @@ fn diff(repo:&Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut L
             add_lines(repo,actions, line_num, lines_a[i-1], &[][..], &b[j..b.len()])
         }
     }
+
+    let mut buf_b=Vec::new();
+    let mut lines_b=Vec::new();
+    let err={
+        let f = std::fs::File::open(b);
+        let mut f = std::io::BufReader::new(f.unwrap());
+        let err=f.read_to_end(&mut buf_b);
+        let mut i=0;
+        let mut j=0;
+        while j<buf_b.len() {
+            if buf_b[j]==0xa {
+                lines_b.push(&buf_b[i..j+1]);
+                i=j+1
+            }
+            j+=1;
+        }
+        if i<j { lines_b.push(&buf_b[i..j]) }
+        err
+    };
     match err {
         Ok(_)=>{
+            let mut d = Diff { lines_a:Vec::new(), contents_a:Vec::new() };
+            output_file(repo,&mut d,a);
             let mut i=0;
-            //while i+1<contents_a.len() && i<lines_b.len() && contents_a[i+1]==lines_b[i] { i+=1; }
-            /*let mut j=1;
-            while j<contents_a.len() && j<lines_b.len() && contents_a[contents_a.len()-j]==lines_b[lines_b.len()-j] { j+=1; }
-             */
+            while i+1<d.contents_a.len() && i<lines_b.len() && d.contents_a[i+1]==lines_b[i] { i+=1; }
             local_diff(repo,actions, line_num,
-                       &lines_a[i..],
-                       &contents_a[i..],
+                       &d.lines_a[i..],
+                       &d.contents_a[i..],
                        &lines_b[i..]);
             Ok(())
         },
@@ -758,8 +728,10 @@ const PSEUDO_EDGE:u8=1;
 const FOLDER_EDGE:u8=2;
 const PARENT_EDGE:u8=4;
 const DELETED_EDGE:u8=8;
+pub type Inode=Vec<u8>;
 
-pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<Vec<u8>,Vec<u8>>),Error>{
+/// Records,i.e. produce a patch and a HashMap mapping line numbers to inodes.
+pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<LocalKey,Inode>),Error>{
     fn dfs(repo:&Repository, actions:&mut Vec<Change>,
            curs_tree:&mut Cursor,
            line_num:&mut usize,updatables:&mut HashMap<Vec<u8>,Vec<u8>>,
@@ -774,7 +746,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
         let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
         let root_key=&ROOT_KEY[..];
         let mut l2=[0;LINE_SIZE];
-        //println!("record, cur={}",current_inode.to_hex());
+        let mut is_file=false;
         let current_node=
             match parent_inode {
                 Some(parent_inode) => {
@@ -786,30 +758,32 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                         //println!("Existing node: {}",current_node.to_hex());
                         if current_node[0]==1 {
                             // file moved
+                            println!("file move not implemented in record");
+                            unimplemented!()
                         } else if current_node[0]==2 {
                             // file deleted. delete recursively
+                            println!("file deletions not implemented in record");
+                            unimplemented!()
                         } else if current_node[0]==0 {
-                            // file not moved, we need to diff
                             let ret=retrieve(repo,&current_node[3..]);
-                            //println!("retrieved");
                             diff(repo,line_num,actions, &mut ret.unwrap(), realpath.as_path()).unwrap()
                         } else {
                             panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
                         };
-                        current_node
+                        Some(current_node)
                     } else {
                         // File addition, create appropriate Newnodes.
                         match metadata(&realpath) {
                             Ok(attr) => {
                                 //println!("file addition, realpath={:?}", realpath);
-                                let permissions=attr.permissions().mode();
-                                let is_dir= if attr.is_dir() { 1 } else { 0 };
+                                let permissions=attr.permissions().mode() as usize;
+                                let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
                                 let mut nodes=Vec::new();
                                 let mut lnum= *line_num + 1;
                                 for i in 0..(LINE_SIZE-1) { l2[i]=(lnum & 0xff) as u8; lnum=lnum>>8 }
 
                                 let mut name=Vec::with_capacity(basename.len()+2);
-                                let int_attr=permissions | is_dir << 9;
+                                let int_attr=permissions | is_dir;
                                 name.push(((int_attr >> 8) & 0xff) as u8);
                                 name.push((int_attr & 0xff) as u8);
                                 for c in basename { name.push(*c) }
@@ -823,27 +797,31 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                                 *line_num += 2;
 
                                 // Reading the file
-                                nodes.clear();
-                                let mut line=Vec::new();
-                                let f = std::fs::File::open(realpath.as_path());
-                                let mut f = std::io::BufReader::new(f.unwrap());
-                                loop {
-                                    match f.read_until('\n' as u8,&mut line) {
-                                        Ok(l) => if l>0 { nodes.push(line.clone());line.clear() } else { break },
-                                        Err(_) => break
+                                if is_dir==0 {
+                                    nodes.clear();
+                                    let mut line=Vec::new();
+                                    let f = std::fs::File::open(realpath.as_path());
+                                    let mut f = std::io::BufReader::new(f.unwrap());
+                                    loop {
+                                        match f.read_until('\n' as u8,&mut line) {
+                                            Ok(l) => if l>0 { nodes.push(line.clone());line.clear() } else { break },
+                                            Err(_) => break
+                                        }
                                     }
+                                    updatables.insert(l2.to_vec(),current_inode.to_vec());
+                                    let len=nodes.len();
+                                    actions.push(
+                                        Change::NewNodes { up_context:vec!(l2.to_vec()),
+                                                           line_num: *line_num,
+                                                           down_context: vec!(),
+                                                           nodes: nodes,
+                                                           flag:0 }
+                                        );
+                                    *line_num+=len;
+                                    Some(&l2[..])
+                                } else {
+                                    None
                                 }
-                                updatables.insert(l2.to_vec(),current_inode.to_vec());
-                                let len=nodes.len();
-                                actions.push(
-                                    Change::NewNodes { up_context:vec!(l2.to_vec()),
-                                                       line_num: *line_num,
-                                                       down_context: vec!(),
-                                                       nodes: nodes,
-                                                       flag:0 }
-                                    );
-                                *line_num+=len;
-                                &l2[..]
                             },
                             Err(_)=>{
                                 panic!("error adding a file (metadata failed)")
@@ -851,38 +829,44 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                         }
                     }
                 },
-                None => { root_key }
+                None => { Some(root_key) }
             };
 
-        k.mv_data=current_inode.as_ptr() as *const c_void;
-        k.mv_size=INODE_SIZE as size_t;
 
-        let mut children=Vec::new();
+        match current_node {
+            None => Ok(()), // we just added a file
+            Some(current_node)=>{
+                k.mv_data=current_inode.as_ptr() as *const c_void;
+                k.mv_size=INODE_SIZE as size_t;
 
-        let mut e= unsafe { mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_SET_RANGE as c_uint) };
-        while e==0 && unsafe { libc::strncmp(k.mv_data as *const c_char, current_inode.as_ptr() as *const c_char, INODE_SIZE as size_t) } == 0 {
-            if k.mv_size>INODE_SIZE as size_t {
-                unsafe {
-                    children.push((slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize),
-                                   slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)));
-                    e=mdb_cursor_get(curs_tree.cursor,&mut k,&mut v,MDB_cursor_op::MDB_NEXT as c_uint);
+                let mut children=Vec::new();
+
+                let mut e= unsafe { mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_SET_RANGE as c_uint) };
+                while e==0 && unsafe { memcmp(k.mv_data as *const c_void, current_inode.as_ptr() as *const c_void, INODE_SIZE as size_t) } == 0 {
+                    if k.mv_size>INODE_SIZE as size_t {
+                        unsafe {
+                            children.push((slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize),
+                                           slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)));
+                            e=mdb_cursor_get(curs_tree.cursor,&mut k,&mut v,MDB_cursor_op::MDB_NEXT as c_uint);
+                        }
+                    }
                 }
+                for chi in children {
+                    let (ks,vs)= chi;
+                    let (_,next_basename)=ks.split_at(INODE_SIZE);
+                    //println!("next_basename={:?}",String::from_utf8_lossy(next_basename));
+                    let _=
+                        dfs(repo, actions, curs_tree, line_num,updatables,
+                            Some(current_inode), // parent_inode
+                            Some(current_node), // parent_node
+                            vs,// current_inode
+                            realpath,
+                            next_basename);
+                }
+                if parent_inode.is_some() { let _=realpath.pop(); }
+                Ok(())
             }
         }
-        for chi in children {
-            let (ks,vs)= chi;
-            let (_,next_basename)=ks.split_at(INODE_SIZE);
-            //println!("next_basename={:?}",String::from_utf8_lossy(next_basename));
-            let _=
-                dfs(repo, actions, curs_tree, line_num,updatables,
-                    Some(current_inode), // parent_inode
-                    Some(current_node), // parent_node
-                    vs,// current_inode
-                    realpath,
-                    next_basename);
-        }
-        if parent_inode.is_some() { let _=realpath.pop(); }
-        Ok(())
     };
     let mut actions:Vec<Change>=Vec::new();
     let mut line_num=1;
@@ -899,7 +883,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
 
 fn internal_hash<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&'a [u8])->&'a [u8] {
     unsafe {
-        if strncmp(key.as_ptr() as *const c_char,ROOT_KEY.as_ptr() as *const c_char,HASH_SIZE as size_t)==0 {
+        if memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t)==0 {
             slice::from_raw_parts(ROOT_KEY.as_ptr(), ROOT_KEY.len())
         } else {
             let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
@@ -908,7 +892,7 @@ fn internal_hash<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&'a [u8])->&'a [u8] {
             if e==0 {
                 slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)
             } else {
-                //println!("external key:{}",key.to_hex());
+                println!("external key:{}",key.to_hex());
                 panic!("internal key not found !")
             }
         }
@@ -1115,7 +1099,9 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
     }
 }
 
-
+/// Create a new internal patch id, register it in the "external" and
+/// "internal" bases, and write the result in its second argument
+/// ("result").
 fn new_internal(repo:&mut Repository,result:&mut[u8],external:&[u8]) {
     let curs=Cursor::new(repo,repo.dbi_external).unwrap();
     let root_key=&ROOT_KEY[0..HASH_SIZE];
@@ -1151,8 +1137,10 @@ fn new_internal(repo:&mut Repository,result:&mut[u8],external:&[u8]) {
     }
 }
 
+/// The name of the default branch, "main".
 pub const DEFAULT_BRANCH:&'static str="main";
 
+/// Applies a set of changes to a repository. The changes need to come from a patch.
 pub fn apply(repo:&mut Repository, changes:&[Change], external_id:&[u8], intid:&mut [u8]) {
     new_internal(repo,intid,external_id);
     unsafe_apply(repo,changes,intid);
@@ -1182,9 +1170,17 @@ pub fn apply(repo:&mut Repository, changes:&[Change], external_id:&[u8], intid:&
                     }
                     if e.flag&DELETED_EDGE!=0 {
                         if e.flag&PARENT_EDGE!=0 {
-                            connect_down(repo,&v,&u,&intid)
+                            if e.flag&FOLDER_EDGE!=0 {
+                                connect_zombie_folders(repo,&v,&u,&intid)
+                            } else {
+                                connect_down(repo,&v,&u,&intid)
+                            }
                         } else {
-                            connect_down(repo,&u,&v,&intid)
+                            if e.flag&FOLDER_EDGE!=0 {
+                                connect_zombie_folders(repo,&u,&v,&intid)
+                            } else {
+                                connect_down(repo,&u,&v,&intid)
+                            }
                         }
                     } else {
                         if e.flag&PARENT_EDGE!=0 {
@@ -1234,6 +1230,9 @@ pub fn apply(repo:&mut Repository, changes:&[Change], external_id:&[u8], intid:&
     }
 }
 
+/// This function is used to add the pseudo-edges collected in
+/// connect_up and connect_down. This is because these functions
+/// cannot directly modify the database while iterating on cursors
 fn reconnect(repo:&mut Repository,pu:&mut [u8], buf:&[u8]){
     let mut k: MDB_val=unsafe { std::mem::zeroed() };
     let mut v: MDB_val=unsafe { std::mem::zeroed() };
@@ -1257,18 +1256,20 @@ fn reconnect(repo:&mut Repository,pu:&mut [u8], buf:&[u8]){
     }
 }
 
+/// When an edge (a,b) is added, add a pseudo-edge from the first
+/// alive ancestors of a to b.
 fn connect_up(repo:&mut Repository, a0:&[u8], b:&[u8],internal_patch_id:&[u8]) {
-    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, dbi:MdbDbi, a:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>) {
+    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, a:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>) {
         if !visited.contains(a) {
             visited.insert(a);
-            let cursor=Cursor::new(repo,dbi).unwrap();
+            let cursor=Cursor::new(repo,repo.dbi_nodes).unwrap();
             let flag= PARENT_EDGE|DELETED_EDGE;
             let mut k= MDB_val { mv_data:a.as_ptr() as *const c_void, mv_size:a.len() as size_t };
             let mut v= MDB_val { mv_data:[flag].as_ptr() as *const c_void, mv_size:1 };
             let mut e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
             while e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == flag }) {
                 let a1= unsafe {slice::from_raw_parts( (v.mv_data as *const u8).offset(1), KEY_SIZE ) };
-                connect(visited,repo,dbi,a1,internal_patch_id,buf);
+                connect(visited,repo,a1,internal_patch_id,buf);
                 e = unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_NEXT_DUP as c_uint) };
             }
             // test for life
@@ -1286,7 +1287,7 @@ fn connect_up(repo:&mut Repository, a0:&[u8], b:&[u8],internal_patch_id:&[u8]) {
     }
     let mut visited=HashSet::new();
     let mut buf=Vec::new();
-    connect(&mut visited, repo,repo.dbi_nodes,a0,internal_patch_id,&mut buf);
+    connect(&mut visited, repo,a0,internal_patch_id,&mut buf);
     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
     unsafe {
         copy_nonoverlapping(b.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
@@ -1295,19 +1296,19 @@ fn connect_up(repo:&mut Repository, a0:&[u8], b:&[u8],internal_patch_id:&[u8]) {
     reconnect(repo,&mut pu, &buf[..]);
 }
 
-
+/// When an edge (a,b) is deleted, add a pseudo-edge from a to the earliest alive descendants of b.
 fn connect_down(repo:&mut Repository, a:&[u8], b0:&[u8],internal_patch_id:&[u8]) {
-    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, dbi:MdbDbi, b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>) {
+    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>) {
         if !visited.contains(b) {
             visited.insert(b);
-            let cursor=Cursor::new(repo,dbi).unwrap();
+            let cursor=Cursor::new(repo,repo.dbi_nodes).unwrap();
             let flag= 0;
             let mut k= MDB_val { mv_data:b.as_ptr() as *const c_void, mv_size:b.len() as size_t };
             let mut v= MDB_val { mv_data:[flag].as_ptr() as *const c_void, mv_size:1 };
             let mut e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
             while e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == flag }) {
                 let b1= unsafe {slice::from_raw_parts( (v.mv_data as *const u8).offset(1), KEY_SIZE ) };
-                connect(visited,repo,dbi,b1,internal_patch_id,buf);
+                connect(visited,repo,b1,internal_patch_id,buf);
                 e = unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_NEXT_DUP as c_uint) };
             }
             let flag=[PARENT_EDGE];
@@ -1324,7 +1325,7 @@ fn connect_down(repo:&mut Repository, a:&[u8], b0:&[u8],internal_patch_id:&[u8])
     }
     let mut visited=HashSet::new();
     let mut buf=Vec::new();
-    connect(&mut visited, repo,repo.dbi_nodes,b0,internal_patch_id,&mut buf);
+    connect(&mut visited, repo,b0,internal_patch_id,&mut buf);
     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
     unsafe {
         copy_nonoverlapping(a.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
@@ -1333,9 +1334,58 @@ fn connect_down(repo:&mut Repository, a:&[u8], b0:&[u8],internal_patch_id:&[u8])
     reconnect(repo,&mut pu,&buf[..]);
 }
 
+/// Adds a pseudo-edge between a and b if b has alive folder descendants.
+/// This is meant to detect conflicts where Alice deletes a folder F while Bob adds a file in F.
+fn connect_zombie_folders(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
+    fn has_alive_descendants<'a>(repo:&'a Repository,b:&'a [u8],visited:&mut HashSet<&'a[u8]>)->bool {
+        if !visited.contains(b) {
+            visited.insert(b);
+            let cursor=Cursor::new(repo,repo.dbi_nodes).unwrap();
+            let flag= FOLDER_EDGE | DELETED_EDGE;
+            let mut k= MDB_val { mv_data:b.as_ptr() as *const c_void, mv_size:b.len() as size_t };
+            let mut v= MDB_val { mv_data:[flag].as_ptr() as *const c_void, mv_size:1 };
+            let mut has_alive_desc=false;
+            let mut e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
+            while e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == flag }) && !has_alive_desc {
+                let b1= unsafe {slice::from_raw_parts( (v.mv_data as *const u8).offset(1), KEY_SIZE ) };
+                has_alive_desc = has_alive_descendants(repo,b1,visited);
+                e = unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_NEXT_DUP as c_uint) };
+            }
+            has_alive_desc || {
+                let flag=[PARENT_EDGE|FOLDER_EDGE];
+                let mut k= MDB_val { mv_data:b.as_ptr() as *const c_void, mv_size:b.len() as size_t };
+                let mut v= MDB_val { mv_data:flag.as_ptr() as *const c_void, mv_size:1 };
+                let e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
+                (e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == flag[0] }))
+            }
+        } else { false }
+    }
+    let mut visited=HashSet::new();
+    if has_alive_descendants(repo,b,&mut visited) {
+        let mut pu=[0;1+HASH_SIZE+KEY_SIZE];
+        let mut pv=[0;1+HASH_SIZE+KEY_SIZE];
+        unsafe {
+            copy_nonoverlapping(a.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
+            copy_nonoverlapping(internal_patch_id.as_ptr(), pu.as_mut_ptr().offset((1+KEY_SIZE) as isize), HASH_SIZE);
+            pu[0]=FOLDER_EDGE|PARENT_EDGE;
+            copy_nonoverlapping(b.as_ptr(), pv.as_mut_ptr().offset(1), KEY_SIZE);
+            copy_nonoverlapping(internal_patch_id.as_ptr(), pv.as_mut_ptr().offset((1+KEY_SIZE) as isize), HASH_SIZE);
+            pv[0]=FOLDER_EDGE;
+            let mut k: MDB_val=MDB_val { mv_data:pu.as_ptr().offset(1) as *const c_void, mv_size:KEY_SIZE as size_t };
+            let mut v: MDB_val=MDB_val { mv_data:pv.as_ptr() as *const c_void, mv_size:pv.len() as size_t };
+            let _=mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut k,&mut v,MDB_NODUPDATA);
+            k.mv_data= pv.as_ptr().offset(1) as *const c_void;
+            k.mv_size= KEY_SIZE as size_t;
+            v.mv_data= pu.as_ptr() as *const c_void;
+            v.mv_size= (1+KEY_SIZE+HASH_SIZE) as size_t;
+            let _=mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut k,&mut v,MDB_NODUPDATA);
+        }
+    }
+}
 
 
-pub fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<Vec<u8>,Vec<u8>>, internal_patch_id:&[u8]){
+
+pub fn sync_file_additions(repo:&mut Repository, changes:&[Change], updates:&HashMap<LocalKey,Inode>, internal_patch_id:&[u8]){
     for change in changes {
         match *change {
             Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
@@ -1345,13 +1395,15 @@ pub fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<Vec<
                     let mut l0=*line_num + 1;
                     for i in 0..LINE_SIZE { node[3+HASH_SIZE+i]=(l0&0xff) as u8; l0 = l0>>8 }
                     let mut inode=[0;INODE_SIZE];
-                    //println!("node={}", node[3..].to_hex());
                     let inode_l2 = match updates.get(&node[(3+HASH_SIZE)..]) {
                         None => {
+                            // This file comes from a remote patch
                             create_new_inode(repo, &mut inode[..]);
                             &inode[..]
                         },
-                        Some(ref inode)=> &inode[..]
+                        Some(ref inode)=>
+                            // This file comes from a local patch
+                            &inode[..]
                     };
 
                     unsafe {
@@ -1359,8 +1411,6 @@ pub fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<Vec<
                         node[2]=(nodes[0][1] & 0xff) as u8;
                         let mut k = MDB_val { mv_data:inode_l2.as_ptr() as *const c_void, mv_size:INODE_SIZE as size_t };
                         let mut v = MDB_val { mv_data:node.as_ptr() as *const c_void, mv_size:(3+KEY_SIZE) as size_t };
-                        //println!("patch_id {}", internal_patch_id.to_hex());
-                        //println!("synchronizing {} {}", inode_l2.to_hex(),node.to_hex());
                         mdb_put(repo.mdb_txn,repo.dbi_inodes, &mut k, &mut v, 0);
                         k.mv_data=node.as_ptr().offset(3) as *mut c_void;
                         k.mv_size=KEY_SIZE as size_t;
@@ -1370,82 +1420,25 @@ pub fn sync_files(repo:&mut Repository, changes:&[Change], updates:&HashMap<Vec<
                     }
                 }
             },
-            Change::Edges(ref e) => {}
+            Change::Edges(_) => {}
         }
     }
-
-    fn dfs_tree(repo:&Repository,current_inode:&[u8],buf:&mut Vec<u8>)->bool {
-        let mut k:MDB_val=unsafe { std::mem::zeroed() };
-        let mut v:MDB_val=unsafe { std::mem::zeroed() };
-
-        let curs=Cursor::new(repo,repo.dbi_nodes).unwrap();
-        let has_parents:bool= {
-            k.mv_data=current_inode.as_ptr() as *const c_void;
-            k.mv_size=INODE_SIZE as size_t;
-            unsafe {
-                let e= mdb_get(repo.mdb_txn,repo.dbi_revinodes,&mut k,&mut v);
-                if e==0 {
-                    let mut c=PARENT_EDGE;
-                    k.mv_data=[c].as_ptr() as *const c_void;
-                    k.mv_size=1;
-                    let e=mdb_cursor_get(curs.cursor, &mut v, &mut k,
-                                         MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint);
-                    if e==0 && k.mv_size>0 && *(k.mv_data as *const u8) == c {
-                        true
-                    } else {
-                        c=PARENT_EDGE | FOLDER_EDGE;
-                        let e=mdb_cursor_get(curs.cursor, &mut v, &mut k,
-                                             MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint);
-                        (e==0 && k.mv_size>0 && *(k.mv_data as *const u8) == c)
-                    }
-                } else { false }
-            }
-        };
-        // check whether alive. If so, return "true", else, check children and return "all dead && current dead".
-        if has_parents {
-            true
-        } else {
-            let curs_tree=Cursor::new(repo,repo.dbi_tree).unwrap();
-            let mut e= unsafe { mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_SET_RANGE as c_uint) };
-            let mut children_alive=false;
-            while (!children_alive) && e==0 && unsafe { libc::strncmp(k.mv_data as *const c_char,
-                                                                      current_inode.as_ptr() as *const c_char,
-                                                                      INODE_SIZE as size_t) } == 0 {
-                unsafe {
-                    if v.mv_size as usize>=INODE_SIZE {
-                        let next=slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize);
-                        children_alive=children_alive || dfs_tree(repo,next,buf);
-                    }
-                    e=mdb_cursor_get(curs_tree.cursor,&mut k,&mut v,MDB_cursor_op::MDB_NEXT as c_uint);
-                }
-            }
-            if !children_alive {
-                buf.extend(current_inode)
-            }
-            children_alive
-        }
-    }
-    let mut to_delete=Vec::new();
-    dfs_tree(repo,&ROOT_INODE[..],&mut to_delete);
-    unimplemented!() // Delete all inodes in to_delete from tree, revtree, inodes and revinodes.
 }
 
 struct CursIter<'a> {
-    cursor:*mut MdbCursor,
+    cursor:Cursor<'a>,
     initialized:bool,
     key:MDB_val,
-    val:MDB_val,
-    marker:PhantomData<&'a()>
+    val:MDB_val
 }
 
 impl <'a>CursIter<'a> {
-    fn new(curs:&'a Cursor<'a>,key:&'a [u8],flag:u8)->CursIter<'a>{
+    fn new(curs:Cursor<'a>,key:&'a [u8],flag:u8)->CursIter<'a>{
         unsafe {
-            CursIter { cursor:curs.cursor,
+            CursIter { cursor:curs,
                        key:MDB_val{mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t},
                        val:MDB_val{mv_data:[flag].as_ptr() as *const c_void, mv_size:1},
-                       initialized:false,
-                       marker:PhantomData }
+                       initialized:false }
         }
     }
 }
@@ -1454,7 +1447,7 @@ impl <'a> Iterator for CursIter<'a> {
     type Item=&'a [u8];
     fn next(&mut self)->Option<&'a[u8]>{
         unsafe {
-            let mut e=mdb_cursor_get(self.cursor,&mut self.key,&mut self.val,
+            let mut e=mdb_cursor_get(self.cursor.cursor,&mut self.key,&mut self.val,
                                      if self.initialized { MDB_cursor_op::MDB_NEXT_DUP}
                                      else { self.initialized=true;
                                             MDB_cursor_op::MDB_GET_BOTH_RANGE } as c_uint);
@@ -1463,20 +1456,41 @@ impl <'a> Iterator for CursIter<'a> {
     }
 }
 
+fn filename_of_inode<'a>(repo:&'a Repository,inode:&[u8],working_copy:&mut PathBuf) {
+    let mut v_inode=MDB_val{mv_data:inode.as_ptr() as *const c_void, mv_size:inode.len() as size_t};
+    let mut v_next:MDB_val = unsafe {std::mem::zeroed()};
+    let mut components=Vec::new();
+    loop {
+        let e = unsafe {mdb_get(repo.mdb_txn,repo.dbi_revtree,&mut v_inode, &mut v_next)};
+        if e==0 {
+            components.push(unsafe { slice::from_raw_parts((v_next.mv_data as *const u8).offset(INODE_SIZE as isize),
+                                                           (v_next.mv_size as usize-INODE_SIZE)) });
+            v_inode.mv_data=v_next.mv_data;
+            v_inode.mv_size=v_next.mv_size;
+        } else {
+            break
+        }
+    }
+    for c in components.iter().rev() {
+        working_copy.push(std::str::from_utf8(c).unwrap());
+    }
+}
 
-// Cette fonction est obsolète : si on a synchronisé tree et nodes (i.e. si sync_files fait son boulot), il suffit de DFS tree, en appelant retrieve sur les noeuds correspondant aux inodes.
+
 
 pub fn output_repository(repo:&mut Repository, working_copy:&Path){
     fn retrieve_paths<'a> (repo:&'a Repository,
-                           key:&'a [u8],path:&mut PathBuf,inode:&[u8],
-                           paths:&mut HashMap<PathBuf,Vec<(Vec<u8>,Vec<u8>,Vec<u8>,usize,bool)>>,
+                           working_copy:&Path,
+                           key:&'a [u8],path:&mut PathBuf,parent_inode:&'a [u8],
+                           paths:&mut HashMap<PathBuf,Vec<(&'a[u8],&'a[u8],&'a[u8],PathBuf,usize)>>,
                            cache:&mut HashSet<&'a [u8]>) {
         if !cache.contains(key) {
             cache.insert(key);
             let curs_b=Cursor::new(repo,repo.dbi_nodes).unwrap();
-            for b in CursIter::new(&curs_b,key,0).chain(CursIter::new(&curs_b,key,FOLDER_EDGE)) {
+            for b in CursIter::new(curs_b,key,FOLDER_EDGE) {
 
-                let mut bv= unsafe {MDB_val { mv_data:b.as_ptr().offset(1) as *const c_void, mv_size:KEY_SIZE as size_t }};
+                let mut bv= unsafe {MDB_val { mv_data:b.as_ptr().offset(1) as *const c_void,
+                                              mv_size:KEY_SIZE as size_t }};
                 let mut cont_b:MDB_val=unsafe { std::mem::zeroed() };
                 let e=unsafe {mdb_get(repo.mdb_txn,repo.dbi_contents,&mut bv,&mut cont_b) };
                 if e!=0 || cont_b.mv_size < 2 { panic!("node (b) without a content") } else {
@@ -1484,7 +1498,6 @@ pub fn output_repository(repo:&mut Repository, working_copy:&Path){
                     let filename=unsafe { slice::from_raw_parts(cont_b_data.offset(2),
                                                                 (cont_b.mv_size as usize)-2) };
                     let perms= unsafe{((((*cont_b_data) as usize) << 8) | (*(cont_b_data.offset(1)) as usize)) & 0x1ff};
-                    let is_file= unsafe{(((*(cont_b_data.offset(1))) as usize) & 2) != 0};
                     let cursc=Cursor::new(repo,repo.dbi_nodes);
                     unsafe {
                         bv.mv_data=cont_b_data.offset(1) as *const c_void;
@@ -1492,7 +1505,7 @@ pub fn output_repository(repo:&mut Repository, working_copy:&Path){
                     }
 
                     let curs_c=Cursor::new(repo,repo.dbi_nodes).unwrap();
-                    for c in CursIter::new(&curs_c,key,0).chain(CursIter::new(&curs_c,key,FOLDER_EDGE)) {
+                    for c in CursIter::new(curs_c,key,FOLDER_EDGE) {
 
                         let mut cv=unsafe {MDB_val { mv_data:(c.as_ptr() as *const u8).offset(1) as *const c_void,
                                                      mv_size:KEY_SIZE as size_t }};
@@ -1501,45 +1514,24 @@ pub fn output_repository(repo:&mut Repository, working_copy:&Path){
                         if e!=0 {
                             panic!("c contents not found")
                         } else {
-                            let mut inode_:MDB_val=unsafe { std::mem::zeroed() };
-                            let e=unsafe {mdb_get(repo.mdb_txn,repo.dbi_revinodes,&mut cv,&mut inode_) };
-                            let inode_=
+                            let mut inode:MDB_val = unsafe { std::mem::zeroed() };
+                            let e=unsafe {mdb_get(repo.mdb_txn,repo.dbi_revinodes,&mut cv,&mut inode) };
+                            let inode=
                                 if e==0 {
-                                    unsafe { slice::from_raw_parts(inode_.mv_data as *const u8,
-                                                                   inode_.mv_size as usize) }.to_vec()
+                                    unsafe { slice::from_raw_parts(inode.mv_data as *const u8,
+                                                                   inode.mv_size as usize) }
                                 } else {
-                                    //new file
-                                    let mut new_inode=vec![0;INODE_SIZE];
-                                    create_new_inode(repo,&mut new_inode[..]);
-                                    unsafe {
-                                        let mut k=MDB_val { mv_data:new_inode.as_ptr() as *const c_void,
-                                                            mv_size:INODE_SIZE as size_t };
-                                        let mut node:[u8;3+KEY_SIZE]=[0;3+KEY_SIZE];
-                                        let mut v=MDB_val { mv_data:node.as_ptr() as *const c_void,
-                                                            mv_size:(3+KEY_SIZE) as size_t };
-                                        copy_nonoverlapping(cont_b_data as *const u8,node.as_mut_ptr().offset(1), 2);
-                                        copy_nonoverlapping(cv.mv_data as *const u8,node.as_mut_ptr().offset(3), KEY_SIZE);
-                                        mdb_put(repo.mdb_txn,repo.dbi_inodes,&mut k,&mut v,0);
-                                        v.mv_data=node.as_ptr().offset(3) as *const c_void;
-                                        mdb_put(repo.mdb_txn,repo.dbi_revinodes,&mut v,&mut k,0);
-
-                                        let mut inode_filename:Vec<u8>=inode.to_vec();
-                                        inode_filename.extend(filename);
-                                        v.mv_data=inode_filename.as_ptr() as *const c_void;
-                                        v.mv_size=inode_filename.len() as size_t;
-                                        mdb_put(repo.mdb_txn,repo.dbi_revtree,&mut k,&mut v,0);
-                                        mdb_put(repo.mdb_txn,repo.dbi_tree,&mut k,&mut v,0);
-                                    }
-                                    new_inode
+                                    panic!("inodes not synchronized")
                                 };
-                            let cvs=unsafe {slice::from_raw_parts(cv.mv_data as *const u8,cv.mv_size as usize)};
                             {
                                 let vec=paths.entry(path.clone()).or_insert(Vec::new());
-                                vec.push((filename.to_vec(), cvs.to_vec(), inode_.clone(), perms, is_file));
+                                let mut buf=PathBuf::from(working_copy);
+                                filename_of_inode(repo,inode,&mut buf);
+                                vec.push((c,parent_inode,inode,buf,perms))
                             }
-                            if !is_file {
+                            if perms & DIRECTORY_FLAG != 0 { // is_directory
                                 path.push(std::str::from_utf8(filename).unwrap());
-                                retrieve_paths(repo,cvs,path,&inode_[..],paths,cache);
+                                retrieve_paths(repo,working_copy,c,path,inode,paths,cache);
                                 path.pop();
                             }
                         }
@@ -1549,45 +1541,44 @@ pub fn output_repository(repo:&mut Repository, working_copy:&Path){
         }
     }
     let root_key=&ROOT_KEY;
+    let root_inode=&ROOT_INODE;
     let mut paths=HashMap::new();
     let mut cache=HashSet::new();
-    let mut buf=PathBuf::new();
-    // The ocaml version rebuilds the tree. Not sure why right now.
-    unsafe {mdb_drop(repo.mdb_txn,repo.dbi_tree,0)};
-    retrieve_paths(repo,root_key,&mut buf,&ROOT_INODE,&mut paths,&mut cache);
+    let mut buf=PathBuf::from(working_copy);
+    retrieve_paths(repo,working_copy,root_key,&mut buf,root_inode,&mut paths,&mut cache);
+    unsafe {
+        mdb_drop(repo.mdb_txn,repo.dbi_tree,0);
+        mdb_drop(repo.mdb_txn,repo.dbi_revtree,0);
+    };
     for (k,a) in paths {
-        fn output(repo:&mut Repository,working_copy:&Path,
-                  current:&Path, // k
-                  basename:&PathBuf, key:Vec<u8>, inode:Vec<u8>, perms:usize,is_file:bool,
-                  suffix:&str){
-            let mut v_inode=MDB_val{mv_data:inode.as_ptr() as *const c_void, mv_size:inode.len() as size_t};
-            let mut v_next:MDB_val = unsafe {std::mem::zeroed()};
-            let mut components=Vec::new();
-            loop {
-                let e=unsafe {mdb_get(repo.mdb_txn,repo.dbi_revtree,&mut v_inode, &mut v_next)};
-                if e==0 {
-                    components.push(unsafe { slice::from_raw_parts((v_next.mv_data as *const u8).offset(INODE_SIZE as isize),
-                                                                   (v_next.mv_size as usize-INODE_SIZE)) });
-                    v_inode.mv_data=v_next.mv_data;
-                    v_inode.mv_size=v_next.mv_size;
-                } else {
-                    break
-                }
+        let alen=a.len();
+        let mut kk=k.clone();
+        let mut filename=kk.file_name().unwrap().to_os_string();
+        let mut i=0;
+        for (node,parent_inode,inode,oldpath,perms) in a {
+            if alen>1 { filename.push(format!("~{}",i)) }
+            kk.set_file_name(&filename);
+            fs::rename(oldpath,&kk);
+            unsafe {
+                let mut kk=parent_inode.to_vec();
+                kk.extend(filename.to_str().unwrap().as_bytes());
+                let mut k:MDB_val = MDB_val { mv_data:kk.as_ptr() as *const c_void, mv_size:kk.len() as size_t };
+                let mut v:MDB_val = MDB_val { mv_data:inode.as_ptr() as *const c_void, mv_size:inode.len() as size_t };
+                mdb_put(repo.mdb_txn,repo.dbi_tree,&mut k,&mut v,0);
+                mdb_put(repo.mdb_txn,repo.dbi_revtree,&mut v,&mut k,0);
             }
-            let mut former=PathBuf::from(working_copy);
-            for c in components.iter().rev() {
-                former.push(std::str::from_utf8(c).unwrap());
+            // Then (if file) output file
+            if perms & DIRECTORY_FLAG == 0 { // this is a real file, not a directory
+                let mut l=retrieve(repo,node).unwrap();
+                let mut f=std::fs::File::create(&kk).unwrap();
+                output_file(repo,&mut f,&mut l);
             }
-            let mut new_name=PathBuf::from(working_copy);
-            new_name.push(current);
-            let mut filename=new_name.file_name().unwrap().to_os_string();
-            filename.push(suffix);
-            new_name.set_file_name(filename);
-            
+            //
+            i+=1
         }
     }
 }
-
+const DIRECTORY_FLAG:usize = 0x200;
 
 pub fn debug<W>(repo:&mut Repository,w:&mut W) where W:Write {
     let mut styles=Vec::with_capacity(16);

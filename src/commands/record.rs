@@ -20,7 +20,7 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches};
 
 use commands::StaticSubcommand;
-use repository::{Repository,record,apply,sync_files,debug,HASH_SIZE};
+use repository::{Repository,record,apply,sync_file_additions,debug,HASH_SIZE};
 use repository::patch::{Patch};
 use repository::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root};
 
@@ -133,7 +133,7 @@ pub fn run(_ : &()) -> Result<Option<()>, Error> {
                 println!("Nothing to record");
                 Ok(None)
             } else {
-                //println!("patch: {:?}",changes);
+                println!("patch: {:?}",changes);
                 let patch = Patch { changes:changes };
                 // save patch
                 let patches_dir=patches_dir(r);
@@ -143,14 +143,12 @@ pub fn run(_ : &()) -> Result<Option<()>, Error> {
                     let mut repo = try!(Repository::new(&repo_dir));
                     let mut intid=[0;HASH_SIZE];
                     let internal=apply(&mut repo, &patch.changes[..], hash[..].as_bytes(), &mut intid[..]);
-                    sync_files(&mut repo,&patch.changes[..],&syncs, &intid);
+                    sync_file_additions(&mut repo,&patch.changes[..],&syncs, &intid);
                 }
-                /*
                 println!("Debugging");
                 let mut repo = try!(Repository::new(&repo_dir));
                 let mut buffer = BufWriter::new(File::create("debug").unwrap()); // change to uuid
                 debug(&mut repo,&mut buffer);
-                */
                 Ok(Some(()))
             }
         }
