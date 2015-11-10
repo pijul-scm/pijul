@@ -17,7 +17,7 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 extern crate clap;
-use clap::{SubCommand, ArgMatches};
+use clap::{SubCommand, ArgMatches, Arg};
 
 use commands::StaticSubcommand;
 use repository::{Repository,record,apply,sync_file_additions,debug,HASH_SIZE,new_internal,register_hash};
@@ -49,9 +49,20 @@ pub fn invocation() -> StaticSubcommand {
     return
         SubCommand::with_name("record")
         .about("record changes in the repository")
+        .arg(Arg::with_name("repository")
+             .index(1)
+             .help("The repository where to record, defaults to the current directory.")
+             .required(false));
 }
 
-pub fn parse_args(_: &ArgMatches) -> () {}
+pub struct Params<'a> {
+    pub repository : &'a Path
+}
+
+pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
+{
+    Params { repository : Path::new(args.value_of("repository").unwrap_or("."))}
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -117,9 +128,8 @@ fn write_patch<'a>(patch:&Patch,dir:&Path)->Result<String,Error>{
     Ok(hash)
 }
 
-pub fn run(_ : &()) -> Result<Option<()>, Error> {
-    let pwd = try!(std::env::current_dir());
-    match find_repo_root(&pwd){
+pub fn run(params : &Params) -> Result<Option<()>, Error> {
+    match find_repo_root(&params.repository){
         None => return Err(Error::NotInARepository),
         Some(r) =>
         {
