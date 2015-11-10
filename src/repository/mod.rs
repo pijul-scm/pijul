@@ -452,10 +452,11 @@ fn output_file<'a,B>(repo:&'a Repository,buf:&mut B,file:&'a mut Line) where B:L
     let mut nodes=Vec::new();
     let mut visited=HashSet::new();
     while i<counts.len() {
-        assert!(counts[i]>=1);
-        if counts[i] == 1 {
+        //assert!(counts[i]>=1);
+        if counts[i]==0 { break }
+        else if counts[i] == 1 {
             let key= unsafe { slice::from_raw_parts((*lines[i][0]).key as *const u8, KEY_SIZE as usize) };
-            unsafe { println!("outputting {:?} {}",key,str::from_utf8_unchecked(contents(repo,key))) };
+            //unsafe { println!("outputting {:?} {}",key,str::from_utf8_unchecked(contents(repo,key))) };
             buf.output_line(&key,contents(repo,key));
             i+=1
         } else {
@@ -548,9 +549,9 @@ impl <'a,W> LineBuffer<'a> for W where W:std::io::Write {
 /// corresponding external hash.
 fn external_key(repo:&Repository,key:&[u8])->ExternalKey {
     unsafe {
-        println!("internal key:{:?}",&key[0..HASH_SIZE]);
+        //println!("internal key:{:?}",&key[0..HASH_SIZE]);
         if memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t)==0 {
-            println!("is root key");
+            //println!("is root key");
             ROOT_KEY.to_vec()
         } else {
             let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:HASH_SIZE as size_t };

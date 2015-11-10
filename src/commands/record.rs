@@ -133,7 +133,7 @@ pub fn run(_ : &()) -> Result<Option<()>, Error> {
                 println!("Nothing to record");
                 Ok(None)
             } else {
-                println!("patch: {:?}",changes);
+                //println!("patch: {:?}",changes);
                 let patch = Patch { changes:changes };
                 // save patch
                 let patches_dir=patches_dir(r);
@@ -145,10 +145,12 @@ pub fn run(_ : &()) -> Result<Option<()>, Error> {
                     let internal=apply(&mut repo, &patch.changes[..], hash[..].as_bytes(), &mut intid[..]);
                     sync_file_additions(&mut repo,&patch.changes[..],&syncs, &intid);
                 }
+                /*
                 println!("Debugging");
                 let mut repo = try!(Repository::new(&repo_dir));
                 let mut buffer = BufWriter::new(File::create("debug").unwrap()); // change to uuid
                 debug(&mut repo,&mut buffer);
+                 */
                 Ok(Some(()))
             }
         }
