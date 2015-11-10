@@ -1050,8 +1050,8 @@ pub fn register_hash(repo:&mut Repository,internal:&[u8],external:&[u8]){
 pub const DEFAULT_BRANCH:&'static str="main";
 
 /// Applies a set of changes to a repository. The changes need to come from a patch.
-pub fn apply(repo:&mut Repository, changes:&[Change], internal:&[u8]) {
-    unsafe_apply(repo,changes,internal);
+pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8]) {
+    unsafe_apply(repo,&patch.changes[..],internal);
     let mut k = {
         let c:[u8;1]=[0];
         MDB_val { mv_data:c.as_ptr() as *const c_void, mv_size:1 }
@@ -1063,7 +1063,7 @@ pub fn apply(repo:&mut Repository, changes:&[Change], internal:&[u8]) {
         k.mv_size=internal.len() as size_t;
         let _= unsafe { mdb_put(repo.mdb_txn,repo.dbi_branches, &mut v, &mut k, MDB_NODUPDATA) };
     }
-    for ch in changes {
+    for ch in patch.changes.iter() {
         match *ch {
             Change::Edges(ref edges) =>{
                 for e in edges {
@@ -1139,7 +1139,35 @@ pub fn apply(repo:&mut Repository, changes:&[Change], internal:&[u8]) {
             }
         }
     }
+    for ref dep in patch.dependencies.iter() {
+        let dep_internal=internal_hash(repo.mdb_txn,repo.dbi_internal,&dep[..]);
+        mdb::put(repo.mdb_txn,repo.dbi_revdep,dep_internal,internal,0).unwrap()
+    }
+
 }
+
+
+pub fn dependencies(changes:&[Change])->Vec<patch::ExternalHash> {
+    let mut deps=Vec::new();
+    for ch in changes {
+        match *ch {
+            Change::NewNodes { ref up_context,ref down_context, line_num:_,flag:_,nodes:_ } => {
+                for c in up_context.iter().chain(down_context.iter()) {
+                    deps.push(c[0..c.len()-LINE_SIZE].to_vec())
+                }
+            },
+            Change::Edges(ref edges) =>{
+                for e in edges {
+                    deps.push(e.from[0..e.from.len()-LINE_SIZE].to_vec());
+                    deps.push(e.to[0..e.to.len()-LINE_SIZE].to_vec());
+                    deps.push(e.introduced_by.clone())
+                }
+            }
+        }
+    }
+    deps
+}
+
 
 /// This function is used to add the pseudo-edges collected in
 /// connect_up and connect_down. This is because these functions

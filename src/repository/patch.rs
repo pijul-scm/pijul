@@ -45,5 +45,6 @@ pub enum Change {
 
 #[derive(Serialize,Deserialize,Debug)]
 pub struct Patch {
-    pub changes:Vec<Change>
+    pub changes:Vec<Change>,
+    pub dependencies:Vec<ExternalHash>
 }

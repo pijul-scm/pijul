@@ -20,7 +20,7 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches, Arg};
 
 use commands::StaticSubcommand;
-use repository::{Repository,record,apply,sync_file_additions,debug,HASH_SIZE,new_internal,register_hash};
+use repository::{Repository,record,apply,sync_file_additions,debug,HASH_SIZE,new_internal,register_hash,dependencies};
 use repository::patch::{Patch};
 use repository::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root};
 use std::sync::Arc;
@@ -145,7 +145,9 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 Ok(None)
             } else {
                 //println!("patch: {:?}",changes);
-                let patch = Patch { changes:changes };
+                let deps=dependencies(&changes[..]);
+                let patch = Patch { changes:changes,
+                                    dependencies:deps };
                 // save patch
 
                 let patch_arc=Arc::new(patch);
@@ -157,7 +159,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let mut internal=[0;HASH_SIZE];
                 let mut repo = try!(Repository::new(&repo_dir));
                 new_internal(&mut repo,&mut internal);
-                apply(&mut repo, &patch_arc.changes[..], &internal[..]);
+                apply(&mut repo, &patch_arc, &internal[..]);
                 sync_file_additions(&mut repo,&patch_arc.changes[..],&syncs, &internal);
 
                 let hash:String=hash_child.join().unwrap();
