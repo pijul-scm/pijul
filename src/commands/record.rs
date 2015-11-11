@@ -20,7 +20,7 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches, Arg};
 
 use commands::StaticSubcommand;
-use repository::{Repository,record,apply,sync_file_additions,debug,HASH_SIZE,new_internal,register_hash,dependencies};
+use repository::{Repository,record,apply,sync_file_additions,HASH_SIZE,new_internal,register_hash,dependencies};
 use repository::patch::{Patch};
 use repository::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root};
 use std::sync::Arc;
@@ -41,7 +41,7 @@ use std::fs::File;
 extern crate rand;
 use std::path::{Path};
 extern crate rustc_serialize;
-use self::rustc_serialize::hex::{FromHex, ToHex};
+
 extern crate libc;
 use self::libc::funcs::posix88::unistd::{getpid};
 
