@@ -2,7 +2,8 @@ extern crate tempdir;
 
 use std::io;
 use std::fs;
-use commands::{init, info, record};
+use commands::{init, info, record, add};
+use std::error::Error;
 
 #[test]
 fn init_creates_repo() -> ()
@@ -50,5 +51,24 @@ fn in_empty_dir_nothing_to_record() {
     match record::run(&record_params).unwrap() {
         None => (),
         Some(()) => panic!("found something to record in an empty repository")
+    }
+}
+
+#[test]
+fn with_changes_sth_to_record() {
+    let dir = tempdir::TempDir::new("pijul").unwrap();
+    let init_params = init::Params { location : &dir.path(), allow_nested : false};
+    init::run(&init_params).unwrap();
+    let fpath = &dir.path().join("toto");
+    let file = fs::File::create(&fpath).unwrap();
+    let add_params = add::Params { repository : &dir.path(), added_files : vec![&fpath] };
+    match add::run(&add_params).unwrap() {
+        Some (()) => (),
+        None => panic!("no file added")        
+    };
+    let record_params = record::Params { repository : &dir.path() };
+    match record::run(&record_params).unwrap() {
+        None => panic!("file add is not going to be recorded"),
+        Some(()) => ()
     }
 }
