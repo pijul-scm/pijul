@@ -621,12 +621,10 @@ fn diff(repo:&Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut L
         Ok(_)=>{
             let mut d = Diff { lines_a:Vec::new(), contents_a:Vec::new() };
             output_file(repo,&mut d,a);
-            let mut i=0;
-            while i+1<d.contents_a.len() && i<lines_b.len() && d.contents_a[i+1]==lines_b[i] { i+=1; }
             local_diff(repo,actions, line_num,
-                       &d.lines_a[i..],
-                       &d.contents_a[i..],
-                       &lines_b[i..]);
+                       &d.lines_a[..],
+                       &d.contents_a[..],
+                       &lines_b[..]);
             Ok(())
         },
         Err(e)=>Err(e)
@@ -668,12 +666,68 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                     //println!("Existing node: {}",current_node.to_hex());
                     if current_node[0]==1 {
                         // file moved
-                        println!("file move not implemented in record");
-                        unimplemented!()
+
+                        // Delete all former names.
+                        let mut edges=Vec::new();
+                        // Now take all grandparents of l2, delete them.
+                        let mut curs_parents=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+                        for parent in CursIter::new(&mut curs_parents,&current_node[3..],FOLDER_EDGE,true) {
+                            let mut curs_grandparents=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+                            for grandparent in CursIter::new(&mut curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE,true) {
+                                edges.push(Edge {
+                                    from:external_key(repo,&parent),
+                                    to:external_key(repo,&grandparent[1..(1+KEY_SIZE)]),
+                                    flag:grandparent[0],
+                                    introduced_by:external_key(repo,&grandparent[1+KEY_SIZE..])
+                                });
+                            }
+                        }
+                        actions.push(Change::Edges(edges));
+
+
+                        // Add the new name.
+                        let attr=metadata(&realpath).unwrap();
+                        let permissions=attr.permissions().mode() as usize;
+                        let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
+                        let mut name=Vec::with_capacity(basename.len()+2);
+                        let int_attr=permissions | is_dir;
+                        name.push(((int_attr >> 8) & 0xff) as u8);
+                        name.push((int_attr & 0xff) as u8);
+                        name.extend(basename);
+                        actions.push(
+                            Change::NewNodes { up_context: vec!(external_key(repo,parent_node.unwrap())),
+                                               line_num: *line_num,
+                                               down_context: vec!(external_key(repo,&current_node[3..])),
+                                               nodes: vec!(name),
+                                               flag:FOLDER_EDGE }
+                            );
+                        *line_num += 1;
+
+
+
                     } else if current_node[0]==2 {
                         // file deleted. delete recursively
-                        println!("file deletions not implemented in record");
-                        unimplemented!()
+                        let mut edges=Vec::new();
+                        // Now take all grandparents of l2, delete them.
+                        let mut curs_parents=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+                        for parent in CursIter::new(&mut curs_parents,&current_node[3..],FOLDER_EDGE,true) {
+                            edges.push(Edge {
+                                from:external_key(repo,&current_node[3..]),
+                                to:external_key(repo,&parent[1..(1+KEY_SIZE)]),
+                                flag:parent[0],
+                                introduced_by:external_key(repo,&parent[1+KEY_SIZE..])
+                            });
+                            let mut curs_grandparents=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+                            for grandparent in CursIter::new(&mut curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE,true) {
+                                edges.push(Edge {
+                                    from:external_key(repo,&parent),
+                                    to:external_key(repo,&grandparent[1..(1+KEY_SIZE)]),
+                                    flag:grandparent[0],
+                                    introduced_by:external_key(repo,&grandparent[1+KEY_SIZE..])
+                                });
+                            }
+                        }
+                        actions.push(Change::Edges(edges));
                     } else if current_node[0]==0 {
                         let ret=retrieve(repo,&current_node[3..]);
                         diff(repo,line_num,actions, &mut ret.unwrap(), realpath.as_path()).unwrap()
@@ -696,9 +750,9 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                             let int_attr=permissions | is_dir;
                             name.push(((int_attr >> 8) & 0xff) as u8);
                             name.push((int_attr & 0xff) as u8);
-                            for c in basename { name.push(*c) }
+                            name.extend(basename);
                             actions.push(
-                                Change::NewNodes { up_context: vec!(parent_node.unwrap().to_vec()),
+                                Change::NewNodes { up_context: vec!(external_key(repo,parent_node.unwrap())),
                                                    line_num: *line_num,
                                                    down_context: vec!(),
                                                    nodes: vec!(name,vec!()),
@@ -1051,7 +1105,7 @@ pub fn register_hash(repo:&mut Repository,internal:&[u8],external:&[u8]){
 /// The name of the default branch, "main".
 pub const DEFAULT_BRANCH:&'static str="main";
 
-/// Applies a set of changes to a repository. The changes need to come from a patch.
+/// Applies a patch to a repository.
 pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8]) {
     unsafe_apply(repo,&patch.changes[..],internal);
     let mut k = {
@@ -1320,16 +1374,12 @@ fn connect_zombie_folders(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_
     fn has_alive_descendants<'a>(repo:&'a Repository,b:&'a [u8],visited:&mut HashSet<&'a[u8]>)->bool {
         if !visited.contains(b) {
             visited.insert(b);
-            let cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+            let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
             let flag= FOLDER_EDGE | DELETED_EDGE;
-            let mut k= MDB_val { mv_data:b.as_ptr() as *const c_void, mv_size:b.len() as size_t };
-            let mut v= MDB_val { mv_data:[flag].as_ptr() as *const c_void, mv_size:1 };
             let mut has_alive_desc=false;
-            let mut e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
-            while e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == flag }) && !has_alive_desc {
-                let b1= unsafe {slice::from_raw_parts( (v.mv_data as *const u8).offset(1), KEY_SIZE ) };
+            for b1 in CursIter::new(&mut cursor,b,FOLDER_EDGE|DELETED_EDGE,false) {
                 has_alive_desc = has_alive_descendants(repo,b1,visited);
-                e = unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_NEXT_DUP as c_uint) };
+                if has_alive_desc { break }
             }
             has_alive_desc || {
                 let flag=[PARENT_EDGE|FOLDER_EDGE];
@@ -1406,30 +1456,37 @@ pub fn sync_file_additions(repo:&mut Repository, changes:&[Change], updates:&Has
 }
 
 struct CursIter<'a> {
-    cursor:Cursor<'a>,
-    initialized:bool,
+    cursor:&'a mut mdb::MdbCursor,
+    op:c_uint,
+    edge_flag:u8,
+    include_pseudo:bool,
     key:MDB_val,
-    val:MDB_val
+    val:MDB_val,
 }
 
 impl <'a>CursIter<'a> {
-    fn new(curs:Cursor<'a>,key:&'a [u8],flag:u8)->CursIter<'a>{
-        CursIter { cursor:curs,
+    fn new(curs:&mut Cursor<'a>,key:&'a [u8],flag:u8,include_pseudo:bool)->CursIter<'a>{
+        CursIter { cursor:unsafe { &mut *curs.cursor },
                    key:MDB_val{mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t},
                    val:MDB_val{mv_data:[flag].as_ptr() as *const c_void, mv_size:1},
-                   initialized:false }
+                   include_pseudo:include_pseudo,
+                   edge_flag:flag,
+                   op:MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint }
     }
 }
 
-impl <'a> Iterator for CursIter<'a> {
+impl <'a>Iterator for CursIter<'a> {
     type Item=&'a [u8];
     fn next(&mut self)->Option<&'a[u8]>{
         unsafe {
-            let e=mdb_cursor_get(self.cursor.cursor,&mut self.key,&mut self.val,
-                                     if self.initialized { MDB_cursor_op::MDB_NEXT_DUP}
-                                     else { self.initialized=true;
-                                            MDB_cursor_op::MDB_GET_BOTH_RANGE } as c_uint);
-            if e==0 { Some(slice::from_raw_parts(self.val.mv_data as *const u8,self.val.mv_size as usize)) } else {None}
+            // Include_pseudo works because PSEUDO_EDGE==1, hence there is no "gap" in flags between regular edges and their pseudo version, for each kind of edge.
+            let e=mdb_cursor_get(self.cursor,&mut self.key,&mut self.val,self.op as c_uint);
+            self.op=MDB_cursor_op::MDB_NEXT_DUP as c_uint;
+            if e==0 && self.val.mv_size>0 && ((*(self.val.mv_data as *const u8) == self.edge_flag) || (self.include_pseudo && (*(self.val.mv_data as *const u8) == self.edge_flag))) {
+                Some(slice::from_raw_parts(self.val.mv_data as *const u8,self.val.mv_size as usize))
+            } else {
+                None
+            }
         }
     }
 }
@@ -1464,9 +1521,8 @@ pub fn output_repository(repo:&mut Repository, working_copy:&Path) -> Result<(),
                            cache:&mut HashSet<&'a [u8]>) {
         if !cache.contains(key) {
             cache.insert(key);
-            let curs_b=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-            let curs_b_=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-            for b in CursIter::new(curs_b,key,FOLDER_EDGE).chain(CursIter::new(curs_b_,key,FOLDER_EDGE|PSEUDO_EDGE)) {
+            let mut curs_b=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+            for b in CursIter::new(&mut curs_b,key,FOLDER_EDGE,true) {
 
                 let mut bv= unsafe {MDB_val { mv_data:b.as_ptr().offset(1) as *const c_void,
                                               mv_size:KEY_SIZE as size_t }};
@@ -1482,9 +1538,8 @@ pub fn output_repository(repo:&mut Repository, working_copy:&Path) -> Result<(),
                         bv.mv_size=KEY_SIZE as size_t
                     }
 
-                    let curs_c=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-                    let curs_c_=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-                    for c in CursIter::new(curs_c,key,FOLDER_EDGE).chain(CursIter::new(curs_c_,key,FOLDER_EDGE|PSEUDO_EDGE)) {
+                    let mut curs_c=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+                    for c in CursIter::new(&mut curs_c,key,FOLDER_EDGE,true) {
 
                         let mut cv=unsafe {MDB_val { mv_data:(c.as_ptr() as *const u8).offset(1) as *const c_void,
                                                      mv_size:KEY_SIZE as size_t }};
