@@ -104,7 +104,7 @@ impl Repository {
                         dbi_internal:open_dbi(txn,"internal\0",MDB_CREATE),
                         dbi_external:open_dbi(txn,"external\0",MDB_CREATE),
                         dbi_branches:open_dbi(txn,"branches\0",MDB_CREATE|MDB_DUPSORT),
-                        dbi_tree:open_dbi(txn,"tree\0",MDB_CREATE|MDB_DUPSORT),
+                        dbi_tree:open_dbi(txn,"tree\0",MDB_CREATE),
                         dbi_revtree:open_dbi(txn,"revtree\0",MDB_CREATE),
                         dbi_inodes:open_dbi(txn,"inodes\0",MDB_CREATE),
                         dbi_revinodes:open_dbi(txn,"revinodes\0",MDB_CREATE),
@@ -149,20 +149,17 @@ fn create_new_inode(repo:&Repository,buf:&mut [u8]){
         let mut k = MDB_val{ mv_data:buf.as_ptr() as *const c_void, mv_size:buf.len()as size_t };
         let mut v = MDB_val{ mv_data:ptr::null_mut(), mv_size:0 };
         let e= unsafe { mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_SET_RANGE as c_uint) };
-        if e==MDB_NOTFOUND { break }
-        else if e==0 {
-            if (k.mv_size as usize)>=INODE_SIZE {
-                if unsafe { memcmp(buf.as_ptr() as *const c_void, k.mv_size as *const c_void, INODE_SIZE as size_t) } != 0 { break }
-            } else {
-                panic!("Wrong encoding in create_new_inode")
-            }
+        if e==MDB_NOTFOUND {
+            break
+        } else if e==0 && (k.mv_size as usize)>=INODE_SIZE && unsafe { memcmp(buf.as_ptr() as *const c_void, k.mv_data as *const c_void, INODE_SIZE as size_t) } != 0 {
+            break
         } else {
-            panic!("e!=0 && e!=MDB_NOTFOUND")
+            panic!("Wrong encoding in create_new_inode")
         }
     }
 }
 
-fn add_inode(repo:&mut Repository, inode:&Option<[u8;INODE_SIZE]>, path:&std::path::Path, is_dir:bool)->Result<(),()>{
+fn add_inode(repo:&mut Repository, inode:&Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),()>{
     let mut buf:Inode=vec![0;INODE_SIZE];
     let mut components=path.components();
     let mut cs=components.next();
@@ -171,38 +168,34 @@ fn add_inode(repo:&mut Repository, inode:&Option<[u8;INODE_SIZE]>, path:&std::pa
         match s.as_os_str().to_str(){
             Some(ss) => {
                 buf.truncate(INODE_SIZE);
-                for c in ss.as_bytes() { buf.push(*c as u8) }
-                let mut k=MDB_val { mv_data:buf.as_ptr() as *mut c_void, mv_size:buf.len()as size_t };
-                let mut v=MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
-                let ret= unsafe { mdb_get(repo.mdb_txn,repo.dbi_tree,&mut k,&mut v) };
-                if ret==0 {
-                    // replace buf with existing inode
-                    buf.clear();
-                    let _=unsafe { copy_nonoverlapping(v.mv_data as *const c_char,buf.as_mut_ptr() as *mut c_char,v.mv_size as usize) };
-                    ()
-                } else {
-                    let inode = if cs.is_none() && inode.is_some() {
-                        inode.unwrap()
-                    } else {
-                        let mut inode:[u8;INODE_SIZE]=[0;INODE_SIZE];
-                        create_new_inode(repo,&mut inode[..]);
-                        inode
-                    };
-                    v.mv_data=inode.as_ptr() as *const c_void;
-                    v.mv_size=INODE_SIZE as size_t;
-                    //println!("add_inode.adding {:?} !",buf);
-                    unsafe { mdb_put(repo.mdb_txn,repo.dbi_tree,&mut k,&mut v,0) };
-                    //println!("adding e={}",e);
-                    unsafe { mdb_put(repo.mdb_txn,repo.dbi_revtree,&mut v,&mut k,0) };
-                    //println!("adding e={}",e);
-                    if cs.is_some() || is_dir {
-                        k.mv_data="".as_ptr() as *const c_void;
-                        k.mv_size=0;
-                        unsafe { mdb_put(repo.mdb_txn,repo.dbi_tree,&mut v,&mut k,0) };
+                buf.extend(ss.as_bytes());
+                match unsafe { mdb::get(repo.mdb_txn,repo.dbi_tree,&buf) } {
+                    Ok(v)=> {
+                        // replace buf with existing inode
+                        buf.clear();
+                        let _=unsafe { copy_nonoverlapping(v.as_ptr(),buf.as_mut_ptr(),v.len()) };
+                    },
+                    Err(_) =>{
+                        let mut inode_:[u8;INODE_SIZE]=[0;INODE_SIZE];
+                        let inode = if cs.is_none() && inode.is_some() {
+                            inode.unwrap()
+                        } else {
+                            create_new_inode(repo,&mut inode_[..]);
+                            &inode_[..]
+                        };
+                        unsafe {
+                            mdb::put(repo.mdb_txn,repo.dbi_tree,&buf,&inode,0).unwrap();
+                            mdb::put(repo.mdb_txn,repo.dbi_revtree,&inode,&buf,0).unwrap();
+                        }
+                        if cs.is_some() || is_dir {
+                            unsafe {
+                                mdb::put(repo.mdb_txn,repo.dbi_tree,&inode,&[][..],0).unwrap()
+                            }
+                        }
+                        // push next inode onto buf.
+                        buf.clear();
+                        buf.extend(inode)
                     }
-                    // push next inode onto buf.
-                    buf.clear();
-                    for c in &inode { buf.push(*c) }
                 }
             },
             None => {
@@ -220,6 +213,65 @@ pub fn add_file(repo:&mut Repository, path:&std::path::Path, is_dir:bool)->Resul
     add_inode(repo,&None,path,is_dir)
 }
 
+
+pub fn move_file(repo:&mut Repository, path:&std::path::Path, path_:&std::path::Path,is_dir:bool) {
+
+    let inode= &mut (Vec::new());
+    let parent= &mut (Vec::new());
+
+    (*inode).extend(&ROOT_INODE);
+    for c in path.components() {
+        match unsafe { mdb::get(repo.mdb_txn,repo.dbi_tree,&inode[..]) } {
+            Ok(x)=> {
+                std::mem::swap(inode,parent);
+                (*inode).clear();
+                (*inode).extend(x);
+            },
+            Err(_)=>{
+                panic!("this path doesn't exist")
+            }
+        }
+    }
+    // Now the last inode is in "*inode"
+    let basename=path.file_name().unwrap();
+    (*parent).extend(basename.to_str().unwrap().as_bytes());
+    let mut par=MDB_val { mv_data:parent.as_ptr() as *const c_void, mv_size:parent.len() as size_t };
+    unsafe { mdb_del(repo.mdb_txn,repo.dbi_tree,&mut par,std::ptr::null_mut()) };
+    add_inode(repo,&Some(inode),path_,is_dir);
+
+    match unsafe { mdb::get(repo.mdb_txn,repo.dbi_inodes,inode) } {
+        Ok(v)=> {
+            let mut vv=v.to_vec();
+            vv[0]=1;
+            unsafe { mdb::put(repo.mdb_txn,repo.dbi_inodes,inode,&vv[..],0).unwrap() }
+        },
+        Err(_)=>{
+            // Was not in inodes.
+        }
+    }
+}
+
+pub fn remove_file(repo:&mut Repository, path:&std::path::Path) {
+    let mut inode=Vec::new();
+    inode.extend(&ROOT_INODE);
+    for c in path.components() {
+        match unsafe { mdb::get(repo.mdb_txn,repo.dbi_tree,&inode[..]) } {
+            Ok(x)=> { inode.clear(); inode.extend(x) },
+            Err(_)=>{ panic!("this path doesn't exist") }
+        }
+    }
+    // Now the inode for "path" is in "inode"
+    match unsafe { mdb::get(repo.mdb_txn,repo.dbi_inodes,&inode[..]) } {
+        Ok(node) => {
+            let mut node_=node.to_vec();
+            node_[0]=2;
+            unsafe { mdb::put(repo.mdb_txn,repo.dbi_inodes,&inode[..],&node_[..],0).unwrap() }
+        },
+        Err(_)=>{
+            panic!("unregistered inode")
+        }
+    }
+}
 
 
 const LINE_HALF_DELETED:c_uchar=16;
