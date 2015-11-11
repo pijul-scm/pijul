@@ -1375,7 +1375,6 @@ fn connect_zombie_folders(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_
         if !visited.contains(b) {
             visited.insert(b);
             let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-            let flag= FOLDER_EDGE | DELETED_EDGE;
             let mut has_alive_desc=false;
             for b1 in CursIter::new(&mut cursor,b,FOLDER_EDGE|DELETED_EDGE,false) {
                 has_alive_desc = has_alive_descendants(repo,b1,visited);
