@@ -143,12 +143,12 @@ const ROOT_KEY:[u8;KEY_SIZE]=[0;KEY_SIZE];
 
 
 fn create_new_inode(repo:&Repository,buf:&mut [u8]){
-    let curs_tree=Cursor::new(repo.mdb_txn,repo.dbi_tree).unwrap();
+    let curs_revtree=Cursor::new(repo.mdb_txn,repo.dbi_revtree).unwrap();
     loop {
         for i in 0..INODE_SIZE { buf[i]=rand::random() }
         let mut k = MDB_val{ mv_data:buf.as_ptr() as *const c_void, mv_size:buf.len()as size_t };
         let mut v = MDB_val{ mv_data:ptr::null_mut(), mv_size:0 };
-        let e= unsafe { mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_SET_RANGE as c_uint) };
+        let e= unsafe { mdb_cursor_get(curs_revtree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_SET_RANGE as c_uint) };
         if e==MDB_NOTFOUND {
             break
         } else if e==0 && (k.mv_size as usize)>=INODE_SIZE && unsafe { memcmp(buf.as_ptr() as *const c_void, k.mv_data as *const c_void, INODE_SIZE as size_t) } != 0 {
@@ -164,6 +164,7 @@ fn add_inode(repo:&mut Repository, inode:&Option<&[u8]>, path:&std::path::Path, 
     let mut components=path.components();
     let mut cs=components.next();
     while let Some(s)=cs { // need to peek at the next element, so no for.
+        println!("cs={:?}",cs);
         cs=components.next();
         match s.as_os_str().to_str(){
             Some(ss) => {
@@ -246,7 +247,7 @@ pub fn move_file(repo:&mut Repository, path:&std::path::Path, path_:&std::path::
             unsafe { mdb::put(repo.mdb_txn,repo.dbi_inodes,inode,&vv[..],0).unwrap() }
         },
         Err(_)=>{
-            // Was not in inodes.
+            // Was not in inodes, nothing to do.
         }
     }
 }
@@ -826,13 +827,15 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                                 }
                                 updatables.insert(l2.to_vec(),current_inode.to_vec());
                                 let len=nodes.len();
-                                actions.push(
-                                    Change::NewNodes { up_context:vec!(l2.to_vec()),
-                                                       line_num: *line_num,
-                                                       down_context: vec!(),
-                                                       nodes: nodes,
-                                                       flag:0 }
-                                    );
+                                if !nodes.is_empty() {
+                                    actions.push(
+                                        Change::NewNodes { up_context:vec!(l2.to_vec()),
+                                                           line_num: *line_num,
+                                                           down_context: vec!(),
+                                                           nodes: nodes,
+                                                           flag:0 }
+                                        );
+                                }
                                 *line_num+=len;
                                 Some(&l2[..])
                             } else {
@@ -982,7 +985,7 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                     }
                 },
             Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
-                //println!("newnodes");
+                println!("newnodes len={}", nodes.len());
                 let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                 let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                 let mut lnum0= *line_num;
@@ -1078,6 +1081,7 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                     }
                     lnum = lnum+1;
                 }
+                //println!("down context");
                 // In this last part, u is that target (downcontext), and v is the last new node.
                 for c in down_context {
                     unsafe {
@@ -1160,6 +1164,7 @@ pub const DEFAULT_BRANCH:&'static str="main";
 /// Applies a patch to a repository.
 pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8]) {
     unsafe_apply(repo,&patch.changes[..],internal);
+    println!("unsafe applied");
     let mut k = {
         let c:[u8;1]=[0];
         MDB_val { mv_data:c.as_ptr() as *const c_void, mv_size:1 }

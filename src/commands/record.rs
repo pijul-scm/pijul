@@ -159,7 +159,9 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let mut internal=[0;HASH_SIZE];
                 let mut repo = try!(Repository::new(&repo_dir));
                 new_internal(&mut repo,&mut internal);
+                println!("applying");
                 apply(&mut repo, &patch_arc, &internal[..]);
+                println!("applied");
                 sync_file_additions(&mut repo,&patch_arc.changes[..],&syncs, &internal);
 
                 let hash:String=hash_child.join().unwrap();

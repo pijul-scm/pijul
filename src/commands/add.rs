@@ -112,7 +112,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<Option<()>, Error<'a>> {
             for file in &files[..] {
                 match metadata(file) {
                     Ok(_)=>
-                        if ! iter_after((pwd.join(*file)).components(), r.components()).is_some() {
+                        if iter_after((pwd.join(*file)).components(), r.components()).is_none() {
                             return Err(Error::NotInARepository)
                         },
                     Err(_) =>
@@ -120,15 +120,13 @@ pub fn run<'a>(args : &Params<'a>) -> Result<Option<()>, Error<'a>> {
                 }
             }
             for file in &files[..] {
-                match metadata(file) {
-                    Ok(m)=> {
-                        let mut repo = try!(Repository::new(&repo_dir));
-                        add_file(&mut repo,*file,m.is_dir()).unwrap()
-                    },
-                    Err(_) => {()}
-                }
+                let m=metadata(file).unwrap();
+                let p=pwd.join(*file);
+                let file=iter_after(p.components(), r.components()).unwrap();
+                let mut repo = try!(Repository::new(&repo_dir));
+                add_file(&mut repo,file.as_path(),m.is_dir()).unwrap()
             }
-            Ok(None)
+            Ok(Some(()))
         }
     }
 }
