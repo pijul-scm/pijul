@@ -50,7 +50,7 @@ pub fn invocation() -> StaticSubcommand {
         SubCommand::with_name("record")
         .about("record changes in the repository")
         .arg(Arg::with_name("repository")
-             .index(1)
+             .long("repository")
              .help("The repository where to record, defaults to the current directory.")
              .required(false));
 }

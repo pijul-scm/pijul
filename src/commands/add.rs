@@ -38,14 +38,26 @@ pub fn invocation() -> StaticSubcommand {
              .multiple(true)
              .help("Files to add to the repository.")
              .required(true)
+             )
+        .arg(Arg::with_name("repository")
+             .long("repository")
+             .help("Repository where to add files.")
              );
 }
 
-pub fn parse_args<'a>(args: &'a ArgMatches) -> Vec<&'a Path> {
-    match args.values_of("files") {
-        Some(l) => l.iter().map(|p| { Path::new(p.clone()) }).collect(),
-        None => vec!()
-    }
+pub struct Params<'a> {
+    pub added_files : Vec<&'a Path>,
+    pub repository : &'a Path
+}
+
+pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
+    let paths =
+        match args.values_of("files") {
+            Some(l) => l.iter().map(|&p| { Path::new(p) }).collect(),
+            None => vec!()
+        };
+    let repository = Path::new(args.value_of("repository").unwrap_or("."));
+    Params { repository : repository, added_files : paths }
 }
 
 #[derive(Debug)]
@@ -89,8 +101,9 @@ impl <'a> From<io::Error> for Error<'a> {
     }
 }
 
-pub fn run<'a>(files : &Vec<&'a Path>) -> Result<Option<()>, Error<'a>> {
-    let pwd = try!(std::env::current_dir());
+pub fn run<'a>(args : &Params<'a>) -> Result<Option<()>, Error<'a>> {
+    let files = &args.added_files;
+    let pwd = args.repository;
     match find_repo_root(&pwd){
         None => return Err(Error::NotInARepository),
         Some(r) =>
