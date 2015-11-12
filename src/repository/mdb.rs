@@ -79,6 +79,19 @@ pub unsafe fn put(txn:*mut MdbTxn,dbi:MdbDbi,key:&[u8],val:&[u8],flag:c_uint)->R
     if e==0 { Ok(()) } else {Err(e)}
 }
 
+pub unsafe fn del(txn:*mut MdbTxn,dbi:MdbDbi,key:&[u8],val:Option<&[u8]>)->Result<(),c_int> {
+    let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
+    let e= match val {
+        Some(val)=> {
+            let mut v=MDB_val { mv_data:val.as_ptr() as *const c_void, mv_size:val.len() as size_t };
+            mdb_del(txn,dbi,&mut k,&mut v)
+        },
+        None => mdb_del(txn,dbi,&mut k,std::ptr::null_mut())
+    };
+    if e==0 { Ok(()) } else {Err(e)}
+}
+
+
 //const MDB_REVERSEKEY: c_uint = 0x02;
 pub const MDB_DUPSORT: c_uint = 0x04;
 //const MDB_INTEGERKEY: c_uint = 0x08;

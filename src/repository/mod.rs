@@ -138,9 +138,7 @@ const INODE_SIZE:usize=16;
 pub const HASH_SIZE:usize=20; // pub temporaire
 const LINE_SIZE:usize=4;
 const KEY_SIZE:usize=HASH_SIZE+LINE_SIZE;
-//const ROOT_INODE:[u8;INODE_SIZE]=[0;INODE_SIZE];
 const ROOT_INODE:&'static[u8]=&[0;INODE_SIZE];
-//const ROOT_KEY:[u8;KEY_SIZE]=[0;KEY_SIZE];
 const ROOT_KEY:&'static[u8]=&[0;KEY_SIZE];
 
 fn create_new_inode(repo:&Repository,buf:&mut [u8]){
@@ -223,6 +221,7 @@ pub fn move_file(repo:&mut Repository, path:&std::path::Path, path_:&std::path::
 
     (*inode).extend(ROOT_INODE);
     for c in path.components() {
+        inode.extend(c.as_os_str().to_str().unwrap().as_bytes());
         match unsafe { mdb::get(repo.mdb_txn,repo.dbi_tree,&inode) } {
             Ok(x)=> {
                 std::mem::swap(inode,parent);
@@ -239,7 +238,7 @@ pub fn move_file(repo:&mut Repository, path:&std::path::Path, path_:&std::path::
     (*parent).extend(basename.to_str().unwrap().as_bytes());
     let mut par=MDB_val { mv_data:parent.as_ptr() as *const c_void, mv_size:parent.len() as size_t };
     unsafe { mdb_del(repo.mdb_txn,repo.dbi_tree,&mut par,std::ptr::null_mut()) };
-    add_inode(repo,&Some(inode),path_,is_dir);
+    add_inode(repo,&Some(inode),path_,is_dir).unwrap();
 
     match unsafe { mdb::get(repo.mdb_txn,repo.dbi_inodes,inode) } {
         Ok(v)=> {
@@ -257,6 +256,7 @@ pub fn remove_file(repo:&mut Repository, path:&std::path::Path) {
     let mut inode=Vec::new();
     inode.extend(ROOT_INODE);
     for c in path.components() {
+        inode.extend(c.as_os_str().to_str().unwrap().as_bytes());
         match unsafe { mdb::get(repo.mdb_txn,repo.dbi_tree,&inode) } {
             Ok(x)=> { inode.clear(); inode.extend(x) },
             Err(_)=>{ panic!("this path doesn't exist") }
@@ -513,9 +513,7 @@ fn external_key(repo:&Repository,key:&[u8])->ExternalKey {
             //println!("is root key");
             ROOT_KEY.to_vec()
         } else {
-            let mut k = MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:HASH_SIZE as size_t };
-            let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
-            match unsafe { mdb::get(repo.mdb_txn,repo.dbi_external,key) } {
+            match mdb::get(repo.mdb_txn,repo.dbi_external,key) {
                 Ok(pv)=> {
                     let mut result:Vec<u8>=Vec::with_capacity(pv.len()+LINE_SIZE);
                     result.extend(pv);
@@ -899,9 +897,9 @@ fn internal_hash<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&'a [u8])->&'a [u8] {
         if memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t)==0 {
             ROOT_KEY
         } else {
-            match unsafe {mdb::get(txn,dbi,key)} {
+            match mdb::get(txn,dbi,key) {
                 Ok(v)=>v,
-                Err(e)=>{
+                Err(_)=>{
                     println!("external key:{}",key.to_hex());
                     panic!("internal key not found !")
                 }
@@ -911,9 +909,6 @@ fn internal_hash<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&'a [u8])->&'a [u8] {
 }
 
 fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8]){
-    let curs=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-    let mut uu:MDB_val= unsafe {std::mem::zeroed() };
-    let mut vv:MDB_val= unsafe {std::mem::zeroed() };
     for ch in changes {
         match *ch {
             Change::Edges(ref edges) =>
@@ -947,34 +942,14 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                              pv.as_mut_ptr().offset(1+KEY_SIZE as isize),
                              HASH_SIZE)
                     };
-                    let _=unsafe {
-                        uu.mv_data=(pu.as_ptr().offset(1)) as *mut c_void;
-                        uu.mv_size=KEY_SIZE as size_t;
-                        vv.mv_data=(pv.as_ptr()) as *mut c_void;
-                        vv.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
-                        let e=mdb_cursor_get(curs.cursor,&mut uu,&mut vv,MDB_cursor_op::MDB_GET_BOTH as c_uint);
-                        if e==0 { mdb_cursor_del(curs.cursor,0) } else {e};
-                        uu.mv_data=(pv.as_ptr().offset(1)) as *mut c_void;
-                        uu.mv_size=KEY_SIZE as size_t;
-                        vv.mv_data=(pu.as_ptr()) as *mut c_void;
-                        vv.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
-                        let e=mdb_cursor_get(curs.cursor,&mut uu,&mut vv,MDB_cursor_op::MDB_GET_BOTH as c_uint);
-                        if e==0 { mdb_cursor_del(curs.cursor,0) } else {e};
-                    };
-                    // Then add the new edges
                     unsafe {
+                        mdb::del(repo.mdb_txn,repo.dbi_nodes,&pu[1..(1+KEY_SIZE)], Some(&pv)).unwrap();
+                        mdb::del(repo.mdb_txn,repo.dbi_nodes,&pv[1..(1+KEY_SIZE)], Some(&pu)).unwrap();
+                        // Then add the new edges
                         pu[0]=e.flag^PARENT_EDGE;
                         pv[0]=e.flag;
-                        uu.mv_data=(pu.as_ptr().offset(1)) as *mut c_void;
-                        uu.mv_size=KEY_SIZE as size_t;
-                        vv.mv_data=(pv.as_ptr()) as *mut c_void;
-                        vv.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
-                        let _=mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut uu,&mut vv,MDB_NODUPDATA);
-                        uu.mv_data=(pv.as_ptr().offset(1)) as *mut c_void;
-                        uu.mv_size=KEY_SIZE as size_t;
-                        vv.mv_data=(pu.as_ptr()) as *mut c_void;
-                        vv.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
-                        let _=mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut uu,&mut vv,MDB_NODUPDATA);
+                        mdb::put(repo.mdb_txn,repo.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
+                        mdb::put(repo.mdb_txn,repo.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
                     }
                 },
             Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
@@ -994,39 +969,23 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                          pv.as_mut_ptr().offset(1),
                          HASH_SIZE)
                 };
-                //println!("pu={}",pu.to_hex());
-                //println!("ipi={}",internal_patch_id.to_hex());
                 for c in up_context {
+                    let u= if c.len()>LINE_SIZE {
+                        internal_hash(repo.mdb_txn,repo.dbi_internal,&c[0..(c.len()-LINE_SIZE)])
+                    } else {
+                        internal_patch_id
+                    };
+                    pu[0]= (*flag) ^ PARENT_EDGE;
+                    pv[0]= *flag;
                     unsafe {
-                        let mut v0 = MDB_val { mv_data:(pu.as_ptr().offset(1)) as *const c_void,
-                                               mv_size:KEY_SIZE as size_t };
-                        let mut v1 = MDB_val { mv_data:pv.as_ptr() as *const c_void,
-                                               mv_size:(1+KEY_SIZE+HASH_SIZE) as size_t };
-                        {
-                            //println!("c.len={}, LINE_SIZE={}",c.len(), LINE_SIZE);
-                            let u= if c.len()>LINE_SIZE {
-                                internal_hash(repo.mdb_txn,repo.dbi_internal,&c[0..(c.len()-LINE_SIZE)])
-                            } else {
-                                internal_patch_id
-                            };
-                            //println!("u={}",u.to_hex());
-                            copy_nonoverlapping(u.as_ptr() as *const c_char,
-                                 pu.as_ptr().offset(1) as *mut c_char,
-                                 HASH_SIZE);
-                        }
+                        copy_nonoverlapping(u.as_ptr() as *const c_char,
+                                            pu.as_ptr().offset(1) as *mut c_char,
+                                            HASH_SIZE);
                         copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
                                             pu.as_mut_ptr().offset((1+HASH_SIZE) as isize),
                                             LINE_SIZE);
-                        pu[0]= (*flag) ^ PARENT_EDGE;
-                        pv[0]= *flag;
-                        mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut v0, &mut v1, MDB_NODUPDATA);
-                        v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
-                        v0.mv_size=KEY_SIZE as size_t;
-                        v1.mv_data=pu.as_ptr() as *const c_void;
-                        v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
-                        //println!("put (up): {}",pu.to_hex());
-                        mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut v0, &mut v1, MDB_NODUPDATA);
-                        //println!("put e={}",e);
+                        mdb::put(repo.mdb_txn,repo.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,0).unwrap();
+                        mdb::put(repo.mdb_txn,repo.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,0).unwrap();
                     }
                 }
                 //////////////
@@ -1035,16 +994,9 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                          pu.as_ptr().offset(1) as *mut c_char,
                          HASH_SIZE);
                 }
-
                 let mut lnum= *line_num + 1;
-                let mut v0:MDB_val = unsafe { std::mem::zeroed () };
-                let mut v1:MDB_val = unsafe { std::mem::zeroed () };
                 unsafe {
-                    v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
-                    v0.mv_size=KEY_SIZE as size_t;
-                    v1.mv_data=nodes[0].as_ptr() as *const c_void;
-                    v1.mv_size=nodes[0].len() as size_t;
-                    mdb_put(repo.mdb_txn,repo.dbi_contents,&mut v0, &mut v1, 0);
+                    mdb::put(repo.mdb_txn,repo.dbi_contents,&pv[1..(1+KEY_SIZE)], &nodes[0],0).unwrap();
                 }
                 for n in &nodes[1..] {
                     let mut lnum0=lnum-1;
@@ -1054,59 +1006,32 @@ fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8])
                     pu[0]= (*flag)^PARENT_EDGE;
                     pv[0]= *flag;
                     unsafe {
-                        v0.mv_data=pu.as_ptr().offset(1) as *const c_void;
-                        v0.mv_size=KEY_SIZE as size_t;
-                        v1.mv_data=pv.as_ptr() as *const c_void;
-                        v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
-                        let _=mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut v0, &mut v1, MDB_NODUPDATA);
-                        v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
-                        v0.mv_size=KEY_SIZE as size_t;
-                        v1.mv_data=pu.as_ptr() as *const c_void;
-                        v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
-                        //println!("lnum={}",lnum);
-                        //println!("adding node {} -> {}", pu.to_hex(), pv.to_hex());
-                        mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut v0, &mut v1, MDB_NODUPDATA);
-                        v1.mv_data=n.as_ptr() as *const c_void;
-                        v1.mv_size=n.len() as size_t;
-                        v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
-                        v0.mv_size=KEY_SIZE as size_t;
-                        mdb_put(repo.mdb_txn,repo.dbi_contents,&mut v0, &mut v1, 0);
+                        mdb::put(repo.mdb_txn,repo.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
+                        mdb::put(repo.mdb_txn,repo.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
+                        mdb::put(repo.mdb_txn,repo.dbi_contents,&pv[1..(1+KEY_SIZE)],&n,0).unwrap();
                     }
                     lnum = lnum+1;
                 }
                 //println!("down context");
                 // In this last part, u is that target (downcontext), and v is the last new node.
+                pu[0]= *flag;
+                pv[0]= (*flag) ^ PARENT_EDGE;
                 for c in down_context {
+                    let u= if c.len()>LINE_SIZE {
+                        internal_hash(repo.mdb_txn,repo.dbi_internal,&c[0..(c.len()-LINE_SIZE)])
+                    } else {
+                        internal_patch_id
+                    };
                     unsafe {
-                        {
-                            let u= if c.len()>LINE_SIZE {
-                                internal_hash(repo.mdb_txn,repo.dbi_internal,&c[0..(c.len()-LINE_SIZE)])
-                            } else {
-                                internal_patch_id
-                            };
-                            copy_nonoverlapping(u.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE)
-                        }
-                        //println!("c.len={}",c.len());
+                        copy_nonoverlapping(u.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE);
                         copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize) as *const c_char,
                                             pu.as_ptr().offset((1+HASH_SIZE) as isize) as *mut c_char,
                                             LINE_SIZE);
-                        pu[0]= *flag;
-                        pv[0]= (*flag) ^ PARENT_EDGE;
-
-                        let mut v0 = MDB_val { mv_data:(pu.as_ptr().offset(1)) as *const c_void,
-                                               mv_size:KEY_SIZE as size_t };
-                        let mut v1 = MDB_val { mv_data:pv.as_ptr() as *const c_void,
-                                               mv_size:(1+KEY_SIZE+HASH_SIZE) as size_t };
-                        let _=mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut v0, &mut v1, MDB_NODUPDATA);
-                        v0.mv_data=pv.as_ptr().offset(1) as *const c_void;
-                        v0.mv_size=KEY_SIZE as size_t;
-                        v1.mv_data=pu.as_ptr() as *const c_void;
-                        v1.mv_size=(1+KEY_SIZE+HASH_SIZE) as size_t;
-                        let _=mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut v0, &mut v1, MDB_NODUPDATA);
+                        mdb::put(repo.mdb_txn,repo.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
+                        mdb::put(repo.mdb_txn,repo.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
                     }
                 }
             }
-
         }
     }
 }
@@ -1136,18 +1061,11 @@ pub fn new_internal(repo:&mut Repository,result:&mut[u8]) {
     }
     create_new(result,last,last.len()-1);
 }
+
 pub fn register_hash(repo:&mut Repository,internal:&[u8],external:&[u8]){
     unsafe {
-        //println!("apply:registering external {}",external.to_hex());
-        //println!("apply:registering external {}",result.to_hex());
-        let mut exter = MDB_val { mv_data:external.as_ptr() as *const c_void, mv_size:external.len() as size_t };
-        let mut inter = MDB_val { mv_data:internal.as_ptr() as *const c_void, mv_size:HASH_SIZE as size_t};
-        let _=mdb_put(repo.mdb_txn,repo.dbi_external,&mut inter, &mut exter, MDB_NODUPDATA);
-        exter.mv_data=external.as_ptr() as *const c_void;
-        exter.mv_size=external.len() as size_t;
-        inter.mv_data=internal.as_ptr() as *const c_void;
-        inter.mv_size=internal.len() as size_t;
-        let _=mdb_put(repo.mdb_txn,repo.dbi_internal,&mut exter, &mut inter, MDB_NODUPDATA);
+        mdb::put(repo.mdb_txn,repo.dbi_external,external,internal,0).unwrap();
+        mdb::put(repo.mdb_txn,repo.dbi_internal,internal,external,0).unwrap();
     }
 }
 
@@ -1158,16 +1076,11 @@ pub const DEFAULT_BRANCH:&'static str="main";
 pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8]) {
     unsafe_apply(repo,&patch.changes,internal);
     println!("unsafe applied");
-    let mut k = {
-        let c:[u8;1]=[0];
-        MDB_val { mv_data:c.as_ptr() as *const c_void, mv_size:1 }
-    };
     {
         let current=get_current_branch(repo);
-        let mut v=MDB_val { mv_data:current.as_ptr()as *const c_void,mv_size:current.len() as size_t};
-        k.mv_data=internal.as_ptr() as *const c_void;
-        k.mv_size=internal.len() as size_t;
-        let _= unsafe { mdb_put(repo.mdb_txn,repo.dbi_branches, &mut v, &mut k, MDB_NODUPDATA) };
+        unsafe {
+            mdb::put(repo.mdb_txn,repo.dbi_branches,&current,&internal,MDB_NODUPDATA).unwrap();
+        }
     }
     for ch in patch.changes.iter() {
         match *ch {
@@ -1281,23 +1194,12 @@ pub fn dependencies(changes:&[Change])->Vec<patch::ExternalHash> {
 /// connect_up and connect_down. This is because these functions
 /// cannot directly modify the database while iterating on cursors
 fn reconnect(repo:&mut Repository,pu:&mut [u8], buf:&[u8]){
-    let mut k: MDB_val=unsafe { std::mem::zeroed() };
-    let mut v: MDB_val=unsafe { std::mem::zeroed() };
     let mut i=0;
     while i<buf.len(){
         pu[0]=buf[i] ^ PARENT_EDGE;
         unsafe {
-            k.mv_data= pu.as_ptr().offset(1) as *const c_void;
-            k.mv_size= KEY_SIZE as size_t;
-            v.mv_data= buf.as_ptr().offset(i as isize) as *const c_void;
-            v.mv_size= (1+KEY_SIZE+HASH_SIZE) as size_t;
-            let _=mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut k,&mut v,MDB_NODUPDATA);
-
-            k.mv_data= buf.as_ptr().offset((i+1) as isize) as *const c_void;
-            k.mv_size= KEY_SIZE as size_t;
-            v.mv_data= pu.as_ptr() as *const c_void;
-            v.mv_size= (1+KEY_SIZE+HASH_SIZE) as size_t;
-            let _=mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut k,&mut v,MDB_NODUPDATA);
+            mdb::put(repo.mdb_txn,repo.dbi_nodes,&pu[1..(1+KEY_SIZE)],&buf[i..(i+1+KEY_SIZE+HASH_SIZE)],MDB_NODUPDATA).unwrap();
+            mdb::put(repo.mdb_txn,repo.dbi_nodes,&buf[(i+1)..(i+1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
         }
         i+=1+KEY_SIZE+HASH_SIZE
     }
@@ -1450,14 +1352,8 @@ fn connect_zombie_folders(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_
             copy_nonoverlapping(b.as_ptr(), pv.as_mut_ptr().offset(1), KEY_SIZE);
             copy_nonoverlapping(internal_patch_id.as_ptr(), pv.as_mut_ptr().offset((1+KEY_SIZE) as isize), HASH_SIZE);
             pv[0]=FOLDER_EDGE;
-            let mut k: MDB_val=MDB_val { mv_data:pu.as_ptr().offset(1) as *const c_void, mv_size:KEY_SIZE as size_t };
-            let mut v: MDB_val=MDB_val { mv_data:pv.as_ptr() as *const c_void, mv_size:pv.len() as size_t };
-            let _=mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut k,&mut v,MDB_NODUPDATA);
-            k.mv_data= pv.as_ptr().offset(1) as *const c_void;
-            k.mv_size= KEY_SIZE as size_t;
-            v.mv_data= pu.as_ptr() as *const c_void;
-            v.mv_size= (1+KEY_SIZE+HASH_SIZE) as size_t;
-            let _=mdb_put(repo.mdb_txn,repo.dbi_nodes,&mut k,&mut v,MDB_NODUPDATA);
+            mdb::put(repo.mdb_txn,repo.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
+            mdb::put(repo.mdb_txn,repo.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
         }
     }
 }
@@ -1488,14 +1384,8 @@ pub fn sync_file_additions(repo:&mut Repository, changes:&[Change], updates:&Has
                     unsafe {
                         node[1]=(nodes[0][0] & 0xff) as u8;
                         node[2]=(nodes[0][1] & 0xff) as u8;
-                        let mut k = MDB_val { mv_data:inode_l2.as_ptr() as *const c_void, mv_size:INODE_SIZE as size_t };
-                        let mut v = MDB_val { mv_data:node.as_ptr() as *const c_void, mv_size:(3+KEY_SIZE) as size_t };
-                        mdb_put(repo.mdb_txn,repo.dbi_inodes, &mut k, &mut v, 0);
-                        k.mv_data=node.as_ptr().offset(3) as *mut c_void;
-                        k.mv_size=KEY_SIZE as size_t;
-                        v.mv_data=inode_l2.as_ptr() as *mut c_void;
-                        v.mv_size=INODE_SIZE as size_t;
-                        mdb_put(repo.mdb_txn,repo.dbi_revinodes, &mut k, &mut v, 0);
+                        mdb::put(repo.mdb_txn,repo.dbi_inodes,&inode_l2,&node,0).unwrap();
+                        mdb::put(repo.mdb_txn,repo.dbi_revinodes,&node[3..],&inode_l2,0).unwrap();
                     }
                 }
             },
