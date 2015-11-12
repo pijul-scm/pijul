@@ -71,6 +71,21 @@ pub unsafe fn get<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&[u8])->Result<&'a[u8],c_in
     let e=mdb_get(txn,dbi,&mut k,&mut v);
     if e==0 { Ok(std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)) } else {Err(e)}
 }
+pub unsafe fn cursor_get<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&[u8],val:Option<&[u8]>,op:MDB_cursor_op)->Result<&'a[u8],c_int> {
+    let mut k= MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
+    match val {
+        Some(val)=>{
+            let mut v=MDB_val { mv_data:val.as_ptr() as *const c_void,mv_size:val.len() as size_t };
+            let e=mdb_cursor_get(txn,dbi,&mut k,&mut v,op as c_uint);
+            if e==0 { Ok(std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)) } else {Err(e)}
+        },
+        None =>{
+            let mut v:MDB_val = std::mem::zeroed();
+            let e=mdb_cursor_get(txn,dbi,&mut k,&mut v,op as c_uint);
+            if e==0 { Ok(std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)) } else {Err(e)}
+        }
+    }
+}
 
 pub unsafe fn put(txn:*mut MdbTxn,dbi:MdbDbi,key:&[u8],val:&[u8],flag:c_uint)->Result<(),c_int> {
     let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
