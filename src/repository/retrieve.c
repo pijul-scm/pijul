@@ -115,7 +115,7 @@ int get(struct hashtable*t,char*key,struct c_line**value){
 #define PARENT_EDGE 4
 #define DELETED_EDGE 8
 
-struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi_nodes,MDB_dbi dbi_branches,MDB_val*branch, unsigned char*key){
+struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi_nodes,unsigned char*key){
   struct hashtable cache;
   unsigned int size=1024;
   cache.table=calloc(2*size,sizeof(void*));
@@ -160,15 +160,15 @@ struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi_nodes,MDB_dbi dbi_branches,MD
         MDB_val patch;
         patch.mv_size=HASH_SIZE;
         patch.mv_data=((char*)v.mv_data) + 1+KEY_SIZE;
-        int br=mdb_get(txn,dbi_branches,branch,&patch);
-        if(br==0) { // If the current branch knows about this edge, follow it.
-          if(l->children_off >= l->children_capacity) {
-            l->children_capacity = l->children_capacity>0 ? (2*l->children_capacity) : 1;
-            l->children=realloc(l->children,l->children_capacity * sizeof(void*));
-          }
-          l->children [l->children_off] = v.mv_data;
-          l->children_off++;
+        //int br=mdb_get(txn,dbi_branches,branch,&patch);
+        //if(br==0) { // If the current branch knows about this edge, follow it.
+        if(l->children_off >= l->children_capacity) {
+          l->children_capacity = l->children_capacity>0 ? (2*l->children_capacity) : 1;
+          l->children=realloc(l->children,l->children_capacity * sizeof(void*));
         }
+        l->children [l->children_off] = v.mv_data;
+        l->children_off++;
+        //}
         ret=mdb_cursor_get(curs,&k,&v,MDB_NEXT_DUP);
       }
       int i;

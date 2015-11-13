@@ -147,7 +147,7 @@ fn create_new_inode(repo:&Repository,buf:&mut [u8]){
         for i in 0..INODE_SIZE { buf[i]=rand::random() }
         let mut k = MDB_val{ mv_data:buf.as_ptr() as *const c_void, mv_size:buf.len()as size_t };
         let mut v = MDB_val{ mv_data:ptr::null_mut(), mv_size:0 };
-        let e= unsafe { mdb_cursor_get(curs_revtree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_SET_RANGE as c_uint) };
+        let e= unsafe { mdb_cursor_get(curs_revtree.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint) };
         if e==MDB_NOTFOUND {
             break
         } else if e==0 && (k.mv_size as usize)>=INODE_SIZE && unsafe { memcmp(buf.as_ptr() as *const c_void, k.mv_data as *const c_void, INODE_SIZE as size_t) } != 0 {
@@ -296,8 +296,8 @@ extern "C"{
     // retrieve uses hash tables growing monotonically. For time and
     // memory, we need it in C (or with fast hashtables and no copy of
     // anything) + free without RC.
-    fn c_retrieve(txn:*mut MdbTxn,dbi_nodes:MdbDbi,dbi_branches:MdbDbi,
-                  branch:*const MDB_val, key:*const c_char) -> *mut c_line;
+    fn c_retrieve(txn:*mut MdbTxn,dbi_nodes:MdbDbi,
+                  key:*const c_char) -> *mut c_line;
     fn c_free_line(c_line:*mut c_line);
 }
 
@@ -321,10 +321,7 @@ fn get_current_branch<'a>(repo:&'a Repository)->&'a[u8] {
 
 fn retrieve(repo:&Repository,key:&[u8])->Result<Line,()>{
     unsafe {
-        let current_branch=get_current_branch(repo);
-        let mut cur=MDB_val { mv_data:current_branch.as_ptr() as *const c_void, mv_size:current_branch.len() as size_t };
-        let c_line=c_retrieve(repo.mdb_txn,repo.dbi_nodes,repo.dbi_branches,
-                              &mut cur,
+        let c_line=c_retrieve(repo.mdb_txn,repo.dbi_nodes,
                               key.as_ptr() as *const c_char);
         if !c_line.is_null() {
             Ok (Line {c_line:c_line})
@@ -540,7 +537,7 @@ fn delete_edges<'a>(repo:&'a Repository, edges:&mut Vec<Edge>, key:&'a[u8]){
         unsafe {
             let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             let mut v = MDB_val{ mv_data:(c as *const c_uchar) as *const c_void, mv_size:1 };
-            let mut e= mdb_cursor_get(curs.cursor, &mut k,&mut v,MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint);
+            let mut e= mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_GET_BOTH_RANGE as c_uint);
             // take all parent or folder-parent edges:
             //println!("e={}",e);
             while e==0 && v.mv_size>0 && *(v.mv_data as (*mut c_uchar)) == *c {
@@ -556,7 +553,7 @@ fn delete_edges<'a>(repo:&'a Repository, edges:&mut Vec<Edge>, key:&'a[u8]){
                 let _=external_key(repo,pp);
 
                 edges.push(Edge { from:ext_key.clone(), to:external_key(repo,pv), flag:(*c)^DELETED_EDGE, introduced_by:external_key(repo,pp) });
-                e= mdb_cursor_get(curs.cursor, &mut k,&mut v,MDB_cursor_op::MDB_NEXT_DUP as c_uint);
+                e= mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_NEXT_DUP as c_uint);
             }
         }
     }
@@ -853,13 +850,13 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
 
                 let mut children=Vec::new();
 
-                let mut e= unsafe { mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,MDB_cursor_op::MDB_SET_RANGE as c_uint) };
+                let mut e= unsafe { mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint) };
                 while e==0 && unsafe { memcmp(k.mv_data as *const c_void, current_inode.as_ptr() as *const c_void, INODE_SIZE as size_t) } == 0 {
                     if k.mv_size>INODE_SIZE as size_t {
                         unsafe {
                             children.push((slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize),
                                            slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)));
-                            e=mdb_cursor_get(curs_tree.cursor,&mut k,&mut v,MDB_cursor_op::MDB_NEXT as c_uint);
+                            e=mdb_cursor_get(curs_tree.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint);
                         }
                     }
                 }
@@ -1046,7 +1043,7 @@ pub fn new_internal(repo:&mut Repository,result:&mut[u8]) {
         unsafe {
             let mut k:MDB_val=std::mem::zeroed();
             let mut v:MDB_val=std::mem::zeroed();
-            let e=mdb_cursor_get(curs.cursor,&mut k,&mut v, MDB_cursor_op::MDB_LAST as c_uint);
+            let e=mdb_cursor_get(curs.cursor,&mut k,&mut v, Op::MDB_LAST as c_uint);
             if e==0 && (k.mv_size as usize)>=HASH_SIZE {
                 slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize)
             } else {
@@ -1099,24 +1096,25 @@ pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8]) {
                                             v.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
                     }
                     if e.flag&DELETED_EDGE!=0 {
-                        if e.flag&PARENT_EDGE!=0 {
-                            if e.flag&FOLDER_EDGE!=0 {
-                                connect_zombie_folders(repo,&v,&u,&internal)
-                            } else {
-                                connect_down(repo,&v,&u,&internal)
-                            }
+                        let (pu,pv)= if e.flag&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
+                        if e.flag&FOLDER_EDGE!=0 {
+                            connect_down_folders(repo,pu,pv,&internal)
                         } else {
-                            if e.flag&FOLDER_EDGE!=0 {
-                                connect_zombie_folders(repo,&u,&v,&internal)
-                            } else {
-                                connect_down(repo,&u,&v,&internal)
+                            // Now connect v to alive descendants of v (following deleted edges from v).
+                            let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+                            for w in CursIter::new(&mut cursor,pv,0,false) {
+                                connect_up(repo,pv,w,&internal)
                             }
                         }
                     } else {
-                        if e.flag&PARENT_EDGE!=0 {
-                            connect_up(repo,&v,&u,&internal)
-                        } else {
-                            connect_up(repo,&u,&v,&internal)
+                        let (pu,pv) = if e.flag&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
+                        connect_up(repo,pu,pv,&internal);
+                        if e.flag&FOLDER_EDGE == 0 {
+                            // Now connect v to alive descendants of v (following deleted edges from v).
+                            let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+                            for w in CursIter::new(&mut cursor,pv,DELETED_EDGE,false) {
+                                connect_down(repo,pv,w,&internal)
+                            }
                         }
                     }
                 }
@@ -1190,10 +1188,60 @@ pub fn dependencies(changes:&[Change])->Vec<patch::ExternalHash> {
 }
 
 
-/// This function is used to add the pseudo-edges collected in
-/// connect_up and connect_down. This is because these functions
-/// cannot directly modify the database while iterating on cursors
-fn reconnect(repo:&mut Repository,pu:&mut [u8], buf:&[u8]){
+/// Add node "key" to the buffer if it is alive.
+fn add_if_alive(cursor:&Cursor,key:&[u8],internal_patch_id:&[u8],buf:&mut Vec<u8>){
+    let mut flag=[PARENT_EDGE];
+    let v= unsafe { mdb::cursor_get(&cursor,&key,Some(&flag[..]),Op::MDB_GET_BOTH_RANGE).unwrap() };
+    let is_alive=
+        if v.len()<1 { false } else {
+            v[0]==PARENT_EDGE || {
+                flag[0]=PARENT_EDGE|FOLDER_EDGE;
+                let w= unsafe { mdb::cursor_get(&cursor,&key,Some(&flag[..]),Op::MDB_GET_BOTH_RANGE).unwrap() };
+                if w.len()<1 { false } else {
+                    w[0]==FOLDER_EDGE|PARENT_EDGE
+                }
+            }
+        };
+    if is_alive {
+        buf.push(PSEUDO_EDGE|PARENT_EDGE);
+        buf.extend(key);
+        buf.extend(internal_patch_id)
+    }
+}
+
+/// Connect b to the alive ancestors of a (adding pseudo-folder edges if necessary).
+fn connect_up(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
+    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, a:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>, folder_buf:&mut Vec<u8>) {
+        if !visited.contains(a) {
+            visited.insert(a);
+            // Follow parent edges.
+            let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+            for a1 in CursIter::new(&mut cursor,&a,PARENT_EDGE|DELETED_EDGE,false) {
+                connect(visited,repo,a1,internal_patch_id,buf,folder_buf);
+            }
+            // Test for life of the current node
+            add_if_alive(&cursor,&a,&internal_patch_id,buf);
+
+            // Look at all deleted folder parents, and add them.
+            for a1 in CursIter::new(&mut cursor,&a,PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE,false) {
+                folder_buf.push(PSEUDO_EDGE|PARENT_EDGE|FOLDER_EDGE);
+                folder_buf.extend(a);
+                folder_buf.extend(internal_patch_id);
+                folder_buf.push(PSEUDO_EDGE|FOLDER_EDGE);
+                folder_buf.extend(a1);
+                folder_buf.extend(internal_patch_id);
+            }
+        }
+    }
+    let mut visited=HashSet::new();
+    let mut buf=Vec::new();
+    let mut folder_buf=Vec::new();
+    connect(&mut visited, repo,a,internal_patch_id,&mut buf,&mut folder_buf);
+    let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+    unsafe {
+        copy_nonoverlapping(b.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
+        copy_nonoverlapping(internal_patch_id.as_ptr(), pu.as_mut_ptr().offset((1+KEY_SIZE) as isize), HASH_SIZE)
+    }
     let mut i=0;
     while i<buf.len(){
         pu[0]=buf[i] ^ PARENT_EDGE;
@@ -1203,70 +1251,7 @@ fn reconnect(repo:&mut Repository,pu:&mut [u8], buf:&[u8]){
         }
         i+=1+KEY_SIZE+HASH_SIZE
     }
-}
-
-/// When an edge (a,b) is added, add a pseudo-edge from the first
-/// alive ancestors of a to b.
-fn connect_up(repo:&mut Repository, a0:&[u8], b:&[u8],internal_patch_id:&[u8]) {
-    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, a:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>, folder_buf:&mut Vec<u8>) {
-        if !visited.contains(a) {
-            visited.insert(a);
-            // Follow parent edges.
-            let cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-            let flag= PARENT_EDGE|DELETED_EDGE;
-            let mut k= MDB_val { mv_data:a.as_ptr() as *const c_void, mv_size:a.len() as size_t };
-            let mut v= MDB_val { mv_data:[flag].as_ptr() as *const c_void, mv_size:1 };
-            let mut e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
-            while e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == flag }) {
-                let a1= unsafe {slice::from_raw_parts( (v.mv_data as *const u8).offset(1), KEY_SIZE ) };
-                connect(visited,repo,a1,internal_patch_id,buf,folder_buf);
-                e = unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_NEXT_DUP as c_uint) };
-            }
-            // Then add zombie folder edges
-            let flag=[PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE];
-            let mut k= MDB_val { mv_data:a.as_ptr() as *const c_void, mv_size:a.len() as size_t };
-            let mut v= MDB_val { mv_data:flag.as_ptr() as *const c_void, mv_size:1 };
-            let mut e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
-            while e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == flag[0] }) {
-                let a1= unsafe {slice::from_raw_parts( (v.mv_data as *const u8).offset(1), KEY_SIZE ) };
-
-                folder_buf.push(PSEUDO_EDGE|PARENT_EDGE|FOLDER_EDGE);
-                for i in 0..KEY_SIZE { folder_buf.push(a[i]) }
-                for i in 0..HASH_SIZE { folder_buf.push(internal_patch_id[i]) }
-
-                folder_buf.push(PSEUDO_EDGE|FOLDER_EDGE);
-                for i in 0..KEY_SIZE { folder_buf.push(a1[i]) }
-                for i in 0..HASH_SIZE { folder_buf.push(internal_patch_id[i]) }
-
-                e = unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_NEXT_DUP as c_uint) };
-            }
-            // Test for life of the current node
-            let flag=[PARENT_EDGE];
-            let mut k= MDB_val { mv_data:a.as_ptr() as *const c_void, mv_size:a.len() as size_t };
-            let mut v= MDB_val { mv_data:flag.as_ptr() as *const c_void, mv_size:1 };
-            let e = unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
-            if e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == PARENT_EDGE }) {
-                // If there needs to be a pseudo-edge here, put the
-                // edge in a buffer, as it could disturb iterators
-                // above here in the DFS.
-                buf.push(PSEUDO_EDGE|PARENT_EDGE);
-                for i in 0..KEY_SIZE { buf.push(a[i]) }
-                for i in 0..HASH_SIZE { buf.push(internal_patch_id[i]) }
-            }
-        }
-    }
-    let mut visited=HashSet::new();
-    let mut buf=Vec::new();
-    let mut folder_buf=Vec::new();
-    connect(&mut visited, repo,a0,internal_patch_id,&mut buf,&mut folder_buf);
-    let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-    unsafe {
-        copy_nonoverlapping(b.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
-        copy_nonoverlapping(internal_patch_id.as_ptr(), pu.as_mut_ptr().offset((1+KEY_SIZE) as isize), HASH_SIZE)
-    }
-    reconnect(repo,&mut pu, &buf);
-
-    let mut i=0;
+    i=0;
     while i<folder_buf.len(){
         unsafe {
             mdb::put(repo.mdb_txn,repo.dbi_nodes,
@@ -1278,85 +1263,100 @@ fn connect_up(repo:&mut Repository, a0:&[u8], b:&[u8],internal_patch_id:&[u8]) {
         }
         i+=2*(1+KEY_SIZE+HASH_SIZE)
     }
-
-
 }
 
-/// When an edge (a,b) is deleted, add a pseudo-edge from a to the earliest alive descendants of b.
-fn connect_down(repo:&mut Repository, a:&[u8], b0:&[u8],internal_patch_id:&[u8]) {
+/// Connect a to the alive descendants of b (not including folder descendants).
+fn connect_down(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
     fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>) {
         if !visited.contains(b) {
             visited.insert(b);
-            let cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-            let flag= 0;
-            let mut k= MDB_val { mv_data:b.as_ptr() as *const c_void, mv_size:b.len() as size_t };
-            let mut v= MDB_val { mv_data:[flag].as_ptr() as *const c_void, mv_size:1 };
-            let mut e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
-            while e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == flag }) {
-                let b1= unsafe {slice::from_raw_parts( (v.mv_data as *const u8).offset(1), KEY_SIZE ) };
+            let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+            let flag=DELETED_EDGE;
+            for b1 in CursIter::new(&mut cursor,&b,flag,true) {
                 connect(visited,repo,b1,internal_patch_id,buf);
-                e = unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_NEXT_DUP as c_uint) };
             }
-            let flag=[PARENT_EDGE];
-            let mut k= MDB_val { mv_data:b.as_ptr() as *const c_void, mv_size:b.len() as size_t };
-            let mut v= MDB_val { mv_data:flag.as_ptr() as *const c_void, mv_size:1 };
-            e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
-            if e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == PARENT_EDGE }) {
-                // If there needs to be a pseudo-edge here
-                buf.push(PSEUDO_EDGE);
-                for i in 0..KEY_SIZE { buf.push(b[i]) }
-                for i in 0..HASH_SIZE { buf.push(internal_patch_id[i]) }
-            }
+            add_if_alive(&cursor,&b,&internal_patch_id,buf);
         }
     }
     let mut visited=HashSet::new();
     let mut buf=Vec::new();
-    connect(&mut visited, repo,b0,internal_patch_id,&mut buf);
+    connect(&mut visited, repo,b,internal_patch_id,&mut buf);
     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
     unsafe {
         copy_nonoverlapping(a.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
         copy_nonoverlapping(internal_patch_id.as_ptr(), pu.as_mut_ptr().offset((1+KEY_SIZE) as isize), HASH_SIZE)
     }
-    reconnect(repo,&mut pu,&buf);
+    let mut i=0;
+    while i<buf.len(){
+        pu[0]=buf[i] ^ PARENT_EDGE;
+        unsafe {
+            mdb::put(repo.mdb_txn,repo.dbi_nodes,&pu[1..(1+KEY_SIZE)],&buf[i..(i+1+KEY_SIZE+HASH_SIZE)],MDB_NODUPDATA).unwrap();
+            mdb::put(repo.mdb_txn,repo.dbi_nodes,&buf[(i+1)..(i+1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
+        }
+        i+=1+KEY_SIZE+HASH_SIZE
+    }
 }
 
-/// Adds a pseudo-edge between a and b if b has alive folder descendants.
-/// This is meant to detect conflicts where Alice deletes a folder F while Bob adds a file in F.
-fn connect_zombie_folders(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
-    fn has_alive_descendants<'a>(repo:&'a Repository,b:&'a [u8],visited:&mut HashSet<&'a[u8]>)->bool {
+
+
+/// Connect a to the alive descendants of b (not including folder descendants).
+fn connect_down_folders(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
+    fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, a:&'a[u8],b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>)->bool {
         if !visited.contains(b) {
             visited.insert(b);
             let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-            let mut has_alive_desc=false;
-            for b1 in CursIter::new(&mut cursor,b,FOLDER_EDGE|DELETED_EDGE,false) {
-                has_alive_desc = has_alive_descendants(repo,b1,visited);
-                if has_alive_desc { break }
+            let flag=DELETED_EDGE|FOLDER_EDGE;
+            let mut has_alive_descendants=false;
+            for b1 in CursIter::new(&mut cursor,&b,flag,true) {
+                has_alive_descendants = has_alive_descendants ||
+                    connect(visited,repo,b,b1,internal_patch_id,buf);
             }
-            has_alive_desc || {
-                let flag=[PARENT_EDGE|FOLDER_EDGE];
-                let mut k= MDB_val { mv_data:b.as_ptr() as *const c_void, mv_size:b.len() as size_t };
-                let mut v= MDB_val { mv_data:flag.as_ptr() as *const c_void, mv_size:1 };
-                let e= unsafe { mdb_cursor_get(cursor.cursor, &mut k, &mut v, MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint) };
-                (e==0 && v.mv_size>=1 && (unsafe { *(v.mv_data as *const u8) == flag[0] }))
+            // test for life.
+            let flag=[PARENT_EDGE|FOLDER_EDGE];
+            let v= unsafe { mdb::cursor_get(&cursor,&b,Some(&flag[..]),Op::MDB_GET_BOTH_RANGE).unwrap() };
+            let is_alive= if v.len()<1 { false } else { v[0]==flag[0] };
+            if is_alive {
+                true
+            } else {
+                if has_alive_descendants {
+                    // dead, but with alive descendants: conflict!
+                    buf.push(PARENT_EDGE|FOLDER_EDGE|PSEUDO_EDGE);
+                    buf.extend(a);
+                    buf.extend(internal_patch_id);
+                    buf.push(FOLDER_EDGE|PSEUDO_EDGE);
+                    buf.extend(b);
+                    buf.extend(internal_patch_id);
+                    true
+                } else {
+                    false
+                }
             }
-        } else { false }
-    }
-    let mut visited=HashSet::new();
-    if has_alive_descendants(repo,b,&mut visited) {
-        let mut pu=[0;1+HASH_SIZE+KEY_SIZE];
-        let mut pv=[0;1+HASH_SIZE+KEY_SIZE];
-        unsafe {
-            copy_nonoverlapping(a.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
-            copy_nonoverlapping(internal_patch_id.as_ptr(), pu.as_mut_ptr().offset((1+KEY_SIZE) as isize), HASH_SIZE);
-            pu[0]=FOLDER_EDGE|PARENT_EDGE;
-            copy_nonoverlapping(b.as_ptr(), pv.as_mut_ptr().offset(1), KEY_SIZE);
-            copy_nonoverlapping(internal_patch_id.as_ptr(), pv.as_mut_ptr().offset((1+KEY_SIZE) as isize), HASH_SIZE);
-            pv[0]=FOLDER_EDGE;
-            mdb::put(repo.mdb_txn,repo.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
-            mdb::put(repo.mdb_txn,repo.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
+        } else {
+            // This should never happen
+            false
         }
     }
+    let mut visited=HashSet::new();
+    let mut buf=Vec::new();
+    connect(&mut visited, repo,a,b,internal_patch_id,&mut buf);
+    let mut i=0;
+    while i<buf.len(){
+        let sz=1+KEY_SIZE+HASH_SIZE;
+        unsafe {
+            mdb::put(repo.mdb_txn,repo.dbi_nodes,
+                     &buf[(i+1)..(i+1+KEY_SIZE)],
+                     &buf[(i+sz)..(i+2*sz)],MDB_NODUPDATA).unwrap();
+            mdb::put(repo.mdb_txn,repo.dbi_nodes,
+                     &buf[(i+sz+1)..(i+sz+1+KEY_SIZE)],
+                     &buf[i..(i+sz)],MDB_NODUPDATA).unwrap();
+        }
+        i+=2*sz
+    }
 }
+
+
+
+
 
 
 
@@ -1410,7 +1410,7 @@ impl <'a>CursIter<'a> {
                    val:MDB_val{mv_data:[flag].as_ptr() as *const c_void, mv_size:1},
                    include_pseudo:include_pseudo,
                    edge_flag:flag,
-                   op:MDB_cursor_op::MDB_GET_BOTH_RANGE as c_uint }
+                   op:Op::MDB_GET_BOTH_RANGE as c_uint }
     }
 }
 
@@ -1420,7 +1420,7 @@ impl <'a>Iterator for CursIter<'a> {
         unsafe {
             // Include_pseudo works because PSEUDO_EDGE==1, hence there is no "gap" in flags between regular edges and their pseudo version, for each kind of edge.
             let e=mdb_cursor_get(self.cursor,&mut self.key,&mut self.val,self.op as c_uint);
-            self.op=MDB_cursor_op::MDB_NEXT_DUP as c_uint;
+            self.op=Op::MDB_NEXT_DUP as c_uint;
             if e==0 && self.val.mv_size>0 && ((*(self.val.mv_data as *const u8) == self.edge_flag) || (self.include_pseudo && (*(self.val.mv_data as *const u8) == self.edge_flag))) {
                 Some(slice::from_raw_parts(self.val.mv_data as *const u8,self.val.mv_size as usize))
             } else {
@@ -1565,7 +1565,7 @@ pub fn debug<W>(repo:&mut Repository,w:&mut W) where W:Write {
     unsafe {
         let mut k:MDB_val=std::mem::zeroed();
         let mut v:MDB_val=std::mem::zeroed();
-        let mut e=mdb_cursor_get(curs.cursor,&mut k,&mut v,MDB_cursor_op::MDB_FIRST as c_uint);
+        let mut e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_FIRST as c_uint);
         //println!("debug e={}",e);
         let cur=&[];
         while e==0 {
@@ -1581,7 +1581,7 @@ pub fn debug<W>(repo:&mut Repository,w:&mut W) where W:Write {
             }
             let flag:u8= * (v.mv_data as *const u8);
             write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", (&kk).to_hex(), (&vv).to_hex(), styles[(flag&0xff) as usize], flag).unwrap();
-            e=mdb_cursor_get(curs.cursor,&mut k,&mut v,MDB_cursor_op::MDB_NEXT as c_uint);
+            e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint);
         }
     }
     w.write(b"}\n").unwrap();
