@@ -107,12 +107,16 @@ impl From<io::Error> for Error {
 
 fn write_patch<'a>(patch:&Patch,dir:&Path)->Result<String,Error>{
     let mut name:[u8;20]=[0;20];
-    for i in 0..name.len() { let r:u8=rand::random(); name[i] = 97 + (r%26) }
-    let tmp=dir.join(std::str::from_utf8(&name[..]).unwrap());
-    {
-        let mut buffer = BufWriter::new(try!(File::create(&tmp))); // change to uuid
-        try!(serde_cbor::ser::to_writer(&mut buffer,&patch).map_err(Error::Serde));
+    fn make_name(dir:&Path,name:&mut [u8])->std::path::PathBuf{
+        for i in 0..name.len() { let r:u8=rand::random(); name[i] = 97 + (r%26) }
+        let tmp=dir.join(std::str::from_utf8(&name[..]).unwrap());
+        if std::fs::metadata(&tmp).is_err() { tmp } else { make_name(dir,name) }
     }
+    let tmp=make_name(&dir,&mut name);
+
+    let mut buffer = BufWriter::new(try!(File::create(&tmp))); // change to uuid
+    try!(serde_cbor::ser::to_writer(&mut buffer,&patch).map_err(Error::Serde));
+
     // hash
     let mut buffer = BufReader::new(try!(File::open(&tmp).map_err(Error::IoError))); // change to uuid
     let mut hasher = Sha512::new();
@@ -159,9 +163,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let mut internal=[0;HASH_SIZE];
                 let mut repo = try!(Repository::new(&repo_dir));
                 new_internal(&mut repo,&mut internal);
-                println!("applying");
                 apply(&mut repo, &patch_arc, &internal[..]);
-                println!("applied");
                 sync_file_additions(&mut repo,&patch_arc.changes[..],&syncs, &internal);
 
                 let hash:String=hash_child.join().unwrap();

@@ -1332,8 +1332,9 @@ fn connect_down_folders(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_id
                 }
             }
         } else {
-            // This should never happen
-            false
+            // This should never happen, since the "folder part" of the graph is a tree.
+            // Maybe remove the "visited" hash set altogether after debugging.
+            unreachable!()
         }
     }
     let mut visited=HashSet::new();
