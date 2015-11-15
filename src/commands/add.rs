@@ -22,7 +22,7 @@ use clap::{SubCommand, ArgMatches,Arg};
 use commands::StaticSubcommand;
 use repository::{Repository,add_file};
 use repository::fs_representation::{repo_dir, pristine_dir, find_repo_root};
-
+use repository;
 use std;
 use std::io;
 use std::fmt;
@@ -65,6 +65,7 @@ pub enum Error <'a>{
     NotInARepository,
     PathNotFound(&'a Path),
     IoError(io::Error),
+    Repository(repository::Error)
 }
 
 impl <'a> fmt::Display for Error<'a> {
@@ -73,6 +74,7 @@ impl <'a> fmt::Display for Error<'a> {
             Error::NotInARepository => write!(f, "Not in a repository"),
             Error::PathNotFound(p) => write!(f, "Path not found: {}", p.to_string_lossy()),
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
+            Error::Repository(ref err) => write!(f, "Repository error: {}", err),
         }
     }
 }
@@ -83,12 +85,14 @@ impl <'a> error::Error for Error<'a> {
             Error::NotInARepository => "not in a repository",
             Error::PathNotFound(_) => "path not found",
             Error::IoError(ref err) => error::Error::description(err),
+            Error::Repository(ref err) => repository::Error::description(err),
         }
     }
 
     fn cause(&self) -> Option<&error::Error> {
         match *self {
             Error::IoError(ref err) => Some(err),
+            Error::Repository(ref err) => Some(err),
             Error::PathNotFound(_) => None,
             Error::NotInARepository => None
         }
@@ -123,7 +127,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<Option<()>, Error<'a>> {
                 let m=metadata(file).unwrap();
                 let p=pwd.join(*file);
                 let file=iter_after(p.components(), r.components()).unwrap();
-                let mut repo = try!(Repository::new(&repo_dir));
+                let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 add_file(&mut repo,file.as_path(),m.is_dir()).unwrap()
             }
             Ok(Some(()))

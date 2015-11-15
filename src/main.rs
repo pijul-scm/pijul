@@ -47,6 +47,7 @@ fn main() {
                                "check" => check,
                                "init" => init,
                                "add" => add,
-                               "record" => record);
+                               "record" => record,
+                               "pull" => pull);
 }
 

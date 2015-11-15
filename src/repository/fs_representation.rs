@@ -36,6 +36,10 @@ pub fn pristine_dir(p : &Path) -> PathBuf {
 pub fn patches_dir(p : &Path) -> PathBuf {
     return p.join(pijul_dir_name()).join("patches")
 }
+pub fn branch_changes_file(p : &Path, b: &str) -> PathBuf {
+    let changes=String::from("changes.") + &to_hex(b.as_bytes())[..];
+    return p.join(pijul_dir_name()).join(changes)
+}
 
 pub fn find_repo_root(dir : &Path) -> Option<&Path> {
     let pijul_dir = repo_dir(dir);
@@ -57,3 +61,18 @@ pub fn create(dir : &Path) -> io::Result<()> {
     try!(create_dir(&repo_dir));
     Ok(())
 }
+
+
+// The following is from the rust project, see http://rust-lang.org/COPYRIGHT.
+pub fn to_hex(x:&[u8]) -> String {
+    let mut v = Vec::with_capacity(x.len() * 2);
+    for &byte in x.iter() {
+        v.push(CHARS[(byte >> 4) as usize]);
+        v.push(CHARS[(byte & 0xf) as usize]);
+    }
+
+    unsafe {
+        String::from_utf8_unchecked(v)
+    }
+}
+static CHARS: &'static[u8] = b"0123456789abcdef";

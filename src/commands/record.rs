@@ -21,6 +21,7 @@ use clap::{SubCommand, ArgMatches, Arg};
 
 use commands::StaticSubcommand;
 use repository::{Repository,record,apply,sync_file_additions,HASH_SIZE,new_internal,register_hash,dependencies};
+use repository;
 use repository::patch::{Patch};
 use repository::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root};
 use std::sync::Arc;
@@ -40,7 +41,6 @@ use std::io::{BufWriter,BufReader,BufRead};
 use std::fs::File;
 extern crate rand;
 use std::path::{Path};
-extern crate rustc_serialize;
 
 extern crate libc;
 use self::libc::funcs::posix88::unistd::{getpid};
@@ -69,6 +69,8 @@ pub enum Error {
     NotInARepository,
     IoError(io::Error),
     Serde(serde_cbor::error::Error),
+    SavingPatch,
+    Repository(repository::Error)
 }
 
 impl fmt::Display for Error {
@@ -77,6 +79,8 @@ impl fmt::Display for Error {
             Error::NotInARepository => write!(f, "Not in a repository"),
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
             Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
+            Error::Repository(ref err) => write!(f, "Repository: {}", err),
+            Error::SavingPatch => write!(f, "Patch saving error"),
         }
     }
 }
@@ -87,6 +91,8 @@ impl error::Error for Error {
             Error::NotInARepository => "not in a repository",
             Error::IoError(ref err) => error::Error::description(err),
             Error::Serde(ref err) => serde_cbor::error::Error::description(err),
+            Error::Repository(ref err) => repository::Error::description(err),
+            Error::SavingPatch => "saving patch"
         }
     }
 
@@ -94,7 +100,9 @@ impl error::Error for Error {
         match *self {
             Error::IoError(ref err) => Some(err),
             Error::Serde(ref err) => Some(err),
-            Error::NotInARepository => None
+            Error::Repository(ref err) => Some(err),
+            Error::NotInARepository => None,
+            Error::SavingPatch => None
         }
     }
 }
@@ -139,11 +147,10 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
         {
             let repo_dir=pristine_dir(r);
             let (changes,syncs)= {
-                let mut repo = try!(Repository::new(&repo_dir));
-                try!(record(&mut repo, &r))
+                let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
+                try!(record(&mut repo, &r).map_err(Error::Repository))
             };
             //println!("recorded");
-            println!("pid= {}",unsafe {libc::funcs::posix88::unistd::getpid() });
             if changes.is_empty() {
                 println!("Nothing to record");
                 Ok(None)
@@ -158,24 +165,32 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let child_patch=patch_arc.clone();
                 let patches_dir=patches_dir(r);
                 let hash_child=thread::spawn(move || {
-                    write_patch(&child_patch,&patches_dir).unwrap()
+                    write_patch(&child_patch,&patches_dir)
                 });
                 let mut internal=[0;HASH_SIZE];
-                let mut repo = try!(Repository::new(&repo_dir));
+                let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 new_internal(&mut repo,&mut internal);
                 apply(&mut repo, &patch_arc, &internal[..]);
                 sync_file_additions(&mut repo,&patch_arc.changes[..],&syncs, &internal);
 
-                let hash:String=hash_child.join().unwrap();
-                register_hash(&mut repo,&internal[..],hash.as_bytes());
-
+                match hash_child.join() {
+                    Ok(Ok(hash))=> {
+                        register_hash(&mut repo,&internal[..],hash.as_bytes());
+                        Ok(Some(()))
+                    },
+                    Ok(Err(x)) => {
+                        Err(x)
+                    },
+                    Err(_)=>{
+                        Err(Error::SavingPatch)
+                    }
+                }
                 /*
                 println!("Debugging");
                 let mut repo = try!(Repository::new(&repo_dir));
                 let mut buffer = BufWriter::new(File::create("debug").unwrap()); // change to uuid
                 debug(&mut repo,&mut buffer);
                  */
-                Ok(Some(()))
             }
         }
     }

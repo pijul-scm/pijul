@@ -30,7 +30,10 @@ extern crate rand;
 use std::path::{PathBuf,Path};
 
 use std::io::prelude::*;
-use std::io::Error;
+use std::io;
+use std::error;
+
+use std::fmt;
 use std::collections::HashSet;
 use std::fs::{metadata};
 pub mod fs_representation;
@@ -65,57 +68,92 @@ pub struct Repository{
     dbi_revinodes:MdbDbi
 }
 
+#[derive(Debug)]
+pub enum Error{
+    IoError(io::Error),
+    AlreadyApplied
+}
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Error::IoError(ref err) => write!(f, "IO error: {}", err),
+            Error::AlreadyApplied => write!(f, "Patch already applied")
+        }
+    }
+}
+
+impl error::Error for Error {
+    fn description(&self) -> &str {
+        match *self {
+            Error::IoError(ref err) => error::Error::description(err),
+            Error::AlreadyApplied => "Patch already applied"
+        }
+    }
+
+    fn cause(&self) -> Option<&error::Error> {
+        match *self {
+            Error::IoError(ref err) => Some(err),
+            Error::AlreadyApplied => None
+        }
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Error {
+        Error::IoError(err)
+    }
+}
+
+
+
 impl Repository {
     pub fn new(path:&std::path::Path)->Result<Repository,Error>{
         unsafe {
             let env=ptr::null_mut();
             let e=mdb_env_create(std::mem::transmute(&env));
             if e != 0 { println!("mdb_env_create");
-                        return Err(Error::from_raw_os_error(e)) };
+                        return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) };
             let mut dead:c_int=0;
             let e=mdb_reader_check(env,&mut dead);
-            if e != 0 { println!("mdb_reader_check");return Err(Error::from_raw_os_error(e)) };
+            if e != 0 { println!("mdb_reader_check");
+                        return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
             let e=mdb_env_set_maxdbs(env,10);
-            if e != 0 { println!("mdb_env_set_maxdbs");return Err(Error::from_raw_os_error(e)) };
+            if e != 0 { println!("mdb_env_set_maxdbs");
+                        return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
             let e=mdb_env_set_mapsize(env,std::ops::Shl::shl(1,30) as size_t);
-            if e !=0 { println!("mdb_env_set_mapsize");return Err(Error::from_raw_os_error(e)) };
-            let p=path.as_os_str().to_str();
-            match p {
-                Some(pp) => {
-                    let e=mdb_env_open(env,pp.as_ptr() as *const i8,0,0o755);
-                    if e !=0 { println!("mdb_env_open");return Err(Error::from_raw_os_error(e)) };
+            if e !=0 { println!("mdb_env_set_mapsize");
+                       return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
+            let pp=path.as_os_str().to_str().unwrap();
+            let e=mdb_env_open(env,pp.as_ptr() as *const i8,0,0o755);
+            if e !=0 { println!("mdb_env_open");
+                       return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
 
-                    let txn=ptr::null_mut();
-                    let e=mdb_txn_begin(env,ptr::null_mut(),0,std::mem::transmute(&txn));
-                    if e !=0 { println!("mdb_env_open");return Err(Error::from_raw_os_error(e)) };
-                    fn open_dbi(txn:*mut MdbTxn,name:&str,flag:c_uint)->MdbDbi {
-                        let mut d=0;
-                        let e=unsafe { mdb_dbi_open(txn,name.as_ptr() as *const c_char,flag,&mut d) };
-                        if e==0 { d } else {
-                            panic!("Database could not be opened")
-                        }
-                    }
-                    let repo=Repository{
-                        mdb_env:env,
-                        mdb_txn:txn,
-                        dbi_nodes:open_dbi(txn,"nodes\0",MDB_CREATE|MDB_DUPSORT),
-                        dbi_revdep:open_dbi(txn,"revdep\0",MDB_CREATE|MDB_DUPSORT),
-                        dbi_contents:open_dbi(txn,"contents\0",MDB_CREATE),
-                        dbi_internal:open_dbi(txn,"internal\0",MDB_CREATE),
-                        dbi_external:open_dbi(txn,"external\0",MDB_CREATE),
-                        dbi_branches:open_dbi(txn,"branches\0",MDB_CREATE|MDB_DUPSORT),
-                        dbi_tree:open_dbi(txn,"tree\0",MDB_CREATE),
-                        dbi_revtree:open_dbi(txn,"revtree\0",MDB_CREATE),
-                        dbi_inodes:open_dbi(txn,"inodes\0",MDB_CREATE),
-                        dbi_revinodes:open_dbi(txn,"revinodes\0",MDB_CREATE),
-                    };
-                    Ok(repo)
-                },
-                None => {
-                    println!("invalid path");
-                    Err(Error::from_raw_os_error(0))
+            let txn=ptr::null_mut();
+            let e=mdb_txn_begin(env,ptr::null_mut(),0,std::mem::transmute(&txn));
+            if e !=0 { println!("mdb_env_open");
+                       return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
+            fn open_dbi(txn:*mut MdbTxn,name:&str,flag:c_uint)->MdbDbi {
+                let mut d=0;
+                let e=unsafe { mdb_dbi_open(txn,name.as_ptr() as *const c_char,flag,&mut d) };
+                if e==0 { d } else {
+                    panic!("Database could not be opened")
                 }
             }
+            let repo=Repository{
+                mdb_env:env,
+                mdb_txn:txn,
+                dbi_nodes:open_dbi(txn,"nodes\0",MDB_CREATE|MDB_DUPSORT),
+                dbi_revdep:open_dbi(txn,"revdep\0",MDB_CREATE|MDB_DUPSORT),
+                dbi_contents:open_dbi(txn,"contents\0",MDB_CREATE),
+                dbi_internal:open_dbi(txn,"internal\0",MDB_CREATE),
+                dbi_external:open_dbi(txn,"external\0",MDB_CREATE),
+                dbi_branches:open_dbi(txn,"branches\0",MDB_CREATE|MDB_DUPSORT),
+                dbi_tree:open_dbi(txn,"tree\0",MDB_CREATE),
+                dbi_revtree:open_dbi(txn,"revtree\0",MDB_CREATE),
+                dbi_inodes:open_dbi(txn,"inodes\0",MDB_CREATE),
+                dbi_revinodes:open_dbi(txn,"revinodes\0",MDB_CREATE),
+            };
+            Ok(repo)
         }
     }
 }
@@ -310,7 +348,7 @@ impl Drop for Line {
 
 
 
-fn get_current_branch<'a>(repo:&'a Repository)->&'a[u8] {
+pub fn get_current_branch<'a>(repo:&'a Repository)->&'a[u8] {
     unsafe {
         match mdb::get(repo.mdb_txn,repo.dbi_branches,&[0]) {
             Ok(b)=>b,
@@ -880,7 +918,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
     let mut line_num=1;
     let mut updatables:HashMap<Vec<u8>,Vec<u8>>=HashMap::new();
     let mut realpath=PathBuf::from(working_copy);
-    let mut curs_tree=try!(Cursor::new(repo.mdb_txn,repo.dbi_tree));
+    let mut curs_tree=try!(Cursor::new(repo.mdb_txn,repo.dbi_tree).map_err(Error::IoError));
     dfs(repo,&mut actions,&mut curs_tree, &mut line_num,&mut updatables,
         None,None,ROOT_INODE,&mut realpath,
         &[]);
@@ -1069,16 +1107,34 @@ pub fn register_hash(repo:&mut Repository,internal:&[u8],external:&[u8]){
 /// The name of the default branch, "main".
 pub const DEFAULT_BRANCH:&'static str="main";
 
+pub fn has_patch(repo:&mut Repository, branch:&[u8], hash:&[u8])->Result<bool,Error>{
+    unsafe {
+        let internal=internal_hash(repo.mdb_txn,repo.dbi_internal,hash);
+        let curs=try!(Cursor::new(repo.mdb_txn,repo.dbi_branches).map_err(Error::IoError));
+        match mdb::cursor_get(&curs,branch,Some(internal),Op::MDB_GET_BOTH) {
+            Ok(_)=>Ok(true),
+            Err(MDB_NOTFOUND)=>Ok(false),
+            Err(_)=>Ok(false) // TODO
+        }
+    }
+}
+
+
 /// Applies a patch to a repository.
-pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8]) {
-    unsafe_apply(repo,&patch.changes,internal);
-    println!("unsafe applied");
+pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8])->Result<(),Error> {
     {
         let current=get_current_branch(repo);
         unsafe {
+            let curs=try!(Cursor::new(repo.mdb_txn,repo.dbi_branches).map_err(Error::IoError));
+            match mdb::cursor_get(&curs,&current,Some(internal),Op::MDB_GET_BOTH) {
+                Ok(_)=>return Err(Error::AlreadyApplied),
+                Err(_)=>()
+            };
             mdb::put(repo.mdb_txn,repo.dbi_branches,&current,&internal,MDB_NODUPDATA).unwrap();
         }
     }
+    unsafe_apply(repo,&patch.changes,internal);
+    println!("unsafe applied");
     for ch in patch.changes.iter() {
         match *ch {
             Change::Edges(ref edges) =>{
@@ -1162,7 +1218,7 @@ pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8]) {
             mdb::put(repo.mdb_txn,repo.dbi_revdep,dep_internal,internal,0).unwrap()
         }
     }
-
+    Ok(())
 }
 
 
@@ -1530,7 +1586,7 @@ pub fn output_repository(repo:&mut Repository, working_copy:&Path) -> Result<(),
         for (node,parent_inode,inode,oldpath,perms) in a {
             if alen>1 { filename.push(format!("~{}",i)) }
             kk.set_file_name(&filename);
-            try!(fs::rename(oldpath,&kk));
+            try!(fs::rename(oldpath,&kk).map_err(Error::IoError));
             unsafe {
                 let mut kk=parent_inode.to_vec();
                 kk.extend(filename.to_str().unwrap().as_bytes());
