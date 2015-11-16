@@ -39,14 +39,19 @@ use std::fs::{metadata};
 pub mod fs_representation;
 pub mod patch;
 
+use self::fs_representation::{to_hex};
 use std::os::unix::fs::PermissionsExt;
 
 use self::patch::{Change,Edge,LocalKey,ExternalKey};
 
+use serde::ser::{Serialize,Serializer};
+extern crate serde_cbor;
 
-extern crate rustc_serialize;
 
-use self::rustc_serialize::hex::{ToHex};
+
+use std::io::{BufWriter,BufReader};
+use std::fs::File;
+
 use std::fs;
 
 mod mdb;
@@ -71,12 +76,14 @@ pub struct Repository{
 #[derive(Debug)]
 pub enum Error{
     IoError(io::Error),
-    AlreadyApplied
+    AlreadyApplied,
+    Serde(serde_cbor::error::Error)
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
+            Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
             Error::AlreadyApplied => write!(f, "Patch already applied")
         }
     }
@@ -86,6 +93,7 @@ impl error::Error for Error {
     fn description(&self) -> &str {
         match *self {
             Error::IoError(ref err) => error::Error::description(err),
+            Error::Serde(ref err) => serde_cbor::error::Error::description(err),
             Error::AlreadyApplied => "Patch already applied"
         }
     }
@@ -93,6 +101,7 @@ impl error::Error for Error {
     fn cause(&self) -> Option<&error::Error> {
         match *self {
             Error::IoError(ref err) => Some(err),
+            Error::Serde(ref err) => Some(err),
             Error::AlreadyApplied => None
         }
     }
@@ -123,14 +132,15 @@ impl Repository {
             let e=mdb_env_set_mapsize(env,std::ops::Shl::shl(1,30) as size_t);
             if e !=0 { println!("mdb_env_set_mapsize");
                        return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
-            let pp=path.as_os_str().to_str().unwrap();
+
+            let pp=std::ffi::CString::new(path.to_str().unwrap()).unwrap();
             let e=mdb_env_open(env,pp.as_ptr() as *const i8,0,0o755);
-            if e !=0 { println!("mdb_env_open");
+            if e !=0 { println!("mdb_env_open {:?}", path);
                        return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
 
             let txn=ptr::null_mut();
             let e=mdb_txn_begin(env,ptr::null_mut(),0,std::mem::transmute(&txn));
-            if e !=0 { println!("mdb_env_open");
+            if e !=0 { println!("mdb_txn_begin");
                        return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
             fn open_dbi(txn:*mut MdbTxn,name:&str,flag:c_uint)->MdbDbi {
                 let mut d=0;
@@ -935,7 +945,7 @@ fn internal_hash<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&'a [u8])->&'a [u8] {
             match mdb::get(txn,dbi,key) {
                 Ok(v)=>v,
                 Err(_)=>{
-                    println!("external key:{}",key.to_hex());
+                    println!("external key:{}",to_hex(key));
                     panic!("internal key not found !")
                 }
             }
@@ -1220,6 +1230,32 @@ pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8])->Result<
     }
     Ok(())
 }
+
+
+pub fn write_changes(repo:&Repository,changes_file:&Path)->Result<(),Error> {
+    let mut patches=Vec::new();
+    unsafe {
+        let branch=get_current_branch(repo);
+        let curs=Cursor::new(repo.mdb_txn,repo.dbi_branches).unwrap();
+        let mut k=MDB_val{mv_data:branch.as_ptr() as *const c_void, mv_size:branch.len() as size_t};
+        let mut v:MDB_val=std::mem::zeroed();
+        let mut e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_FIRST as c_uint);
+        while e==0 {
+            if branch.len() as size_t==k.mv_size &&
+                memcmp(branch.as_ptr() as *const c_void, k.mv_data as *const c_void, k.mv_size)==0 {
+                    patches.push(external_key(repo,
+                                              slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize)));
+                    e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint);
+                }
+        }
+    }
+    let mut buffer = BufWriter::new(try!(File::create(changes_file)));
+    try!(serde_cbor::ser::to_writer(&mut buffer,&patches).map_err(Error::Serde));
+    Ok(())
+}
+
+
+
 
 
 pub fn dependencies(changes:&[Change])->Vec<patch::ExternalHash> {
@@ -1633,11 +1669,11 @@ pub fn debug<W>(repo:&mut Repository,w:&mut W) where W:Write {
                 let f=mdb_get(repo.mdb_txn,repo.dbi_contents, &mut k, &mut ww);
                 let cont:&[u8]=
                     if f==0 { slice::from_raw_parts(ww.mv_data as *const u8,ww.mv_size as usize) } else { &[] };
-                write!(w,"n_{}[label=\"{}: {}\"];\n", (&kk).to_hex(), (&kk).to_hex(),
-                       match str::from_utf8(&cont) { Ok(x)=>x.to_string(), Err(_)=> (&cont).to_hex() }).unwrap();
+                write!(w,"n_{}[label=\"{}: {}\"];\n", to_hex(&kk), to_hex(&kk),
+                       match str::from_utf8(&cont) { Ok(x)=>x.to_string(), Err(_)=> to_hex(&cont) }).unwrap();
             }
             let flag:u8= * (v.mv_data as *const u8);
-            write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", (&kk).to_hex(), (&vv).to_hex(), styles[(flag&0xff) as usize], flag).unwrap();
+            write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", to_hex(&kk), to_hex(&vv), styles[(flag&0xff) as usize], flag).unwrap();
             e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint);
         }
     }

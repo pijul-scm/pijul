@@ -8,6 +8,7 @@ pub mod init;
 pub mod record;
 pub mod add;
 pub mod pull;
+pub mod get;
 mod test;
 
 pub fn all_command_invocations() -> Vec<StaticSubcommand> {
@@ -17,7 +18,8 @@ pub fn all_command_invocations() -> Vec<StaticSubcommand> {
         init::invocation(),
         record::invocation(),
         add::invocation(),
-        pull::invocation()
+        pull::invocation(),
+        get::invocation()
         ];
 }
 

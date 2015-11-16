@@ -23,7 +23,7 @@ use std::io::{Error, ErrorKind};
 
 use commands::StaticSubcommand;
 use repository::Repository;
-use repository::fs_representation::{find_repo_root,repo_dir};
+use repository::fs_representation::{find_repo_root,pristine_dir};
 
 pub struct Params<'a> {
     pub repository : &'a Path
@@ -49,7 +49,7 @@ pub fn run(args: &Params) -> Result<(),Error> {
     match find_repo_root(args.repository)
     {
         Some(repo_base) => {
-            let _repository = Repository::new(&repo_dir(&repo_base)).expect("Repository error");
+            let _repository = Repository::new(&pristine_dir(&repo_base)).expect("Repository error");
             println!("Your repo looks alright Ma'am/Sir");
             Ok(())
         },

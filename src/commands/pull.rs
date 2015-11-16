@@ -61,6 +61,7 @@ pub fn invocation() -> StaticSubcommand {
              .short("p")
              .long("port")
              .help("Port of the remote ssh server.")
+             .takes_value(true)
              .validator(|val| { let x:Result<u16,_>=val.parse();
                                 match x { Ok(_)=>Ok(()),
                                           Err(_)=>Err(val) }
