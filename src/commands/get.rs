@@ -46,11 +46,9 @@ pub fn invocation() -> StaticSubcommand {
         SubCommand::with_name("get")
         .about("clone a remote repository")
         .arg(Arg::with_name("remote")
-             .long("remote")
              .help("Remote repository to clone.")
              )
         .arg(Arg::with_name("repository")
-             .long("repository")
              .help("Local path.")
              )
         .arg(Arg::with_name("port")
@@ -76,19 +74,15 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
 
 #[derive(Debug)]
 pub enum Error{
-    NotInARepository,
-    IoError(io::Error),
-    Serde(serde_cbor::error::Error),
-    Repository(repository::Error)
+    Init(init::Error),
+    Pull(pull::Error)
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            Error::NotInARepository => write!(f, "Not in a repository"),
-            Error::IoError(ref err) => write!(f, "IO error: {}", err),
-            Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
-            Error::Repository(ref err) => write!(f, "Repository error: {}", err)
+            Error::Init(ref err) => write!(f, "Init error: {}",err),
+            Error::Pull(ref err) => write!(f, "Pull error: {}", err)
         }
     }
 }
@@ -96,38 +90,21 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn description(&self) -> &str {
         match *self {
-            Error::NotInARepository => "not in a repository",
-            Error::IoError(ref err) => error::Error::description(err),
-            Error::Serde(ref err) => serde_cbor::error::Error::description(err),
-            Error::Repository(ref err) => repository::Error::description(err)
+            Error::Init(ref err) => init::Error::description(err),
+            Error::Pull(ref err) => pull::Error::description(err),
         }
     }
 
     fn cause(&self) -> Option<&error::Error> {
         match *self {
-            Error::IoError(ref err) => Some(err),
-            Error::NotInARepository => None,
-            Error::Serde(ref err) => Some(err),
-            Error::Repository(ref err) => Some(err)
+            Error::Init(ref err) => Some(err),
+            Error::Pull(ref err) => Some(err)
         }
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Error {
-        Error::IoError(err)
     }
 }
 
 pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
-    let pwd = args.pull_params.repository;
-    match find_repo_root(&pwd){
-        None => return Err(Error::NotInARepository),
-        Some(r) =>
-        {
-            init::run(&init::Params { location:pwd, allow_nested:false });
-            pull::run(&args.pull_params);
-            Ok(())
-        }
-    }
+    try!(init::run(&init::Params { location:args.pull_params.repository, allow_nested:false }).map_err(Error::Init));
+    try!(pull::run(&args.pull_params).map_err(Error::Pull));
+    Ok(())
 }

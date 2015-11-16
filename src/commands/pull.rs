@@ -20,10 +20,11 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches,Arg};
 
 use commands::StaticSubcommand;
-use repository::{Repository,apply,DEFAULT_BRANCH,HASH_SIZE,new_internal,sync_file_additions,has_patch,get_current_branch};
+use repository::{Repository,apply,DEFAULT_BRANCH,HASH_SIZE,new_internal,sync_file_additions,has_patch,get_current_branch,write_changes_file,register_hash};
 use repository::patch::{Patch};
 use repository::fs_representation::{repo_dir, pristine_dir, find_repo_root, patches_dir, branch_changes_file,to_hex};
 use repository;
+use repository::patch;
 use std;
 use std::io;
 use std::fmt;
@@ -32,7 +33,6 @@ use std::path::{Path,PathBuf};
 use std::fs::{metadata};
 use std::io::{BufWriter,BufReader,BufRead};
 use std::fs::File;
-
 use std::collections::hash_set::{HashSet};
 use std::collections::hash_map::{HashMap};
 extern crate serde_cbor;
@@ -50,11 +50,9 @@ pub fn invocation() -> StaticSubcommand {
         SubCommand::with_name("pull")
         .about("pull from a remote repository")
         .arg(Arg::with_name("remote")
-             .long("remote")
              .help("Repository from which to pull.")
              )
         .arg(Arg::with_name("repository")
-             .long("repository")
              .help("Local repository.")
              )
         .arg(Arg::with_name("port")
@@ -109,6 +107,7 @@ pub enum Error{
     NotInARepository,
     IoError(io::Error),
     Serde(serde_cbor::error::Error),
+    Patch(repository::patch::Error),
     Repository(repository::Error)
 }
 
@@ -118,6 +117,7 @@ impl fmt::Display for Error {
             Error::NotInARepository => write!(f, "Not in a repository"),
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
             Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
+            Error::Patch(ref err) => write!(f, "Patch error: {}", err),
             Error::Repository(ref err) => write!(f, "Repository error: {}", err)
         }
     }
@@ -129,6 +129,7 @@ impl error::Error for Error {
             Error::NotInARepository => "not in a repository",
             Error::IoError(ref err) => error::Error::description(err),
             Error::Serde(ref err) => serde_cbor::error::Error::description(err),
+            Error::Patch(ref err) => repository::patch::Error::description(err),
             Error::Repository(ref err) => repository::Error::description(err)
         }
     }
@@ -138,6 +139,7 @@ impl error::Error for Error {
             Error::IoError(ref err) => Some(err),
             Error::NotInARepository => None,
             Error::Serde(ref err) => Some(err),
+            Error::Patch(ref err) => Some(err),
             Error::Repository(ref err) => Some(err)
         }
     }
@@ -159,9 +161,16 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             let remote_patches:Vec<Vec<u8>>=
                 match args.remote {
                     Remote::Local{path}=>{
-                        let changes_file=branch_changes_file(path,DEFAULT_BRANCH);
-                        let mut buffer = BufReader::new(try!(File::create(changes_file)));
-                        try!(serde_cbor::de::from_reader(&mut buffer).map_err(Error::Serde))
+                        let changes_file=branch_changes_file(path,DEFAULT_BRANCH.as_bytes());
+                        match File::open(changes_file) {
+                            Ok(f)=>{
+                                let mut buffer = BufReader::new(f);
+                                try!(serde_cbor::de::from_reader(&mut buffer).map_err(Error::Serde))
+                            },
+                            Err(_)=>{
+                                Vec::new()
+                            }
+                        }
                     },
                     Remote::Ssh{..}=>{
                         /*
@@ -183,14 +192,21 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                     }
                 };
             let local_patches:Vec<Vec<u8>>={
-                let changes_file=branch_changes_file(r,DEFAULT_BRANCH);
-                let mut buffer = BufReader::new(try!(File::create(changes_file)));
-                try!(serde_cbor::de::from_reader(&mut buffer).map_err(Error::Serde))
+                let changes_file=branch_changes_file(r,DEFAULT_BRANCH.as_bytes());
+                match File::open(changes_file) {
+                    Ok(f)=> {
+                        let mut buffer = BufReader::new(f);
+                        try!(serde_cbor::de::from_reader(&mut buffer).map_err(Error::Serde))
+                    },
+                    Err(_)=>{
+                        Vec::new()
+                    }
+                }
             };
             let mut pullable:HashSet<&[u8]>=HashSet::with_capacity(remote_patches.len());
             let mut j=0;
             for i in 0..remote_patches.len() {
-                if remote_patches[i]==local_patches[j] {
+                if if j<local_patches.len() {remote_patches[i]==local_patches[j]} else {false} {
                     j+=1
                 } else {
                     pullable.insert(&remote_patches[i]);
@@ -199,9 +215,9 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
 
             // The filter in some way.
             fn download_patch(remote:&Remote, local_patches:&Path, patch_hash:&[u8])->Result<PathBuf,Error>{
-                let hash=to_hex(patch_hash);
                 match *remote {
                     Remote::Local{path}=>{
+                        let hash=to_hex(patch_hash);
                         let remote_file=patches_dir(path).join(&hash).with_extension("cbor");
                         let local_file=local_patches.join(&hash).with_extension("cbor");
                         try!(std::fs::hard_link(&remote_file,&local_file).map_err(Error::IoError));
@@ -215,13 +231,14 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 }
             }
             // Then download the patches, and apply.
-            fn apply_patches(repo:&mut Repository, branch:&[u8], remote:&Remote, local_patches:&Path, patch_hash:&[u8])->
-                Result<(),Error>{
+            fn apply_patches(repo:&mut Repository, branch:&[u8], remote:&Remote, local_patches:&Path, patch_hash:&[u8])->Result<(),Error>{
                 // download this patch
+                //println!("has patch : {:?}",patch_hash);
                 if !try!(has_patch(repo,branch,patch_hash).map_err(Error::Repository)) {
                     let local_patch=try!(download_patch(remote,local_patches,patch_hash));
-                    let mut buffer = BufReader::new(try!(File::create(local_patch)));
-                    let patch:Patch=try!(serde_cbor::de::from_reader(&mut buffer).map_err(Error::Serde));
+                    let mut buffer = BufReader::new(try!(File::open(local_patch)));
+                    let patch=try!(repository::patch::from_reader(&mut buffer).map_err(Error::Patch));
+                    //println!("applying patch : {:?}",patch);
                     for dep in patch.dependencies.iter() {
                         try!(apply_patches(repo,branch,remote,local_patches,&dep))
                     }
@@ -229,6 +246,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                     new_internal(repo,&mut internal);
                     apply(repo, &patch, &internal[..]);
                     sync_file_additions(repo,&patch.changes[..],&HashMap::new(), &internal);
+                    register_hash(repo,&internal[..],patch_hash);
                     Ok(())
                 } else {
                     Ok(())
@@ -238,9 +256,26 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
             let local_patches=patches_dir(r);
             let current_branch=get_current_branch(&repo).to_vec();
+            let pending={
+                let (changes,syncs)= {
+                    let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
+                    try!(repository::record(&mut repo, &r).map_err(Error::Repository))
+                };
+                Patch { changes:changes,
+                        dependencies:vec!() }
+            };
+
             for p in pullable {
                 try!(apply_patches(&mut repo,&current_branch,&args.remote,&local_patches,p))
             }
+            write_changes_file(&repo,&branch_changes_file(r,get_current_branch(&repo)));
+
+            if cfg!(debug_assertions){
+                let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
+                repository::debug(&mut repo,&mut buffer);
+            }
+
+            repository::output_repository(&mut repo,&r,&pending);
             Ok(())
         }
     }

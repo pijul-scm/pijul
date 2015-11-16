@@ -20,10 +20,10 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches, Arg};
 
 use commands::StaticSubcommand;
-use repository::{Repository,record,apply,sync_file_additions,HASH_SIZE,new_internal,register_hash,dependencies};
+use repository::{Repository,record,apply,sync_file_additions,HASH_SIZE,new_internal,register_hash,dependencies,get_current_branch,write_changes_file};
 use repository;
 use repository::patch::{Patch};
-use repository::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root};
+use repository::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root, branch_changes_file,to_hex};
 use std::sync::Arc;
 
 use std;
@@ -69,6 +69,7 @@ pub enum Error {
     NotInARepository,
     IoError(io::Error),
     Serde(serde_cbor::error::Error),
+    Patch(repository::patch::Error),
     SavingPatch,
     Repository(repository::Error)
 }
@@ -80,6 +81,7 @@ impl fmt::Display for Error {
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
             Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
             Error::Repository(ref err) => write!(f, "Repository: {}", err),
+            Error::Patch(ref err) => write!(f, "Patch: {}", err),
             Error::SavingPatch => write!(f, "Patch saving error"),
         }
     }
@@ -92,6 +94,7 @@ impl error::Error for Error {
             Error::IoError(ref err) => error::Error::description(err),
             Error::Serde(ref err) => serde_cbor::error::Error::description(err),
             Error::Repository(ref err) => repository::Error::description(err),
+            Error::Patch(ref err) => repository::patch::Error::description(err),
             Error::SavingPatch => "saving patch"
         }
     }
@@ -101,6 +104,7 @@ impl error::Error for Error {
             Error::IoError(ref err) => Some(err),
             Error::Serde(ref err) => Some(err),
             Error::Repository(ref err) => Some(err),
+            Error::Patch(ref err) => Some(err),
             Error::NotInARepository => None,
             Error::SavingPatch => None
         }
@@ -113,7 +117,7 @@ impl From<io::Error> for Error {
     }
 }
 
-fn write_patch<'a>(patch:&Patch,dir:&Path)->Result<String,Error>{
+fn write_patch<'a>(patch:&Patch,dir:&Path)->Result<Vec<u8>,Error>{
     let mut name:[u8;20]=[0;20];
     fn make_name(dir:&Path,name:&mut [u8])->std::path::PathBuf{
         for i in 0..name.len() { let r:u8=rand::random(); name[i] = 97 + (r%26) }
@@ -123,8 +127,7 @@ fn write_patch<'a>(patch:&Patch,dir:&Path)->Result<String,Error>{
     let tmp=make_name(&dir,&mut name);
 
     let mut buffer = BufWriter::new(try!(File::create(&tmp))); // change to uuid
-    try!(serde_cbor::ser::to_writer(&mut buffer,&patch).map_err(Error::Serde));
-
+    try!(repository::patch::to_writer(&mut buffer,patch).map_err(Error::Patch));
     // hash
     let mut buffer = BufReader::new(try!(File::open(&tmp).map_err(Error::IoError))); // change to uuid
     let mut hasher = Sha512::new();
@@ -135,8 +138,9 @@ fn write_patch<'a>(patch:&Patch,dir:&Path)->Result<String,Error>{
         };
         buffer.consume(len)
     }
-    let hash = hasher.result_str();
-    try!(std::fs::rename(tmp,dir.join(&hash).with_extension("cbor")).map_err(Error::IoError));
+    let mut hash=vec![0;hasher.output_bytes()];
+    hasher.result(&mut hash);
+    try!(std::fs::rename(tmp,dir.join(to_hex(&hash)).with_extension("cbor")).map_err(Error::IoError));
     Ok(hash)
 }
 
@@ -160,7 +164,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let patch = Patch { changes:changes,
                                     dependencies:deps };
                 // save patch
-
+                //println!("patch: {:?}",patch);
                 let patch_arc=Arc::new(patch);
                 let child_patch=patch_arc.clone();
                 let patches_dir=patches_dir(r);
@@ -171,11 +175,18 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 new_internal(&mut repo,&mut internal);
                 apply(&mut repo, &patch_arc, &internal[..]);
+                //println!("sync");
                 sync_file_additions(&mut repo,&patch_arc.changes[..],&syncs, &internal);
+                if cfg!(debug_assertions){
+                    let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
+                    repository::debug(&mut repo,&mut buffer);
+                }
 
                 match hash_child.join() {
                     Ok(Ok(hash))=> {
-                        register_hash(&mut repo,&internal[..],hash.as_bytes());
+                        register_hash(&mut repo,&internal[..],&hash[..]);
+                        //println!("writing changes {:?}",internal);
+                        write_changes_file(&repo,&branch_changes_file(r,get_current_branch(&repo)));
                         Ok(Some(()))
                     },
                     Ok(Err(x)) => {
@@ -185,12 +196,6 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                         Err(Error::SavingPatch)
                     }
                 }
-                /*
-                println!("Debugging");
-                let mut repo = try!(Repository::new(&repo_dir));
-                let mut buffer = BufWriter::new(File::create("debug").unwrap()); // change to uuid
-                debug(&mut repo,&mut buffer);
-                 */
             }
         }
     }

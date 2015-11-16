@@ -19,7 +19,7 @@
 
 use std::path::Path;
 use std::path::PathBuf;
-use std::fs::{metadata,create_dir};
+use std::fs::{metadata,create_dir_all};
 use std::io;
 
 pub fn pijul_dir_name() -> &'static Path {
@@ -36,8 +36,8 @@ pub fn pristine_dir(p : &Path) -> PathBuf {
 pub fn patches_dir(p : &Path) -> PathBuf {
     return p.join(pijul_dir_name()).join("patches")
 }
-pub fn branch_changes_file(p : &Path, b: &str) -> PathBuf {
-    let changes=String::from("changes.") + &to_hex(b.as_bytes())[..];
+pub fn branch_changes_file(p : &Path, b: &[u8]) -> PathBuf {
+    let changes=String::from("changes.") + &to_hex(b)[..];
     return p.join(pijul_dir_name()).join(changes)
 }
 
@@ -53,12 +53,12 @@ pub fn find_repo_root(dir : &Path) -> Option<&Path> {
 
 pub fn create(dir : &Path) -> io::Result<()> {
     let mut repo_dir = repo_dir(dir);
-    try!(create_dir(&repo_dir));
+    try!(create_dir_all(&repo_dir));
     repo_dir.push("pristine");
-    try!(create_dir(&repo_dir));
+    try!(create_dir_all(&repo_dir));
     repo_dir.pop();
     repo_dir.push("patches");
-    try!(create_dir(&repo_dir));
+    try!(create_dir_all(&repo_dir));
     Ok(())
 }
 

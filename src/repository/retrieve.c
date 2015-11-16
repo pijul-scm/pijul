@@ -125,10 +125,10 @@ struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi_nodes,unsigned char*key){
   MDB_cursor* curs;
   int e=mdb_cursor_open(txn,dbi_nodes,&curs);
   struct c_line* retrieve_dfs(unsigned char*key) {
-    //printf("retrieving ");
-    //int i;
-    //for(i=0;i<KEY_SIZE;i++) printf("%02x",key[i]);
-    //printf("\n");
+    /*printf("retrieving ");
+    int i;
+    for(i=0;i<KEY_SIZE;i++) printf("%02x",key[i]);
+    printf("\n");*/
     struct c_line* l;
     int ret=get(&cache,key,(void*) &l);
     if(ret==0){
@@ -157,18 +157,12 @@ struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi_nodes,unsigned char*key){
       k.mv_size=KEY_SIZE;
       ret=mdb_cursor_get(curs,&k,&v,MDB_GET_BOTH_RANGE);
       while(!ret && (((char*)v.mv_data)[0]==0 || ((char*)v.mv_data)[0]==PSEUDO_EDGE)){
-        MDB_val patch;
-        patch.mv_size=HASH_SIZE;
-        patch.mv_data=((char*)v.mv_data) + 1+KEY_SIZE;
-        //int br=mdb_get(txn,dbi_branches,branch,&patch);
-        //if(br==0) { // If the current branch knows about this edge, follow it.
         if(l->children_off >= l->children_capacity) {
           l->children_capacity = l->children_capacity>0 ? (2*l->children_capacity) : 1;
           l->children=realloc(l->children,l->children_capacity * sizeof(void*));
         }
         l->children [l->children_off] = v.mv_data;
         l->children_off++;
-        //}
         ret=mdb_cursor_get(curs,&k,&v,MDB_NEXT_DUP);
       }
       int i;
