@@ -8,19 +8,16 @@ build="build.rs"
 libc = "*"
 clap = "*"
 rand="*"
-serde = "*"
-serde_cbor = "*"
 rust-crypto = "*"
-rustc-serialize = "*"
 tempdir="*"
-serde_json = "*"
 rsync="0.1.2"
-ssh2="*"
+
 regex="0.1.41"
+rustc-serialize="0.3"
+
 
 [build-dependencies]
 gcc="*"
-serde_macros="*"
 
 [[bin]]
 name="main"

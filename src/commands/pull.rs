@@ -22,20 +22,17 @@ use clap::{SubCommand, ArgMatches,Arg};
 use commands::StaticSubcommand;
 use repository::{Repository,apply,DEFAULT_BRANCH,HASH_SIZE,new_internal,sync_file_additions,has_patch,get_current_branch,write_changes_file,register_hash};
 use repository::patch::{Patch};
-use repository::fs_representation::{repo_dir, pristine_dir, find_repo_root, patches_dir, branch_changes_file,to_hex};
+use repository::fs_representation::{repo_dir, pristine_dir, find_repo_root, patches_dir, branch_changes_file,to_hex,read_changes};
 use repository;
-use repository::patch;
-use std;
 use std::io;
 use std::fmt;
 use std::error;
 use std::path::{Path,PathBuf};
-use std::fs::{metadata};
-use std::io::{BufWriter,BufReader,BufRead};
+use std::io::{BufWriter,BufReader};
 use std::fs::File;
 use std::collections::hash_set::{HashSet};
 use std::collections::hash_map::{HashMap};
-extern crate serde_cbor;
+use std::fs::{hard_link};
 
 /*
 extern crate ssh2;
@@ -106,7 +103,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
 pub enum Error{
     NotInARepository,
     IoError(io::Error),
-    Serde(serde_cbor::error::Error),
+    //Serde(serde_cbor::error::Error),
     Patch(repository::patch::Error),
     Repository(repository::Error)
 }
@@ -116,7 +113,7 @@ impl fmt::Display for Error {
         match *self {
             Error::NotInARepository => write!(f, "Not in a repository"),
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
-            Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
+            //Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
             Error::Patch(ref err) => write!(f, "Patch error: {}", err),
             Error::Repository(ref err) => write!(f, "Repository error: {}", err)
         }
@@ -128,7 +125,7 @@ impl error::Error for Error {
         match *self {
             Error::NotInARepository => "not in a repository",
             Error::IoError(ref err) => error::Error::description(err),
-            Error::Serde(ref err) => serde_cbor::error::Error::description(err),
+            //Error::Serde(ref err) => serde_cbor::error::Error::description(err),
             Error::Patch(ref err) => repository::patch::Error::description(err),
             Error::Repository(ref err) => repository::Error::description(err)
         }
@@ -138,7 +135,7 @@ impl error::Error for Error {
         match *self {
             Error::IoError(ref err) => Some(err),
             Error::NotInARepository => None,
-            Error::Serde(ref err) => Some(err),
+            //Error::Serde(ref err) => Some(err),
             Error::Patch(ref err) => Some(err),
             Error::Repository(ref err) => Some(err)
         }
@@ -162,15 +159,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 match args.remote {
                     Remote::Local{path}=>{
                         let changes_file=branch_changes_file(path,DEFAULT_BRANCH.as_bytes());
-                        match File::open(changes_file) {
-                            Ok(f)=>{
-                                let mut buffer = BufReader::new(f);
-                                try!(serde_cbor::de::from_reader(&mut buffer).map_err(Error::Serde))
-                            },
-                            Err(_)=>{
-                                Vec::new()
-                            }
-                        }
+                        read_changes(&changes_file).unwrap_or(vec!())
                     },
                     Remote::Ssh{..}=>{
                         /*
@@ -193,15 +182,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 };
             let local_patches:Vec<Vec<u8>>={
                 let changes_file=branch_changes_file(r,DEFAULT_BRANCH.as_bytes());
-                match File::open(changes_file) {
-                    Ok(f)=> {
-                        let mut buffer = BufReader::new(f);
-                        try!(serde_cbor::de::from_reader(&mut buffer).map_err(Error::Serde))
-                    },
-                    Err(_)=>{
-                        Vec::new()
-                    }
-                }
+                read_changes(&changes_file).unwrap_or(vec!())
             };
             let mut pullable:HashSet<&[u8]>=HashSet::with_capacity(remote_patches.len());
             let mut j=0;
@@ -220,7 +201,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                         let hash=to_hex(patch_hash);
                         let remote_file=patches_dir(path).join(&hash).with_extension("cbor");
                         let local_file=local_patches.join(&hash).with_extension("cbor");
-                        try!(std::fs::hard_link(&remote_file,&local_file).map_err(Error::IoError));
+                        try!(hard_link(&remote_file,&local_file).map_err(Error::IoError));
                         //let mut buffer = BufReader::new(try!(File::create(changes_file)));
                         //try!(serde_cbor::de::from_reader(&mut buffer).map_err(Error::Serde))
                         Ok(local_file)
@@ -257,7 +238,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             let local_patches=patches_dir(r);
             let current_branch=get_current_branch(&repo).to_vec();
             let pending={
-                let (changes,syncs)= {
+                let (changes,_)= {
                     let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                     try!(repository::record(&mut repo, &r).map_err(Error::Repository))
                 };

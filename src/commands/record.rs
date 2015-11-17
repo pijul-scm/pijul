@@ -35,15 +35,11 @@ extern crate crypto;
 use crypto::digest::Digest;
 use crypto::sha2::Sha512;
 
-extern crate serde_cbor;
-
 use std::io::{BufWriter,BufReader,BufRead};
 use std::fs::File;
 extern crate rand;
 use std::path::{Path};
 
-extern crate libc;
-use self::libc::funcs::posix88::unistd::{getpid};
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -68,7 +64,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 pub enum Error {
     NotInARepository,
     IoError(io::Error),
-    Serde(serde_cbor::error::Error),
+    //Serde(serde_cbor::error::Error),
     Patch(repository::patch::Error),
     SavingPatch,
     Repository(repository::Error)
@@ -79,7 +75,7 @@ impl fmt::Display for Error {
         match *self {
             Error::NotInARepository => write!(f, "Not in a repository"),
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
-            Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
+            //Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
             Error::Repository(ref err) => write!(f, "Repository: {}", err),
             Error::Patch(ref err) => write!(f, "Patch: {}", err),
             Error::SavingPatch => write!(f, "Patch saving error"),
@@ -92,7 +88,7 @@ impl error::Error for Error {
         match *self {
             Error::NotInARepository => "not in a repository",
             Error::IoError(ref err) => error::Error::description(err),
-            Error::Serde(ref err) => serde_cbor::error::Error::description(err),
+            //Error::Serde(ref err) => serde_cbor::error::Error::description(err),
             Error::Repository(ref err) => repository::Error::description(err),
             Error::Patch(ref err) => repository::patch::Error::description(err),
             Error::SavingPatch => "saving patch"
@@ -102,7 +98,7 @@ impl error::Error for Error {
     fn cause(&self) -> Option<&error::Error> {
         match *self {
             Error::IoError(ref err) => Some(err),
-            Error::Serde(ref err) => Some(err),
+            //Error::Serde(ref err) => Some(err),
             Error::Repository(ref err) => Some(err),
             Error::Patch(ref err) => Some(err),
             Error::NotInARepository => None,

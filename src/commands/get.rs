@@ -20,22 +20,8 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches,Arg};
 
 use commands::StaticSubcommand;
-use repository::{Repository,apply,DEFAULT_BRANCH,HASH_SIZE,new_internal,sync_file_additions,has_patch,get_current_branch};
-use repository::patch::{Patch};
-use repository::fs_representation::{repo_dir, pristine_dir, find_repo_root, patches_dir, branch_changes_file,to_hex};
-use repository;
-use std;
-use std::io;
 use std::fmt;
 use std::error;
-use std::path::{Path,PathBuf};
-use std::fs::{metadata};
-use std::io::{BufWriter,BufReader,BufRead};
-use std::fs::File;
-
-use std::collections::hash_set::{HashSet};
-use std::collections::hash_map::{HashMap};
-extern crate serde_cbor;
 
 use super::pull;
 use super::init;

@@ -44,18 +44,12 @@ use std::os::unix::fs::PermissionsExt;
 
 use self::patch::{Change,Edge,LocalKey,ExternalKey};
 
-use serde::ser::{Serialize,Serializer};
-extern crate serde_cbor;
-
-
-
-use std::io::{BufWriter,BufReader};
-use std::fs::File;
 
 use std::fs;
 
 mod mdb;
 use self::mdb::*;
+
 
 /// The repository structure, on which most functions work.
 pub struct Repository{
@@ -77,14 +71,15 @@ pub struct Repository{
 pub enum Error{
     IoError(io::Error),
     AlreadyApplied,
-    Serde(serde_cbor::error::Error)
+    FsRepresentation(fs_representation::Error)
+    //Serde(serde_cbor::error::Error)
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
-            Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
-            Error::AlreadyApplied => write!(f, "Patch already applied")
+            Error::AlreadyApplied => write!(f, "Patch already applied"),
+            Error::FsRepresentation(ref err) => write!(f, "FS Representation error: {}",err)
         }
     }
 }
@@ -92,16 +87,16 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn description(&self) -> &str {
         match *self {
-            Error::IoError(ref err) => error::Error::description(err),
-            Error::Serde(ref err) => serde_cbor::error::Error::description(err),
-            Error::AlreadyApplied => "Patch already applied"
+            Error::IoError(ref err) => err.description(),
+            Error::AlreadyApplied => "Patch already applied",
+            Error::FsRepresentation(ref err) => err.description()
         }
     }
 
     fn cause(&self) -> Option<&error::Error> {
         match *self {
             Error::IoError(ref err) => Some(err),
-            Error::Serde(ref err) => Some(err),
+            Error::FsRepresentation(ref err) => Some(err),
             Error::AlreadyApplied => None
         }
     }
@@ -635,7 +630,7 @@ fn diff(repo:&Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut L
             for l in lines {
                 delete_edges(repo,&mut edges,l)
             }
-            actions.push(Change::Edges(edges))
+            actions.push(Change::Edges{edges:edges})
         }
         let mut oi=None;
         let mut oj=None;
@@ -771,7 +766,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                                 });
                             }
                         }
-                        actions.push(Change::Edges(edges));
+                        actions.push(Change::Edges{edges:edges});
 
 
                         // Add the new name.
@@ -816,7 +811,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                                 });
                             }
                         }
-                        actions.push(Change::Edges(edges));
+                        actions.push(Change::Edges{edges:edges});
                     } else if current_node[0]==0 {
                         let ret=retrieve(repo,&current_node[3..]);
                         diff(repo,line_num,actions, &mut ret.unwrap(), realpath.as_path()).unwrap()
@@ -948,7 +943,7 @@ fn internal_hash<'a>(txn:*mut MdbTxn,dbi:MdbDbi,key:&'a [u8])->Result<&'a [u8],c
 fn unsafe_apply(repo:&mut Repository,changes:&[Change], internal_patch_id:&[u8]){
     for ch in changes {
         match *ch {
-            Change::Edges(ref edges) =>
+            Change::Edges{ref edges} =>
                 for e in edges {
                     //println!("edge");
                     // First remove the deleted version of the edge
@@ -1149,7 +1144,7 @@ pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8])->Result<
     unsafe_apply(repo,&patch.changes,internal);
     for ch in patch.changes.iter() {
         match *ch {
-            Change::Edges(ref edges) =>{
+            Change::Edges{ref edges} =>{
                 for e in edges {
                     let hu=internal_hash(repo.mdb_txn,repo.dbi_internal,&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
                     let hv=internal_hash(repo.mdb_txn,repo.dbi_internal,&e.to[0..(e.to.len()-LINE_SIZE)]).unwrap();
@@ -1251,8 +1246,7 @@ pub fn write_changes_file(repo:&Repository,changes_file:&Path)->Result<(),Error>
                 }
         }
     }
-    let mut buffer = BufWriter::new(try!(File::create(changes_file)));
-    try!(serde_cbor::ser::to_writer(&mut buffer,&patches).map_err(Error::Serde));
+    try!(fs_representation::write_changes(&patches,changes_file).map_err(Error::FsRepresentation));
     Ok(())
 }
 
@@ -1276,7 +1270,7 @@ pub fn dependencies(changes:&[Change])->Vec<patch::ExternalHash> {
                     if c.len()>LINE_SIZE { push_dep(&mut deps,c[0..c.len()-LINE_SIZE].to_vec()) }
                 }
             },
-            Change::Edges(ref edges) =>{
+            Change::Edges{ref edges} =>{
                 for e in edges {
                     if e.from.len()>LINE_SIZE { push_dep(&mut deps,e.from[0..e.from.len()-LINE_SIZE].to_vec()) }
                     if e.to.len()>LINE_SIZE { push_dep(&mut deps,e.to[0..e.to.len()-LINE_SIZE].to_vec()) }
@@ -1497,7 +1491,7 @@ pub fn sync_file_additions(repo:&mut Repository, changes:&[Change], updates:&Has
                     }
                 }
             },
-            Change::Edges(_) => {}
+            Change::Edges{..} => {}
         }
     }
 }
@@ -1545,10 +1539,14 @@ fn filename_of_inode<'a>(repo:&'a Repository,inode:&[u8],working_copy:&mut PathB
     loop {
         let e = unsafe {mdb_get(repo.mdb_txn,repo.dbi_revtree,&mut v_inode, &mut v_next)};
         if e==0 {
-            components.push(unsafe { slice::from_raw_parts((v_next.mv_data as *const u8).offset(INODE_SIZE as isize),
-                                                           (v_next.mv_size as usize-INODE_SIZE)) });
-            v_inode.mv_data=v_next.mv_data;
-            v_inode.mv_size=v_next.mv_size;
+            if unsafe { memcmp(v_next.mv_data, ROOT_INODE.as_ptr() as *const c_void, INODE_SIZE) } == 0 {
+                break
+            } else {
+                components.push(unsafe { slice::from_raw_parts((v_next.mv_data as *const u8).offset(INODE_SIZE as isize),
+                                                               (v_next.mv_size as usize-INODE_SIZE)) });
+                v_inode.mv_data=v_next.mv_data;
+                v_inode.mv_size=v_next.mv_size;
+            }
         } else {
             return false
         }
@@ -1649,7 +1647,7 @@ fn unsafe_output_repository(repo:&mut Repository, working_copy:&Path) -> Result<
                 let mut f=std::fs::File::create(&kk).unwrap();
                 output_file(repo,&mut f,&mut l);
             } else {
-                std::fs::create_dir_all(&kk);
+                try!(std::fs::create_dir_all(&kk).map_err(Error::IoError));
             }
             //
             i+=1
@@ -1664,7 +1662,7 @@ const DIRECTORY_FLAG:usize = 0x200;
 pub fn output_repository(repo:&mut Repository, working_copy:&Path, pending:&patch::Patch) -> Result<(),Error>{
     unsafe {
         let parent_txn=repo.mdb_txn;
-        let mut txn=ptr::null_mut();
+        let txn=ptr::null_mut();
         let e=mdb_txn_begin(repo.mdb_env,repo.mdb_txn,0,std::mem::transmute(&txn));
         if e==0 {
             repo.mdb_txn=txn;

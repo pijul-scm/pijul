@@ -16,13 +16,9 @@
   You should have received a copy of the GNU Affero General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-#![feature(custom_derive, plugin)]
-#![plugin(serde_macros)]
-
 #[macro_use] extern crate clap;
-extern crate serde;
 extern crate crypto;
-
+extern crate rustc_serialize;
 pub mod repository;
 
 pub mod commands;

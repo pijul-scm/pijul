@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 extern crate libc;
-use self::libc::{c_int, c_uint,c_char,c_void,size_t};
-use self::libc::types::os::arch::posix88::mode_t;
+use self::libc::{c_int, c_uint,c_char,c_void,size_t,mode_t};
 use std::ptr;
 
 use std;
