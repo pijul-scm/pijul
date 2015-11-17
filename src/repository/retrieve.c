@@ -99,7 +99,7 @@ void insert(struct hashtable*t,char*key,struct c_line*value){
 #define PIJUL_NOTFOUND -1
 int get(struct hashtable*t,char*key,struct c_line**value){
   int h=(hash_key(key) % t->size);
-  while((t->table[2*h] != NULL) && (strncmp(t->table [2*h], key, KEY_SIZE) != 0)) {
+  while((t->table[2*h] != NULL) && (memcmp(t->table [2*h], key, KEY_SIZE) != 0)) {
     h=(h+1) % t->size;
   }
   if((t->table[2*h]) == NULL)
@@ -125,20 +125,27 @@ struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi_nodes,unsigned char*key){
   MDB_cursor* curs;
   int e=mdb_cursor_open(txn,dbi_nodes,&curs);
   struct c_line* retrieve_dfs(unsigned char*key) {
-    /*printf("retrieving ");
+    /*
+    printf("retrieving ");
     int i;
     for(i=0;i<KEY_SIZE;i++) printf("%02x",key[i]);
-    printf("\n");*/
+    printf("\n");
+    */
     struct c_line* l;
     int ret=get(&cache,key,(void*) &l);
     if(ret==0){
+      /*
+      printf("existing ");
+      int i;
+      for(i=0;i<KEY_SIZE;i++) printf("%02x",l->key[i]);
+      printf("\n");
+      */
       return l;
     } else {
       l=malloc(sizeof(struct c_line));
+      insert(&cache,key,l);
       memset(l,0,sizeof(struct c_line));
       l->key=key;
-      l->index= -1;
-      insert(&cache,key,l);
 
       MDB_val k,v;
       char children_edge=PARENT_EDGE | DELETED_EDGE;
