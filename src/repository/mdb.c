@@ -1515,7 +1515,7 @@ mdb_assert_fail(MDB_env *env, const char *expr_txt,
 		file, line, expr_txt, func);
 	if (env->me_assert_func)
 		env->me_assert_func(env, buf);
-        //	fprintf(stderr, "%s\n", buf);
+	fprintf(stderr, "%s\n", buf);
 	abort();
 }
 #else
@@ -8978,7 +8978,7 @@ mdb_env_copyfd1(MDB_env *env, HANDLE fd)
 	my.mc_cond = CreateEvent(NULL, FALSE, FALSE, NULL);
 	my.mc_wbuf[0] = _aligned_malloc(MDB_WBUF*2, env->me_os_psize);
 	if (my.mc_wbuf[0] == NULL)
-		return ENOMEM;
+		return errno;
 #else
 	pthread_mutex_init(&my.mc_mutex, NULL);
 	pthread_cond_init(&my.mc_cond, NULL);
