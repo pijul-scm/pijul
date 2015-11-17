@@ -49,7 +49,7 @@ pub fn run(args: &Params) -> Result<(),Error> {
     match find_repo_root(args.repository)
     {
         Some(repo_base) => {
-            let _repository = Repository::new(&pristine_dir(&repo_base)).expect("Repository error");
+            let _repository = Repository::new(&pristine_dir(&repo_base)).unwrap(); //.expect("Repository error");
             println!("Your repo looks alright Ma'am/Sir");
             Ok(())
         },

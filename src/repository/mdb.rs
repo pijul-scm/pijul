@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 extern crate libc;
+#[cfg(not(windows))]
 use self::libc::{c_int, c_uint,c_char,c_void,size_t,mode_t};
+#[cfg(windows)]
+use self::libc::{c_int, c_uint,c_char,c_void,size_t};
 use std::ptr;
 
 use std;
@@ -11,6 +14,9 @@ use std::marker::PhantomData;
 pub enum MdbEnv {}
 pub enum MdbTxn {}
 pub enum MdbCursor {}
+
+#[cfg(windows)]
+type mode_t=c_int;
 
 
 pub type MdbDbi=c_uint;

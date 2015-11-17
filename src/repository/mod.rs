@@ -40,6 +40,8 @@ pub mod fs_representation;
 pub mod patch;
 
 use self::fs_representation::{to_hex};
+
+#[cfg(not(windows))]
 use std::os::unix::fs::PermissionsExt;
 
 use self::patch::{Change,Edge,LocalKey,ExternalKey};
@@ -540,7 +542,7 @@ impl <'a> LineBuffer<'a> for Diff<'a> {
 
 impl <'a,W> LineBuffer<'a> for W where W:std::io::Write {
     fn output_line(&mut self,_:&'a[u8],c:&'a[u8]) {
-        self.write(c).expect("output_line: could not write");
+        self.write(c).unwrap(); // .expect("output_line: could not write");
     }
 }
 
@@ -738,7 +740,14 @@ fn diff(repo:&Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut L
     }
 }
 
-
+#[cfg(not(windows))]
+fn permissions(attr:&std::fs::Metadata)->usize{
+    attr.permissions().mode() as usize
+}
+#[cfg(windows)]
+fn permissions(attr:&std::fs::Metadata)->usize{
+    0
+}
 
 
 const PSEUDO_EDGE:u8=1;
@@ -770,7 +779,18 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                 if e==0 { // This inode already has a corresponding node
                     let current_node=unsafe { slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize) };
                     //println!("Existing node: {}",current_node.to_hex());
-                    if current_node[0]==1 {
+
+
+                    let old_attr=((current_node[1] as usize) << 8) | (current_node[2] as usize);
+                    // Add the new name.
+                    let int_attr={
+                        let attr=metadata(&realpath).unwrap();
+                        let p=permissions(&attr);
+                        let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
+                        (if p==0 { old_attr } else { p }) | is_dir
+                    };
+
+                    if current_node[0]==1 || old_attr!=int_attr {
                         // file moved
 
                         // Delete all former names.
@@ -790,13 +810,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                         }
                         actions.push(Change::Edges{edges:edges});
 
-
-                        // Add the new name.
-                        let attr=metadata(&realpath).unwrap();
-                        let permissions=attr.permissions().mode() as usize;
-                        let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
                         let mut name=Vec::with_capacity(basename.len()+2);
-                        let int_attr=permissions | is_dir;
                         name.push(((int_attr >> 8) & 0xff) as u8);
                         name.push((int_attr & 0xff) as u8);
                         name.extend(basename);
@@ -846,14 +860,17 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                     match metadata(&realpath) {
                         Ok(attr) => {
                             //println!("file addition, realpath={:?}", realpath);
-                            let permissions=attr.permissions().mode() as usize;
-                            let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
+                            let int_attr={
+                                let attr=metadata(&realpath).unwrap();
+                                let p=permissions(&attr);
+                                let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
+                                (if p==0 { 0o755 } else { p }) | is_dir
+                            };
                             let mut nodes=Vec::new();
                             let mut lnum= *line_num + 1;
                             for i in 0..(LINE_SIZE-1) { l2[i]=(lnum & 0xff) as u8; lnum=lnum>>8 }
 
                             let mut name=Vec::with_capacity(basename.len()+2);
-                            let int_attr=permissions | is_dir;
                             name.push(((int_attr >> 8) & 0xff) as u8);
                             name.push((int_attr & 0xff) as u8);
                             name.extend(basename);
@@ -867,7 +884,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                             *line_num += 2;
 
                             // Reading the file
-                            if is_dir==0 {
+                            if !attr.is_dir() {
                                 nodes.clear();
                                 let mut line=Vec::new();
                                 let f = std::fs::File::open(realpath.as_path());
