@@ -32,7 +32,7 @@ use std::io::{BufWriter,BufReader};
 use std::fs::File;
 use std::collections::hash_set::{HashSet};
 use std::collections::hash_map::{HashMap};
-use std::fs::{hard_link};
+use std::fs::{hard_link,metadata};
 
 /*
 extern crate ssh2;

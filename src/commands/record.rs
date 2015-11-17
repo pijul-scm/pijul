@@ -121,15 +121,18 @@ fn write_patch<'a>(patch:&Patch,dir:&Path)->Result<Vec<u8>,Error>{
         if std::fs::metadata(&tmp).is_err() { tmp } else { make_name(dir,name) }
     }
     let tmp=make_name(&dir,&mut name);
-
-    let mut buffer = BufWriter::new(try!(File::create(&tmp))); // change to uuid
-    try!(repository::patch::to_writer(&mut buffer,patch).map_err(Error::Patch));
+    {
+        let mut buffer = BufWriter::new(try!(File::create(&tmp)));
+        try!(repository::patch::to_writer(&mut buffer,patch).map_err(Error::Patch));
+    }
     // hash
     let mut buffer = BufReader::new(try!(File::open(&tmp).map_err(Error::IoError))); // change to uuid
     let mut hasher = Sha512::new();
     loop {
-        let len=match buffer.fill_buf() {
-            Ok(buf)=> if buf.len()==0 { break } else { hasher.input_str(unsafe {std::str::from_utf8_unchecked(buf)});buf.len() },
+        let len= match buffer.fill_buf() {
+            Ok(buf)=> if buf.len()==0 { break } else {
+                hasher.input(buf);buf.len()
+            },
             Err(e)=>return Err(Error::IoError(e))
         };
         buffer.consume(len)

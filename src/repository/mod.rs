@@ -703,8 +703,10 @@ fn diff(repo:&Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut L
         } else if j < b.len() {
             if let Some(i0)=oi {
                 delete_lines(repo,actions, &lines_a[i0..i]);
+                add_lines(repo,actions, line_num, lines_a[i0-1], &[], &b[j..b.len()])
+            } else {
+                add_lines(repo,actions, line_num, lines_a[i-1], &[], &b[j..b.len()])
             }
-            add_lines(repo,actions, line_num, lines_a[i-2], &[], &b[j..b.len()])
         }
     }
 
@@ -974,27 +976,7 @@ fn internal_hash<'a>(repo:&Repository,key:&'a [u8])->Result<&'a [u8],c_int> {
         if key.len()==HASH_SIZE && memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t)==0 {
             Ok(ROOT_KEY)
         } else {
-            match mdb::get(repo.mdb_txn,repo.dbi_internal,key) {
-                Ok(x)=>Ok(x),
-                Err(_)=>{
-                    println!("external key:{:?}",key);
-                    /*
-                    unsafe {
-                        let mut k:MDB_val=std::mem::zeroed();
-                        let mut v:MDB_val=std::mem::zeroed();
-                        let c=Cursor::new(repo.mdb_txn,repo.dbi_internal).unwrap();
-                        let mut e= unsafe { mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_FIRST as c_uint) };
-                        while e==0 {
-                            let kk=std::slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize);
-                            let vv=std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize);
-                            println!("key:{:?}",to_hex(kk));
-                            e= unsafe { mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint) };
-                        }
-                    }
-                     */
-                    panic!("internal hash not found")
-                }
-            }
+            mdb::get(repo.mdb_txn,repo.dbi_internal,key)
         }
     }
 }
@@ -1224,24 +1206,32 @@ pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8])->Result<
                             connect_down_folders(repo,pu,pv,&internal)
                         } else {
                             // Now connect v to alive descendants of v (following deleted edges from v).
-                            /*
                             let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+                            let mut children=Vec::new();
                             for w in CursIter::new(&mut cursor,pv,0,false) {
-                                connect_up(repo,pv,w,&internal)
+                                children.extend(&w[1..(1+KEY_SIZE)]);
                             }
-                             */
+                            let mut i=0;
+                            while i<children.len() {
+                                connect_up(repo,pv,&children[i..(i+KEY_SIZE)],&internal);
+                                i+=KEY_SIZE
+                            }
                         }
                     } else {
                         let (pu,pv) = if e.flag&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
                         connect_up(repo,pu,pv,&internal);
                         if e.flag&FOLDER_EDGE == 0 {
                             // Now connect v to alive descendants of v (following deleted edges from v).
-                            /*
                             let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+                            let mut children=Vec::new();
                             for w in CursIter::new(&mut cursor,pv,DELETED_EDGE,false) {
-                                connect_down(repo,pv,w,&internal)
+                                children.extend(&w[1..(1+KEY_SIZE)]);
                             }
-                             */
+                            let mut i=0;
+                            while i<children.len() {
+                                connect_down(repo,pv,&children[i..(i+KEY_SIZE)],&internal);
+                                i+=KEY_SIZE
+                            }
                         }
                     }
                 }
