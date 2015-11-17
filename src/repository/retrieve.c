@@ -174,7 +174,7 @@ struct c_line* c_retrieve(MDB_txn* txn,MDB_dbi dbi_nodes,unsigned char*key){
       }
       int i;
       for(i=0;i<l->children_off;i++){
-        char* dat=l->children[i];
+        char* dat=(char*) l->children[i];
         l->children[i] = retrieve_dfs(dat+1);
       }
       return l;
