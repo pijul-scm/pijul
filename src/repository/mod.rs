@@ -1442,7 +1442,7 @@ fn connect_down(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_id:&[u8]) 
             // for all alive descendants
             for b1 in CursIter::new(&mut cursor,&b,0,true) {
                 buf.push(PSEUDO_EDGE|PARENT_EDGE);
-                buf.extend(b);
+                buf.extend(&b1[1..(1+KEY_SIZE)]);
                 buf.extend(internal_patch_id)
             }
             // if b is a zombie (we got to b through a deleted edge but it also has alive edges)
@@ -1805,12 +1805,12 @@ fn dump_table(txn:*mut MdbTxn,dbi:MdbDbi){
         let mut k:MDB_val=std::mem::zeroed();
         let mut v:MDB_val=std::mem::zeroed();
         let c=Cursor::new(txn,dbi).unwrap();
-        let mut e= unsafe { mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_FIRST as c_uint) };
+        let mut e=mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_FIRST as c_uint);
         while e==0 {
             let kk=std::slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize);
             let vv=std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize);
             println!("key:{:?}, value={:?}",to_hex(kk),to_hex(vv));
-            e= unsafe { mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint) };
+            e=mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint)
         }
     }
     println!("/dumping table");
