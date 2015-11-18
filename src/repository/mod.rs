@@ -333,7 +333,8 @@ struct c_line {
     children_capacity:size_t,
     children_off:size_t,
     index:c_uint,
-    lowlink:c_uint
+    lowlink:c_uint,
+    scc:c_uint
 }
 
 extern "C"{
@@ -374,17 +375,17 @@ fn retrieve(repo:&Repository,key:&[u8])->Result<Line,()>{
 }
 
 fn tarjan(line:&mut Line)->usize{
-    fn dfs(stack:&mut Vec<*mut c_line>,index:&mut usize, l:*mut c_line){
+    fn dfs(stack:&mut Vec<*mut c_line>,index:&mut c_uint, scc:&mut c_uint, l:*mut c_line){
         unsafe {
-            (*l).index = *index as c_uint;
-            (*l).lowlink = *index as c_uint;
+            (*l).index = *index;
+            (*l).lowlink = *index;
             (*l).flags |= LINE_ONSTACK | LINE_VISITED;
             stack.push(l);
             *index = *index + 1;
             for i in 0..(*l).children_off {
                 let child=*((*l).children.offset(i as isize));
                 if (*child).flags & LINE_VISITED == 0 {
-                    dfs(stack,index,child);
+                    dfs(stack,index,scc,child);
                     (*l).lowlink=std::cmp::min((*l).lowlink, (*child).lowlink);
                 } else {
                     if (*child).flags & LINE_ONSTACK != 0 {
@@ -393,18 +394,26 @@ fn tarjan(line:&mut Line)->usize{
                 }
             }
             if (*l).index == (*l).lowlink {
-                match stack.pop() { None=>(), Some(p)=>(*p).flags = (*p).flags ^ LINE_ONSTACK };
-                while let Some(h)=stack.pop() {
-                    (*h).flags = (*h).flags ^ LINE_ONSTACK;
-                    if h == l { break }
+                println!("SCC: {:?}",slice::from_raw_parts((*l).key,KEY_SIZE));
+                loop {
+                    match stack.pop() {
+                        None=>break,
+                        Some(p)=>{
+                            (*p).scc=*scc;
+                            (*p).flags = (*p).flags ^ LINE_ONSTACK;
+                            if p == l { break }
+                        }
+                    }
                 }
+                *scc+=1
             }
         }
     }
     let mut stack=vec!();
     let mut index=0;
-    dfs(&mut stack, &mut index, line.c_line);
-    index-1
+    let mut scc=0;
+    dfs(&mut stack, &mut index, &mut scc, line.c_line);
+    (scc-1) as usize
 }
 
 
@@ -420,8 +429,8 @@ fn output_file<'a,B>(repo:&'a Repository,buf:&mut B,file:&'a mut Line) where B:L
             //println!("fill lines : {}",(*cl).lowlink);
             if (*cl).flags & LINE_SPIT == 0 {
                 (*cl).flags |= LINE_SPIT;
-                (*counts.get_unchecked_mut((*cl).lowlink as usize)) += 1;
-                (*lines.get_unchecked_mut((*cl).lowlink as usize)).push (cl);
+                (*counts.get_unchecked_mut((*cl).scc as usize)) += 1;
+                (*lines.get_unchecked_mut((*cl).scc as usize)).push (cl);
                 let children:&[*mut c_line]=slice::from_raw_parts((*cl).children, (*cl).children_off as usize);
                 for child in children {
                     fill_lines(counts,lines,*child)
@@ -437,7 +446,7 @@ fn output_file<'a,B>(repo:&'a Repository,buf:&mut B,file:&'a mut Line) where B:L
                 for line in lines.get_unchecked(i) {
                     let children:&[*mut c_line]=slice::from_raw_parts((**line).children, (**line).children_off as usize);
                     for child in children {
-                        for j in (**line).lowlink+1 .. (**child).lowlink {
+                        for j in (**line).scc+1 .. (**child).scc {
                             (*counts.get_unchecked_mut(j as usize)) += 1
                         }}}}}
     }
@@ -449,17 +458,16 @@ fn output_file<'a,B>(repo:&'a Repository,buf:&mut B,file:&'a mut Line) where B:L
     }
 
     // Finally, output everybody.
-    let mut i=0;
+    let mut i:usize=max_level;
     let mut nodes=Vec::new();
     let mut visited=HashSet::new();
-    while i<counts.len() {
+    loop {
         //assert!(counts[i]>=1);
-        //println!("output : i={}, counts={}",i,counts[i]);
         if counts[i]==0 { break }
         else if counts[i] == 1 {
             let key= unsafe { slice::from_raw_parts((*lines[i][0]).key as *const u8, KEY_SIZE as usize) };
             buf.output_line(&key,contents(repo,key));
-            i+=1
+            if i==0 { break } else { i-=1 }
         } else {
             fn get_conflict<'a,B>(repo:&'a Repository, counts:&Vec<usize>, l:*const c_line, b:&mut B,
                                   nodes:&mut Vec<&'a[u8]>, visited:&mut HashSet<*const c_line>,
@@ -467,18 +475,18 @@ fn output_file<'a,B>(repo:&'a Repository,buf:&mut B,file:&'a mut Line) where B:L
                                   next:&mut usize)
             where B:LineBuffer<'a> {
                 unsafe {
-                    if counts[(*l).lowlink as usize] <= 1 {
+                    if counts[(*l).scc as usize] <= 1 {
                         if ! *is_first {b.output_line(&[],b"================================");}else{*is_first=false}
                         for key in nodes {
                             b.output_line(key,contents(repo,key))
                         }
-                        *next=(*l).lowlink as usize
+                        *next=(*l).scc as usize
                     } else {
                         if !visited.contains(&l) {
                             visited.insert(l);
                             let mut min_order=None;
                             for c in 0..(*l).children_off {
-                                let ll=(**((*l).children.offset(c as isize))).lowlink;
+                                let ll=(**((*l).children.offset(c as isize))).scc;
                                 min_order=Some(match min_order { None=>ll, Some(m)=>std::cmp::min(m,ll) })
                             }
                             match min_order {
@@ -487,7 +495,7 @@ fn output_file<'a,B>(repo:&'a Repository,buf:&mut B,file:&'a mut Line) where B:L
                                     if (*l).flags & LINE_HALF_DELETED != 0 {
                                         for c in 0..(*l).children_off {
                                             let chi=*((*l).children.offset(c as isize));
-                                            if (*chi).lowlink==m {
+                                            if (*chi).scc==m {
                                                 get_conflict(repo,counts,chi,b,nodes,visited,is_first,next)
                                             }
                                         }
@@ -495,7 +503,7 @@ fn output_file<'a,B>(repo:&'a Repository,buf:&mut B,file:&'a mut Line) where B:L
                                     nodes.push(slice::from_raw_parts((*l).key as *const u8, KEY_SIZE));
                                     for c in 0..(*l).children_off {
                                         let chi=*((*l).children.offset(c as isize));
-                                        if (*chi).lowlink==m {
+                                        if (*chi).scc==m {
                                             get_conflict(repo,counts,chi,b,nodes,visited,is_first,next)
                                         }
                                     }
@@ -516,7 +524,7 @@ fn output_file<'a,B>(repo:&'a Repository,buf:&mut B,file:&'a mut Line) where B:L
                 get_conflict(repo, &counts,lines[i][j], buf, &mut nodes, &mut visited, &mut is_first, &mut next)
             }
             buf.output_line(&[],b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
-            i=std::cmp::max(next,i+1);
+            if i==0 { break } else { i=std::cmp::min(next,i-1) }
         }
     }
 }

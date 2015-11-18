@@ -30,6 +30,7 @@ struct c_line {
   size_t children_off;
   unsigned int index;
   unsigned int lowlink;
+  unsigned int scc;
 };
 
 #define LINE_FREED 1
