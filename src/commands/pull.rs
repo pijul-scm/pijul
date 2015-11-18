@@ -201,9 +201,9 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                         let hash=to_hex(patch_hash);
                         let remote_file=patches_dir(path).join(&hash).with_extension("cbor");
                         let local_file=local_patches.join(&hash).with_extension("cbor");
-                        try!(hard_link(&remote_file,&local_file).map_err(Error::IoError));
-                        //let mut buffer = BufReader::new(try!(File::create(changes_file)));
-                        //try!(serde_cbor::de::from_reader(&mut buffer).map_err(Error::Serde))
+                        if metadata(&local_file).is_err() {
+                            try!(hard_link(&remote_file,&local_file).map_err(Error::IoError));
+                        }
                         Ok(local_file)
                     },
                     _=>{
@@ -219,7 +219,6 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                     let local_patch=try!(download_patch(remote,local_patches,patch_hash));
                     let mut buffer = BufReader::new(try!(File::open(local_patch)));
                     let patch=try!(repository::patch::from_reader(&mut buffer).map_err(Error::Patch));
-                    //println!("applying patch : {:?}",patch);
                     for dep in patch.dependencies.iter() {
                         try!(apply_patches(repo,branch,remote,local_patches,&dep))
                     }
