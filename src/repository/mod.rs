@@ -394,7 +394,7 @@ fn tarjan(line:&mut Line)->usize{
                 }
             }
             if (*l).index == (*l).lowlink {
-                println!("SCC: {:?}",slice::from_raw_parts((*l).key,KEY_SIZE));
+                //println!("SCC: {:?}",slice::from_raw_parts((*l).key,KEY_SIZE));
                 loop {
                     match stack.pop() {
                         None=>break,
@@ -573,20 +573,7 @@ fn external_key(repo:&Repository,key:&[u8])->ExternalKey {
                 },
                 Err(_)=>{
                     println!("internal key:{:?}",key);
-                    /*
-                    unsafe {
-                        let mut k:MDB_val=std::mem::zeroed();
-                        let mut v:MDB_val=std::mem::zeroed();
-                        let c=Cursor::new(repo.mdb_txn,repo.dbi_external).unwrap();
-                        let mut e= unsafe { mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_FIRST as c_uint) };
-                        while e==0 {
-                            let kk=std::slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize);
-                            let vv=std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize);
-                            println!("key:{:?}",to_hex(kk));
-                            e= unsafe { mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint) };
-                        }
-                    }
-                     */
+                    //dump_table(repo.mdb_txn,repo.dbi_external);
                     panic!("external key not found !")
                 }
             }
@@ -628,6 +615,12 @@ fn delete_edges<'a>(repo:&'a Repository, edges:&mut Vec<Edge>, key:&'a[u8]){
 }
 
 fn diff(repo:&Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut Line, b:&Path)->Result<(),std::io::Error> {
+    fn memeq(a:&[u8],b:&[u8])->bool {
+        if a.len() == b.len() {
+            unsafe { memcmp(a.as_ptr() as *const c_void,b.as_ptr() as *const c_void,
+                            b.len() as size_t) == 0 }
+        } else { false }
+    }
     fn local_diff(repo:&Repository,actions:&mut Vec<Change>,line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[&[u8]], b:&[&[u8]]) {
         let mut opt=vec![vec!();contents_a.len()+1];
         for i in 0..opt.len() { opt[i]=vec![0;b.len()+1] }
@@ -635,7 +628,11 @@ fn diff(repo:&Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut L
         for i in (0..contents_a.len()).rev() {
             for j in (0..b.len()).rev() {
                 opt[i][j]=
-                    if contents_a[i]==b[j] { opt[i+1][j+1]+1 } else { std::cmp::max(opt[i+1][j], opt[i][j+1]) }
+                    if memeq(contents_a[i],b[j]) {
+                        opt[i+1][j+1]+1
+                    } else {
+                        std::cmp::max(opt[i+1][j], opt[i][j+1])
+                    }
             }
         }
         let mut i=1;
@@ -663,8 +660,8 @@ fn diff(repo:&Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut L
         let mut oj=None;
         while i<contents_a.len() && j<b.len() {
             //println!("i={}, j={}",i,j);
-            if contents_a[i]==b[j] {
-                //println!("== {:?} {:?}",oi,oj);
+            if memeq(contents_a[i],b[j]) {
+                //unsafe { println!("== {:?} {:?} {} {}",oi,oj,std::str::from_utf8_unchecked(contents_a[i]),std::str::from_utf8_unchecked(b[j])) }
                 if let Some(i0)=oi {
                     delete_lines(repo,actions, &lines_a[i0..i]);
                     oi=None
@@ -721,13 +718,18 @@ fn diff(repo:&Repository,line_num:&mut usize, actions:&mut Vec<Change>, a:&mut L
     let mut buf_b=Vec::new();
     let mut lines_b=Vec::new();
     let err={
-        let f = std::fs::File::open(b);
-        let mut f = std::io::BufReader::new(f.unwrap());
-        let err=f.read_to_end(&mut buf_b);
+        let err={
+            let f = std::fs::File::open(b);
+            let mut f = std::io::BufReader::new(f.unwrap());
+            f.read_to_end(&mut buf_b)
+        };
         let mut i=0;
         let mut j=0;
+        //unsafe { println!("buf_b= {}",std::str::from_utf8_unchecked(&buf_b))}
+
         while j<buf_b.len() {
             if buf_b[j]==0xa {
+                //unsafe {println!("pushing {}",std::str::from_utf8_unchecked(&buf_b[i..j+1]))}
                 lines_b.push(&buf_b[i..j+1]);
                 i=j+1
             }
@@ -769,13 +771,12 @@ pub type Inode=Vec<u8>;
 /// Records,i.e. produce a patch and a HashMap mapping line numbers to inodes.
 pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<LocalKey,Inode>),Error>{
     fn dfs(repo:&Repository, actions:&mut Vec<Change>,
-           curs_tree:&mut Cursor,
            line_num:&mut usize,updatables:&mut HashMap<Vec<u8>,Vec<u8>>,
            parent_inode:Option<&[u8]>,
            parent_node:Option<&[u8]>,
            current_inode:&[u8],
            realpath:&mut std::path::PathBuf, basename:&[u8]) {
-
+        //println!("record dfs {}",to_hex(current_inode));
         if parent_inode.is_some() { realpath.push(str::from_utf8(&basename).unwrap()) }
 
         let mut k = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
@@ -788,18 +789,19 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                 let e = unsafe { mdb_get(repo.mdb_txn,repo.dbi_inodes,&mut k, &mut v) };
                 if e==0 { // This inode already has a corresponding node
                     let current_node=unsafe { slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize) };
-                    //println!("Existing node: {}",current_node.to_hex());
+                    //println!("Existing node: {}",to_hex(current_node));
 
 
                     let old_attr=((current_node[1] as usize) << 8) | (current_node[2] as usize);
                     // Add the new name.
                     let int_attr={
                         let attr=metadata(&realpath).unwrap();
-                        let p=permissions(&attr);
+                        let p=(permissions(&attr)) & 0o777;
                         let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
+                        //println!("int_attr {:?} : {} {}",realpath,p,is_dir);
                         (if p==0 { old_attr } else { p }) | is_dir
                     };
-
+                    //println!("attributes: {} {}",old_attr,int_attr);
                     if current_node[0]==1 || old_attr!=int_attr {
                         // file moved
 
@@ -833,6 +835,8 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                             );
                         *line_num += 1;
 
+                        let ret=retrieve(repo,&current_node[3..]);
+                        diff(repo,line_num,actions, &mut ret.unwrap(), realpath.as_path()).unwrap()
 
 
                     } else if current_node[0]==2 {
@@ -858,6 +862,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                             }
                         }
                         actions.push(Change::Edges{edges:edges});
+                        unimplemented!() // Remove all known vertices from this file, for else "missing context" conflicts will not be detected.
                     } else if current_node[0]==0 {
                         let ret=retrieve(repo,&current_node[3..]);
                         diff(repo,line_num,actions, &mut ret.unwrap(), realpath.as_path()).unwrap()
@@ -931,47 +936,43 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                 Some(ROOT_KEY)
             };
 
-
+        //println!("current_node={:?}",current_node);
         match current_node {
             None => (), // we just added a file
             Some(current_node)=>{
                 k.mv_data=current_inode.as_ptr() as *const c_void;
                 k.mv_size=INODE_SIZE as size_t;
 
-                let mut children=Vec::new();
-
+                let mut curs_tree=Cursor::new(repo.mdb_txn,repo.dbi_tree).unwrap();
                 let mut e= unsafe { mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint) };
-                while e==0 && unsafe { memcmp(k.mv_data as *const c_void, current_inode.as_ptr() as *const c_void, INODE_SIZE as size_t) } == 0 {
-                    if k.mv_size>INODE_SIZE as size_t {
+                //dump_table(repo.mdb_txn,repo.dbi_tree);
+                while e==0
+                    && (k.mv_size>=INODE_SIZE as size_t)
+                    && unsafe { memcmp(k.mv_data as *const c_void, current_inode.as_ptr() as *const c_void,
+                                       INODE_SIZE as size_t) } == 0 {
+
+                        let kk= unsafe { std::slice::from_raw_parts(k.mv_data as *const u8,k.mv_size as usize) };
+                        let vv= unsafe { std::slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize) };
+                        dfs(repo, actions, line_num,updatables,
+                            Some(current_inode), // parent_inode
+                            Some(current_node), // parent_node
+                            vv,// current_inode
+                            realpath,
+                            &kk[INODE_SIZE..]);
+
                         unsafe {
-                            children.push((slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize),
-                                           slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)));
                             e=mdb_cursor_get(curs_tree.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint);
                         }
                     }
-                }
-                for chi in children {
-                    let (ks,vs)= chi;
-                    let (_,next_basename)=ks.split_at(INODE_SIZE);
-                    //println!("next_basename={:?}",String::from_utf8_lossy(next_basename));
-                    let _=
-                        dfs(repo, actions, curs_tree, line_num,updatables,
-                            Some(current_inode), // parent_inode
-                            Some(current_node), // parent_node
-                            vs,// current_inode
-                            realpath,
-                            next_basename);
-                }
-                if parent_inode.is_some() { let _=realpath.pop(); }
             }
         }
+        if parent_inode.is_some() { let _=realpath.pop(); }
     };
     let mut actions:Vec<Change>=Vec::new();
     let mut line_num=1;
     let mut updatables:HashMap<Vec<u8>,Vec<u8>>=HashMap::new();
     let mut realpath=PathBuf::from(working_copy);
-    let mut curs_tree=try!(Cursor::new(repo.mdb_txn,repo.dbi_tree).map_err(Error::IoError));
-    dfs(repo,&mut actions,&mut curs_tree, &mut line_num,&mut updatables,
+    dfs(repo,&mut actions, &mut line_num,&mut updatables,
         None,None,ROOT_INODE,&mut realpath,
         &[]);
     //println!("record done");
@@ -1213,17 +1214,20 @@ pub fn apply(repo:&mut Repository, patch:&patch::Patch, internal:&[u8])->Result<
                         if e.flag&FOLDER_EDGE!=0 {
                             connect_down_folders(repo,pu,pv,&internal)
                         } else {
-                            // Now connect v to alive descendants of v (following deleted edges from v).
+                            // Now if u is alive, connect u to alive descendants of v (following deleted edges from v).
                             let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-                            let mut children=Vec::new();
-                            for w in CursIter::new(&mut cursor,pv,0,false) {
-                                children.extend(&w[1..(1+KEY_SIZE)]);
-                            }
-                            let mut i=0;
-                            while i<children.len() {
-                                connect_up(repo,pv,&children[i..(i+KEY_SIZE)],&internal);
-                                i+=KEY_SIZE
-                            }
+                            if nonroot_is_alive(&mut cursor,pu) {
+                                //println!("pu ={} is alive",to_hex(pu));
+                                let mut children=Vec::new();
+                                for w in CursIter::new(&mut cursor,pv,DELETED_EDGE,false) {
+                                    children.extend(&w[1..(1+KEY_SIZE)]);
+                                }
+                                let mut i=0;
+                                while i<children.len() {
+                                    connect_down(repo,pu,&children[i..(i+KEY_SIZE)],&internal);
+                                    i+=KEY_SIZE
+                                }
+                            }// else {println!("pu ={} is dead",to_hex(pu))}
                         }
                     } else {
                         let (pu,pv) = if e.flag&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
@@ -1344,30 +1348,23 @@ pub fn dependencies(changes:&[Change])->Vec<patch::ExternalHash> {
     deps
 }
 
-
-/// Add node "key" to the buffer if it is alive.
-fn add_if_alive(cursor:&Cursor,key:&[u8],internal_patch_id:&[u8],buf:&mut Vec<u8>){
+// A node is alive if it has a PARENT_EDGE or a PARENT_EDGE|FOLDER_EDGE to another node (or if it is the root node, but we will never call this function on the root node).
+fn nonroot_is_alive(cursor:&mut Cursor,key:&[u8])->bool {
     let mut flag=[PARENT_EDGE];
     match unsafe { mdb::cursor_get(&cursor,&key,Some(&flag[..]),Op::MDB_GET_BOTH_RANGE) } {
         Ok(v)=>{
-            let is_alive=
-                if v.len()<1 { false } else {
-                    v[0]==PARENT_EDGE || {
-                        flag[0]=PARENT_EDGE|FOLDER_EDGE;
-                        match unsafe { mdb::cursor_get(&cursor,&key,Some(&flag[..]),Op::MDB_GET_BOTH_RANGE) } {
-                            Ok(w)=>if w.len()<1 { false } else { w[0]==FOLDER_EDGE|PARENT_EDGE },
-                            Err(_)=>false
-                        }
+            if v.len()<1 { false } else {
+                v[0]==PARENT_EDGE || {
+                    flag[0]=PARENT_EDGE|FOLDER_EDGE;
+                    match unsafe { mdb::cursor_get(&cursor,&key,Some(&flag[..]),Op::MDB_GET_BOTH_RANGE) } {
+                        Ok(w)=>if w.len()<1 { false } else { w[0]==FOLDER_EDGE|PARENT_EDGE },
+                        Err(_)=>false
                     }
-                };
-            if is_alive {
-                buf.push(PSEUDO_EDGE|PARENT_EDGE);
-                buf.extend(key);
-                buf.extend(internal_patch_id)
+                }
             }
         },
         Err(_) => {
-            ()
+            false
         }
     }
 }
@@ -1380,10 +1377,15 @@ fn connect_up(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
             // Follow parent edges.
             let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
             for a1 in CursIter::new(&mut cursor,&a,PARENT_EDGE|DELETED_EDGE,false) {
-                connect(visited,repo,a1,internal_patch_id,buf,folder_buf);
+                connect(visited,repo,&a1[1..(1+KEY_SIZE)],internal_patch_id,buf,folder_buf);
             }
             // Test for life of the current node
-            add_if_alive(&cursor,&a,&internal_patch_id,buf);
+            if nonroot_is_alive(&mut cursor,a) {
+                //println!("key is alive");
+                buf.push(PSEUDO_EDGE|PARENT_EDGE);
+                buf.extend(a);
+                buf.extend(internal_patch_id)
+            }
 
             // Look at all deleted folder parents, and add them.
             for a1 in CursIter::new(&mut cursor,&a,PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE,false) {
@@ -1434,11 +1436,21 @@ fn connect_down(repo:&mut Repository, a:&[u8], b:&[u8],internal_patch_id:&[u8]) 
         if !visited.contains(b) {
             visited.insert(b);
             let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-            let flag=DELETED_EDGE;
-            for b1 in CursIter::new(&mut cursor,&b,flag,true) {
-                connect(visited,repo,b1,internal_patch_id,buf);
+            for b1 in CursIter::new(&mut cursor,&b,DELETED_EDGE,false) {
+                connect(visited,repo,&b1[1..(1+KEY_SIZE)],internal_patch_id,buf);
             }
-            add_if_alive(&cursor,&b,&internal_patch_id,buf);
+            // for all alive descendants
+            for b1 in CursIter::new(&mut cursor,&b,0,true) {
+                buf.push(PSEUDO_EDGE|PARENT_EDGE);
+                buf.extend(b);
+                buf.extend(internal_patch_id)
+            }
+            // if b is a zombie (we got to b through a deleted edge but it also has alive edges)
+            if nonroot_is_alive(&mut cursor,b) {
+                buf.push(PSEUDO_EDGE|PARENT_EDGE);
+                buf.extend(b);
+                buf.extend(internal_patch_id)
+            }
         }
     }
     let mut visited=HashSet::new();
@@ -1621,12 +1633,13 @@ fn filename_of_inode<'a>(repo:&'a Repository,inode:&[u8],working_copy:&mut PathB
 
 
 
-fn unsafe_output_repository(repo:&mut Repository, working_copy:&Path) -> Result<(),Error>{
+fn unsafe_output_repository(repo:&mut Repository, working_copy:&Path) -> Result<Vec<(Vec<u8>,Vec<u8>)>,Error>{
     fn retrieve_paths<'a> (repo:&'a Repository,
                            working_copy:&Path,
                            key:&'a [u8],path:&mut PathBuf,parent_inode:&'a [u8],
-                           paths:&mut HashMap<PathBuf,Vec<(&'a[u8],&'a[u8],&'a[u8],Option<PathBuf>,usize)>>,
-                           cache:&mut HashSet<&'a [u8]>) {
+                           paths:&mut HashMap<PathBuf,Vec<(Vec<u8>,Vec<u8>,Vec<u8>,Option<PathBuf>,usize)>>,
+                           cache:&mut HashSet<&'a [u8]>,
+                           nfiles:&mut usize) {
         if !cache.contains(key) {
             cache.insert(key);
             let mut curs_b=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
@@ -1662,12 +1675,13 @@ fn unsafe_output_repository(repo:&mut Repository, working_copy:&Path) -> Result<
                             {
                                 let vec=paths.entry(path.clone()).or_insert(Vec::new());
                                 let mut buf=PathBuf::from(working_copy);
-                                vec.push((&c[1..(1+KEY_SIZE)],parent_inode,inode,
+                                *nfiles+=1;
+                                vec.push((c[1..(1+KEY_SIZE)].to_vec(),parent_inode.to_vec(),inode.to_vec(),
                                           if filename_of_inode(repo,inode,&mut buf) {Some(buf)} else { None },
                                           perms))
                             }
                             if perms & DIRECTORY_FLAG != 0 { // is_directory
-                                retrieve_paths(repo,working_copy,&c[1..(1+KEY_SIZE)],path,inode,paths,cache);
+                                retrieve_paths(repo,working_copy,&c[1..(1+KEY_SIZE)],path,inode,paths,cache,nfiles);
                             }
                             path.pop();
                         }
@@ -1679,12 +1693,15 @@ fn unsafe_output_repository(repo:&mut Repository, working_copy:&Path) -> Result<
     let mut paths=HashMap::new();
     let mut cache=HashSet::new();
     let mut buf=PathBuf::from(working_copy);
-    retrieve_paths(repo,working_copy,&ROOT_KEY,&mut buf,ROOT_INODE,&mut paths,&mut cache);
+    let mut nfiles=0;
+    retrieve_paths(repo,working_copy,&ROOT_KEY,&mut buf,ROOT_INODE,&mut paths,&mut cache,&mut nfiles);
 
+    //println!("dropping tree");
     unsafe {
         mdb_drop(repo.mdb_txn,repo.dbi_tree,0);
         mdb_drop(repo.mdb_txn,repo.dbi_revtree,0);
     };
+    let mut updates=Vec::with_capacity(nfiles);
     for (k,a) in paths {
         let alen=a.len();
         let mut kk=k.clone();
@@ -1697,15 +1714,12 @@ fn unsafe_output_repository(repo:&mut Repository, working_copy:&Path) -> Result<
                 Some(oldpath)=> try!(fs::rename(oldpath,&kk).map_err(Error::IoError)),
                 None => ()
             }
-            unsafe {
-                let mut par=parent_inode.to_vec();
-                par.extend(filename.to_str().unwrap().as_bytes());
-                mdb::put(repo.mdb_txn,repo.dbi_tree,&par[..],&inode[..],0);
-                mdb::put(repo.mdb_txn,repo.dbi_tree,&inode[..],&par[..],0);
-            }
+            let mut par=parent_inode.to_vec();
+            par.extend(filename.to_str().unwrap().as_bytes());
+            updates.push((par,inode.to_vec()));
             // Then (if file) output file
             if perms & DIRECTORY_FLAG == 0 { // this is a real file, not a directory
-                let mut l=retrieve(repo,node).unwrap();
+                let mut l=retrieve(repo,&node).unwrap();
                 let mut f=std::fs::File::create(&kk).unwrap();
                 output_file(repo,&mut f,&mut l);
             } else {
@@ -1715,10 +1729,19 @@ fn unsafe_output_repository(repo:&mut Repository, working_copy:&Path) -> Result<
             i+=1
         }
     }
-    Ok(())
+    Ok(updates)
 }
 const DIRECTORY_FLAG:usize = 0x200;
 
+
+fn update_tree(repo:&mut Repository,updates:Vec<(Vec<u8>,Vec<u8>)>){
+    for (par,inode) in updates {
+        unsafe {
+            mdb::put(repo.mdb_txn,repo.dbi_tree,&par,&inode,0);
+            mdb::put(repo.mdb_txn,repo.dbi_revtree,&inode,&par,0);
+        }
+    }
+}
 
 
 pub fn output_repository(repo:&mut Repository, working_copy:&Path, pending:&patch::Patch) -> Result<(),Error>{
@@ -1731,9 +1754,10 @@ pub fn output_repository(repo:&mut Repository, working_copy:&Path, pending:&patc
             let mut internal=[0;HASH_SIZE];
             new_internal(repo,&mut internal[..]);
             apply(repo,pending,&internal[..]);
-            unsafe_output_repository(repo,working_copy);
+            let updates=try!(unsafe_output_repository(repo,working_copy));
             mdb_txn_abort(txn);
             repo.mdb_txn=parent_txn;
+            update_tree(repo,updates);
             Ok(())
         } else {
             Err(Error::IoError(std::io::Error::from_raw_os_error(e)))
@@ -1773,4 +1797,21 @@ pub fn debug<W>(repo:&mut Repository,w:&mut W) where W:Write {
         }
     }
     w.write(b"}\n").unwrap();
+}
+
+fn dump_table(txn:*mut MdbTxn,dbi:MdbDbi){
+    println!("dumping table");
+    unsafe {
+        let mut k:MDB_val=std::mem::zeroed();
+        let mut v:MDB_val=std::mem::zeroed();
+        let c=Cursor::new(txn,dbi).unwrap();
+        let mut e= unsafe { mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_FIRST as c_uint) };
+        while e==0 {
+            let kk=std::slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize);
+            let vv=std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize);
+            println!("key:{:?}, value={:?}",to_hex(kk),to_hex(vv));
+            e= unsafe { mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint) };
+        }
+    }
+    println!("/dumping table");
 }
