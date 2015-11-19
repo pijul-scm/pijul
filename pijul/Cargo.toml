@@ -2,6 +2,7 @@
 name = "pijul"
 version = "0.1.0"
 authors = ["Pierre-Étienne Meunier","Florent Becker"]
+license = "AGPL-3.0"
 
 [dependencies]
 clap = "*"
