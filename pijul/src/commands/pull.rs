@@ -21,8 +21,7 @@ use clap::{SubCommand, ArgMatches,Arg};
 
 use commands::StaticSubcommand;
 extern crate libpijul;
-use self::libpijul::{Repository,apply,DEFAULT_BRANCH,HASH_SIZE,new_internal,sync_file_additions,has_patch,get_current_branch,write_changes_file,register_hash};
-use self::libpijul::patch::{Patch};
+use self::libpijul::{Repository,Patch,DEFAULT_BRANCH,HASH_SIZE};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root, patches_dir, branch_changes_file,to_hex,read_changes};
 use std::io;
 use std::fmt;
@@ -104,7 +103,6 @@ pub enum Error{
     NotInARepository,
     IoError(io::Error),
     //Serde(serde_cbor::error::Error),
-    Patch(libpijul::patch::Error),
     Repository(libpijul::Error)
 }
 
@@ -114,7 +112,6 @@ impl fmt::Display for Error {
             Error::NotInARepository => write!(f, "Not in a repository"),
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
             //Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
-            Error::Patch(ref err) => write!(f, "Patch error: {}", err),
             Error::Repository(ref err) => write!(f, "Repository error: {}", err)
         }
     }
@@ -126,7 +123,6 @@ impl error::Error for Error {
             Error::NotInARepository => "not in a repository",
             Error::IoError(ref err) => error::Error::description(err),
             //Error::Serde(ref err) => serde_cbor::error::Error::description(err),
-            Error::Patch(ref err) => libpijul::patch::Error::description(err),
             Error::Repository(ref err) => libpijul::Error::description(err)
         }
     }
@@ -136,7 +132,6 @@ impl error::Error for Error {
             Error::IoError(ref err) => Some(err),
             Error::NotInARepository => None,
             //Error::Serde(ref err) => Some(err),
-            Error::Patch(ref err) => Some(err),
             Error::Repository(ref err) => Some(err)
         }
     }
@@ -215,18 +210,18 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             fn apply_patches(repo:&mut Repository, branch:&[u8], remote:&Remote, local_patches:&Path, patch_hash:&[u8])->Result<(),Error>{
                 // download this patch
                 //println!("has patch : {:?}",patch_hash);
-                if !try!(has_patch(repo,branch,patch_hash).map_err(Error::Repository)) {
+                if !try!(repo.has_patch(branch,patch_hash).map_err(Error::Repository)) {
                     let local_patch=try!(download_patch(remote,local_patches,patch_hash));
                     let mut buffer = BufReader::new(try!(File::open(local_patch)));
-                    let patch=try!(libpijul::patch::from_reader(&mut buffer).map_err(Error::Patch));
+                    let patch=try!(Patch::from_reader(&mut buffer).map_err(Error::Repository));
                     for dep in patch.dependencies.iter() {
                         try!(apply_patches(repo,branch,remote,local_patches,&dep))
                     }
                     let mut internal=[0;HASH_SIZE];
-                    new_internal(repo,&mut internal);
-                    apply(repo, &patch, &internal[..]);
-                    sync_file_additions(repo,&patch.changes[..],&HashMap::new(), &internal);
-                    register_hash(repo,&internal[..],patch_hash);
+                    repo.new_internal(&mut internal);
+                    repo.apply(&patch, &internal[..]);
+                    repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);
+                    repo.register_hash(&internal[..],patch_hash);
                     Ok(())
                 } else {
                     Ok(())
@@ -235,11 +230,11 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             let repo_dir=pristine_dir(r);
             let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
             let local_patches=patches_dir(r);
-            let current_branch=get_current_branch(&repo).to_vec();
+            let current_branch=repo.get_current_branch().to_vec();
             let pending={
                 let (changes,_)= {
                     let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                    try!(libpijul::record(&mut repo, &r).map_err(Error::Repository))
+                    try!(repo.record(&r).map_err(Error::Repository))
                 };
                 Patch { changes:changes,
                         dependencies:vec!() }
@@ -248,14 +243,14 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             for p in pullable {
                 try!(apply_patches(&mut repo,&current_branch,&args.remote,&local_patches,p))
             }
-            write_changes_file(&repo,&branch_changes_file(r,get_current_branch(&repo)));
+            repo.write_changes_file(&branch_changes_file(r,&current_branch));
 
             if cfg!(debug_assertions){
                 let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
-                libpijul::debug(&mut repo,&mut buffer);
+                repo.debug(&mut buffer);
             }
 
-            libpijul::output_repository(&mut repo,&r,&pending);
+            repo.output_repository(&r,&pending);
             Ok(())
         }
     }

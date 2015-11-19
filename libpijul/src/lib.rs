@@ -38,19 +38,114 @@ use std::fmt;
 use std::collections::HashSet;
 use std::fs::{metadata};
 pub mod fs_representation;
-pub mod patch;
 
 use self::fs_representation::{to_hex};
 
 #[cfg(not(windows))]
 use std::os::unix::fs::PermissionsExt;
 
-use self::patch::{Change,Edge,LocalKey,ExternalKey,HASH_SIZE,LINE_SIZE,KEY_SIZE,ROOT_KEY};
-
 use std::fs;
 
 mod mdb;
 use self::mdb::*;
+
+use self::rustc_serialize::json::{encode,decode};
+
+pub type LocalKey=Vec<u8>;
+pub type ExternalKey=Vec<u8>;
+pub type ExternalHash=Vec<u8>;
+pub type Flag=u8;
+
+pub const HASH_SIZE:usize=20; // pub temporaire
+pub const LINE_SIZE:usize=4;
+pub const KEY_SIZE:usize=HASH_SIZE+LINE_SIZE;
+pub const ROOT_KEY:&'static[u8]=&[0;KEY_SIZE];
+
+
+#[derive(Debug,RustcEncodable,RustcDecodable)]
+pub struct Edge {
+    pub from:ExternalKey,
+    pub to:ExternalKey,
+    pub flag:Flag,
+    pub introduced_by:ExternalHash
+}
+
+
+#[derive(Debug,RustcEncodable,RustcDecodable)]
+pub enum Change {
+    NewNodes{
+        up_context:Vec<ExternalKey>,
+        down_context:Vec<ExternalKey>,
+        flag:Flag,
+        line_num:usize,
+        nodes:Vec<Vec<u8>>
+    },
+    Edges{ edges:Vec<Edge> }
+}
+
+
+#[derive(Debug,RustcEncodable,RustcDecodable)]
+pub struct Patch {
+    pub changes:Vec<Change>,
+    pub dependencies:Vec<ExternalHash>
+}
+
+impl Patch {
+
+    pub fn new(changes:Vec<Change>)->Patch {
+        let deps=dependencies(&changes);
+        Patch {
+            changes:changes,
+            dependencies:deps
+        }
+    }
+    pub fn from_reader<R>(r:&mut R)->Result<Patch,Error> where R:Read {
+        let mut s=Vec::new();
+        try!(r.read_to_end(&mut s).map_err(Error::IoError));
+        let ss=std::str::from_utf8(&s).unwrap();
+        let dec:Patch=try!(decode(ss).map_err(Error::PatchDecoding));
+        Ok(dec)
+    }
+
+    pub fn to_writer<W>(&self,w:&mut W)->Result<(),Error> where W:Write {
+        let encoded=try!(encode(self).map_err(Error::PatchEncoding));
+        try!(w.write(encoded.as_bytes()).map_err(Error::IoError));
+        Ok(())
+    }
+
+}
+pub fn dependencies(changes:&[Change])->Vec<ExternalHash> {
+    let mut deps=Vec::new();
+    fn push_dep(deps:&mut Vec<ExternalHash>,dep:ExternalHash) {
+        if !if dep.len()==HASH_SIZE {unsafe { memcmp(dep.as_ptr() as *const c_void,
+                                                     ROOT_KEY.as_ptr() as *const c_void,
+                                                     HASH_SIZE as size_t)==0 }} else {false} {
+            deps.push(dep)
+        }
+    }
+    for ch in changes {
+        match *ch {
+            Change::NewNodes { ref up_context,ref down_context, line_num:_,flag:_,nodes:_ } => {
+                for c in up_context.iter().chain(down_context.iter()) {
+                    if c.len()>LINE_SIZE { push_dep(&mut deps,c[0..c.len()-LINE_SIZE].to_vec()) }
+                }
+            },
+            Change::Edges{ref edges} =>{
+                for e in edges {
+                    if e.from.len()>LINE_SIZE { push_dep(&mut deps,e.from[0..e.from.len()-LINE_SIZE].to_vec()) }
+                    if e.to.len()>LINE_SIZE { push_dep(&mut deps,e.to[0..e.to.len()-LINE_SIZE].to_vec()) }
+                    if e.introduced_by.len()>0 { push_dep(&mut deps,e.introduced_by.clone()) }
+                }
+            }
+        }
+    }
+    deps
+}
+
+
+
+
+
 
 
 /// The repository structure, on which most functions work.
@@ -73,15 +168,18 @@ pub struct Repository{
 pub enum Error{
     IoError(io::Error),
     AlreadyApplied,
-    FsRepresentation(fs_representation::Error)
-    //Serde(serde_cbor::error::Error)
+    FsRepresentation(fs_representation::Error),
+    PatchDecoding(rustc_serialize::json::DecoderError),
+    PatchEncoding(rustc_serialize::json::EncoderError)
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
             Error::AlreadyApplied => write!(f, "Patch already applied"),
-            Error::FsRepresentation(ref err) => write!(f, "FS Representation error: {}",err)
+            Error::FsRepresentation(ref err) => write!(f, "FS Representation error: {}",err),
+            Error::PatchEncoding(ref err) => write!(f, "Patch encoding error {}",err),
+            Error::PatchDecoding(ref err) => write!(f, "Patch decoding error {}",err)
         }
     }
 }
@@ -91,7 +189,9 @@ impl error::Error for Error {
         match *self {
             Error::IoError(ref err) => err.description(),
             Error::AlreadyApplied => "Patch already applied",
-            Error::FsRepresentation(ref err) => err.description()
+            Error::FsRepresentation(ref err) => err.description(),
+            Error::PatchEncoding(ref err) => err.description(),
+            Error::PatchDecoding(ref err) => err.description()
         }
     }
 
@@ -99,7 +199,9 @@ impl error::Error for Error {
         match *self {
             Error::IoError(ref err) => Some(err),
             Error::FsRepresentation(ref err) => Some(err),
-            Error::AlreadyApplied => None
+            Error::AlreadyApplied => None,
+            Error::PatchEncoding(ref err) => Some(err),
+            Error::PatchDecoding(ref err) => Some(err)
         }
     }
 }
@@ -1235,7 +1337,7 @@ impl Repository {
     }
 
     /// Applies a patch to a repository.
-    pub fn apply(&mut self, patch:&patch::Patch, internal:&[u8])->Result<(),Error> {
+    pub fn apply(&mut self, patch:&Patch, internal:&[u8])->Result<(),Error> {
         {
             let current=self.get_current_branch();
             unsafe {
@@ -1712,7 +1814,7 @@ impl Repository {
     }
 
 
-    pub fn output_repository(&mut self, working_copy:&Path, pending:&patch::Patch) -> Result<(),Error>{
+    pub fn output_repository(&mut self, working_copy:&Path, pending:&Patch) -> Result<(),Error>{
         unsafe {
             let parent_txn=self.mdb_txn;
             let txn=ptr::null_mut();

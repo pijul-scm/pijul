@@ -20,7 +20,7 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches,Arg};
 extern crate libpijul;
 use commands::StaticSubcommand;
-use self::libpijul::{Repository,add_file};
+use self::libpijul::{Repository};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
 use std;
 use std::io;
@@ -127,7 +127,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<Option<()>, Error<'a>> {
                 let p=pwd.join(*file);
                 let file=iter_after(p.components(), r.components()).unwrap();
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                add_file(&mut repo,file.as_path(),m.is_dir()).unwrap()
+                repo.add_file(file.as_path(),m.is_dir()).unwrap()
             }
             Ok(Some(()))
         }

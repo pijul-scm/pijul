@@ -21,9 +21,7 @@ use clap::{SubCommand, ArgMatches, Arg};
 
 extern crate libpijul;
 use commands::StaticSubcommand;
-use self::libpijul::{Repository,record,apply,sync_file_additions,HASH_SIZE,new_internal,register_hash,dependencies,get_current_branch,write_changes_file};
-
-use self::libpijul::patch::{Patch};
+use self::libpijul::{Repository,Patch,HASH_SIZE};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root, branch_changes_file,to_hex};
 use std::sync::Arc;
 
@@ -67,7 +65,6 @@ pub enum Error {
     NotInARepository,
     IoError(io::Error),
     //Serde(serde_cbor::error::Error),
-    Patch(libpijul::patch::Error),
     SavingPatch,
     Repository(libpijul::Error)
 }
@@ -79,7 +76,6 @@ impl fmt::Display for Error {
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
             //Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
             Error::Repository(ref err) => write!(f, "Repository: {}", err),
-            Error::Patch(ref err) => write!(f, "Patch: {}", err),
             Error::SavingPatch => write!(f, "Patch saving error"),
         }
     }
@@ -92,7 +88,6 @@ impl error::Error for Error {
             Error::IoError(ref err) => error::Error::description(err),
             //Error::Serde(ref err) => serde_cbor::error::Error::description(err),
             Error::Repository(ref err) => libpijul::Error::description(err),
-            Error::Patch(ref err) => libpijul::patch::Error::description(err),
             Error::SavingPatch => "saving patch"
         }
     }
@@ -102,7 +97,6 @@ impl error::Error for Error {
             Error::IoError(ref err) => Some(err),
             //Error::Serde(ref err) => Some(err),
             Error::Repository(ref err) => Some(err),
-            Error::Patch(ref err) => Some(err),
             Error::NotInARepository => None,
             Error::SavingPatch => None
         }
@@ -125,7 +119,7 @@ fn write_patch<'a>(patch:&Patch,dir:&Path)->Result<Vec<u8>,Error>{
     let tmp=make_name(&dir,&mut name);
     {
         let mut buffer = BufWriter::new(try!(File::create(&tmp)));
-        try!(libpijul::patch::to_writer(&mut buffer,patch).map_err(Error::Patch));
+        try!(patch.to_writer(&mut buffer).map_err(Error::Repository));
     }
     // hash
     let mut buffer = BufReader::new(try!(File::open(&tmp).map_err(Error::IoError))); // change to uuid
@@ -153,7 +147,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
             let repo_dir=pristine_dir(r);
             let (changes,syncs)= {
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                try!(record(&mut repo, &r).map_err(Error::Repository))
+                try!(repo.record(&r).map_err(Error::Repository))
             };
             //println!("recorded");
             if changes.is_empty() {
@@ -161,9 +155,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 Ok(None)
             } else {
                 //println!("patch: {:?}",changes);
-                let deps=dependencies(&changes[..]);
-                let patch = Patch { changes:changes,
-                                    dependencies:deps };
+                let patch=Patch::new(changes);
                 // save patch
                 println!("patch: {:?}",patch);
                 let patch_arc=Arc::new(patch);
@@ -174,20 +166,20 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 });
                 let mut internal=[0;HASH_SIZE];
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                new_internal(&mut repo,&mut internal);
-                apply(&mut repo, &patch_arc, &internal[..]);
+                repo.new_internal(&mut internal);
+                repo.apply(&patch_arc, &internal[..]);
                 //println!("sync");
-                sync_file_additions(&mut repo,&patch_arc.changes[..],&syncs, &internal);
+                repo.sync_file_additions(&patch_arc.changes[..],&syncs, &internal);
                 if cfg!(debug_assertions){
                     let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
-                    libpijul::debug(&mut repo,&mut buffer);
+                    repo.debug(&mut buffer);
                 }
 
                 match hash_child.join() {
                     Ok(Ok(hash))=> {
-                        register_hash(&mut repo,&internal[..],&hash[..]);
+                        repo.register_hash(&internal[..],&hash[..]);
                         //println!("writing changes {:?}",internal);
-                        write_changes_file(&repo,&branch_changes_file(r,get_current_branch(&repo)));
+                        repo.write_changes_file(&branch_changes_file(r,repo.get_current_branch()));
                         Ok(Some(()))
                     },
                     Ok(Err(x)) => {
