@@ -1,0 +1,12 @@
+[package]
+name = "cpijul"
+version = "0.1.0"
+authors = ["Pierre-Étienne Meunier","Florent Becker"]
+license = "AGPL-3.0"
+
+[dependencies]
+libpijul = { version = "*", path = "../libpijul" }
+libc="*"
+
+[lib]
+crate-type=["staticlib"]
