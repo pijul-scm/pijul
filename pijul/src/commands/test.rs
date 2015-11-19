@@ -1,3 +1,4 @@
+#[test]
 extern crate tempdir;
 
 use std::io;

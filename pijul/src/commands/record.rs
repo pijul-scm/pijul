@@ -19,11 +19,12 @@
 extern crate clap;
 use clap::{SubCommand, ArgMatches, Arg};
 
+extern crate libpijul;
 use commands::StaticSubcommand;
-use repository::{Repository,record,apply,sync_file_additions,HASH_SIZE,new_internal,register_hash,dependencies,get_current_branch,write_changes_file};
-use repository;
-use repository::patch::{Patch};
-use repository::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root, branch_changes_file,to_hex};
+use self::libpijul::{Repository,record,apply,sync_file_additions,HASH_SIZE,new_internal,register_hash,dependencies,get_current_branch,write_changes_file};
+
+use self::libpijul::patch::{Patch};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root, branch_changes_file,to_hex};
 use std::sync::Arc;
 
 use std;
@@ -31,9 +32,10 @@ use std::io;
 use std::fmt;
 use std::error;
 use std::thread;
+
 extern crate crypto;
-use crypto::digest::Digest;
-use crypto::sha2::Sha512;
+use self::crypto::digest::Digest;
+use self::crypto::sha2::Sha512;
 
 use std::io::{BufWriter,BufReader,BufRead};
 use std::fs::File;
@@ -65,9 +67,9 @@ pub enum Error {
     NotInARepository,
     IoError(io::Error),
     //Serde(serde_cbor::error::Error),
-    Patch(repository::patch::Error),
+    Patch(libpijul::patch::Error),
     SavingPatch,
-    Repository(repository::Error)
+    Repository(libpijul::Error)
 }
 
 impl fmt::Display for Error {
@@ -89,8 +91,8 @@ impl error::Error for Error {
             Error::NotInARepository => "not in a repository",
             Error::IoError(ref err) => error::Error::description(err),
             //Error::Serde(ref err) => serde_cbor::error::Error::description(err),
-            Error::Repository(ref err) => repository::Error::description(err),
-            Error::Patch(ref err) => repository::patch::Error::description(err),
+            Error::Repository(ref err) => libpijul::Error::description(err),
+            Error::Patch(ref err) => libpijul::patch::Error::description(err),
             Error::SavingPatch => "saving patch"
         }
     }
@@ -123,7 +125,7 @@ fn write_patch<'a>(patch:&Patch,dir:&Path)->Result<Vec<u8>,Error>{
     let tmp=make_name(&dir,&mut name);
     {
         let mut buffer = BufWriter::new(try!(File::create(&tmp)));
-        try!(repository::patch::to_writer(&mut buffer,patch).map_err(Error::Patch));
+        try!(libpijul::patch::to_writer(&mut buffer,patch).map_err(Error::Patch));
     }
     // hash
     let mut buffer = BufReader::new(try!(File::open(&tmp).map_err(Error::IoError))); // change to uuid
@@ -178,7 +180,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 sync_file_additions(&mut repo,&patch_arc.changes[..],&syncs, &internal);
                 if cfg!(debug_assertions){
                     let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
-                    repository::debug(&mut repo,&mut buffer);
+                    libpijul::debug(&mut repo,&mut buffer);
                 }
 
                 match hash_child.join() {

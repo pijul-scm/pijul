@@ -2,23 +2,14 @@
 name = "pijul"
 version = "0.1.0"
 authors = ["Pierre-Étienne Meunier","Florent Becker"]
-build="build.rs"
 
 [dependencies]
-libc = "*"
 clap = "*"
-rand="*"
 rust-crypto = "*"
-tempdir="*"
-rsync="0.1.2"
-
 regex="0.1.41"
-rustc-serialize="0.3"
+rand= "*"
 
+libpijul = {path="../libpijul"}
 
-[build-dependencies]
-gcc="*"
-
-[[bin]]
-name="main"
-doc=false
+[dev-dependencies]
+tempdir="*"

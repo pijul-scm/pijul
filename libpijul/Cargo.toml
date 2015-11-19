@@ -1,0 +1,13 @@
+[package]
+name = "libpijul"
+version = "0.1.0"
+authors = ["Pierre-Étienne Meunier","Florent Becker"]
+build="build.rs"
+
+[dependencies]
+libc = "*"
+rustc-serialize="0.3"
+rand = "*"
+
+[build-dependencies]
+gcc="*"

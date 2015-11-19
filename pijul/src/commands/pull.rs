@@ -20,10 +20,10 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches,Arg};
 
 use commands::StaticSubcommand;
-use repository::{Repository,apply,DEFAULT_BRANCH,HASH_SIZE,new_internal,sync_file_additions,has_patch,get_current_branch,write_changes_file,register_hash};
-use repository::patch::{Patch};
-use repository::fs_representation::{repo_dir, pristine_dir, find_repo_root, patches_dir, branch_changes_file,to_hex,read_changes};
-use repository;
+extern crate libpijul;
+use self::libpijul::{Repository,apply,DEFAULT_BRANCH,HASH_SIZE,new_internal,sync_file_additions,has_patch,get_current_branch,write_changes_file,register_hash};
+use self::libpijul::patch::{Patch};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root, patches_dir, branch_changes_file,to_hex,read_changes};
 use std::io;
 use std::fmt;
 use std::error;
@@ -104,8 +104,8 @@ pub enum Error{
     NotInARepository,
     IoError(io::Error),
     //Serde(serde_cbor::error::Error),
-    Patch(repository::patch::Error),
-    Repository(repository::Error)
+    Patch(libpijul::patch::Error),
+    Repository(libpijul::Error)
 }
 
 impl fmt::Display for Error {
@@ -126,8 +126,8 @@ impl error::Error for Error {
             Error::NotInARepository => "not in a repository",
             Error::IoError(ref err) => error::Error::description(err),
             //Error::Serde(ref err) => serde_cbor::error::Error::description(err),
-            Error::Patch(ref err) => repository::patch::Error::description(err),
-            Error::Repository(ref err) => repository::Error::description(err)
+            Error::Patch(ref err) => libpijul::patch::Error::description(err),
+            Error::Repository(ref err) => libpijul::Error::description(err)
         }
     }
 
@@ -218,7 +218,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 if !try!(has_patch(repo,branch,patch_hash).map_err(Error::Repository)) {
                     let local_patch=try!(download_patch(remote,local_patches,patch_hash));
                     let mut buffer = BufReader::new(try!(File::open(local_patch)));
-                    let patch=try!(repository::patch::from_reader(&mut buffer).map_err(Error::Patch));
+                    let patch=try!(libpijul::patch::from_reader(&mut buffer).map_err(Error::Patch));
                     for dep in patch.dependencies.iter() {
                         try!(apply_patches(repo,branch,remote,local_patches,&dep))
                     }
@@ -239,7 +239,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             let pending={
                 let (changes,_)= {
                     let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                    try!(repository::record(&mut repo, &r).map_err(Error::Repository))
+                    try!(libpijul::record(&mut repo, &r).map_err(Error::Repository))
                 };
                 Patch { changes:changes,
                         dependencies:vec!() }
@@ -252,10 +252,10 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
 
             if cfg!(debug_assertions){
                 let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
-                repository::debug(&mut repo,&mut buffer);
+                libpijul::debug(&mut repo,&mut buffer);
             }
 
-            repository::output_repository(&mut repo,&r,&pending);
+            libpijul::output_repository(&mut repo,&r,&pending);
             Ok(())
         }
     }

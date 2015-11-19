@@ -17,6 +17,7 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 extern crate libc;
+extern crate rustc_serialize;
 use self::libc::{c_int, c_uint,c_char,c_uchar,c_void,size_t};
 use self::libc::{memcmp};
 use std::ptr::{copy_nonoverlapping};
@@ -24,7 +25,7 @@ use std::ptr;
 
 use std::slice;
 use std::str;
-use std;
+
 use std::collections::HashMap;
 extern crate rand;
 use std::path::{PathBuf,Path};
@@ -168,6 +169,7 @@ impl Repository {
 impl Drop for Repository {
     fn drop(&mut self){
         unsafe {
+            println!("dropping repository");
             if std::thread::panicking() {
                 mdb_txn_abort(self.mdb_txn);
             } else {
@@ -943,7 +945,7 @@ pub fn record<'a>(repo:&'a mut Repository,working_copy:&std::path::Path)->Result
                 k.mv_data=current_inode.as_ptr() as *const c_void;
                 k.mv_size=INODE_SIZE as size_t;
 
-                let mut curs_tree=Cursor::new(repo.mdb_txn,repo.dbi_tree).unwrap();
+                let curs_tree=Cursor::new(repo.mdb_txn,repo.dbi_tree).unwrap();
                 let mut e= unsafe { mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint) };
                 //dump_table(repo.mdb_txn,repo.dbi_tree);
                 while e==0
@@ -1613,7 +1615,7 @@ fn filename_of_inode<'a>(repo:&'a Repository,inode:&[u8],working_copy:&mut PathB
     loop {
         let e = unsafe {mdb_get(repo.mdb_txn,repo.dbi_revtree,&mut v_inode, &mut v_next)};
         if e==0 {
-            if unsafe { memcmp(v_next.mv_data, ROOT_INODE.as_ptr() as *const c_void, INODE_SIZE) } == 0 {
+            if unsafe { memcmp(v_next.mv_data, ROOT_INODE.as_ptr() as *const c_void, INODE_SIZE as size_t) } == 0 {
                 break
             } else {
                 components.push(unsafe { slice::from_raw_parts((v_next.mv_data as *const u8).offset(INODE_SIZE as isize),

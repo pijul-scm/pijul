@@ -22,8 +22,9 @@ use std::path::Path;
 use std::io::{Error, ErrorKind};
 
 use commands::StaticSubcommand;
-use repository::Repository;
-use repository::fs_representation::{find_repo_root,pristine_dir};
+extern crate libpijul;
+use self::libpijul::Repository;
+use self::libpijul::fs_representation::{find_repo_root,pristine_dir};
 
 pub struct Params<'a> {
     pub repository : &'a Path

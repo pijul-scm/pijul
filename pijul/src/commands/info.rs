@@ -22,7 +22,8 @@ use std::path::Path;
 use clap::{SubCommand, Arg, ArgMatches};
 
 use commands;
-use repository::fs_representation::find_repo_root;
+extern crate libpijul;
+use self::libpijul::fs_representation::find_repo_root;
 
 pub struct Params<'a> {
     pub directory : &'a Path

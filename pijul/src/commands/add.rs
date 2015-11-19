@@ -18,11 +18,10 @@
 */
 extern crate clap;
 use clap::{SubCommand, ArgMatches,Arg};
-
+extern crate libpijul;
 use commands::StaticSubcommand;
-use repository::{Repository,add_file};
-use repository::fs_representation::{repo_dir, pristine_dir, find_repo_root};
-use repository;
+use self::libpijul::{Repository,add_file};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
 use std;
 use std::io;
 use std::fmt;
@@ -65,7 +64,7 @@ pub enum Error <'a>{
     NotInARepository,
     PathNotFound(&'a Path),
     IoError(io::Error),
-    Repository(repository::Error)
+    Repository(libpijul::Error)
 }
 
 impl <'a> fmt::Display for Error<'a> {
@@ -85,7 +84,7 @@ impl <'a> error::Error for Error<'a> {
             Error::NotInARepository => "not in a repository",
             Error::PathNotFound(_) => "path not found",
             Error::IoError(ref err) => error::Error::description(err),
-            Error::Repository(ref err) => repository::Error::description(err),
+            Error::Repository(ref err) => libpijul::Error::description(err),
         }
     }
 

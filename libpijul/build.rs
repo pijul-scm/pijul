@@ -15,7 +15,7 @@ fn main() {
         };
     remove_file("empty.c").unwrap();
     if has_lmdb {
-        gcc::compile_library("libretrieve.a",&["src/repository/retrieve.c"]);
+        gcc::compile_library("libretrieve.a",&["src/retrieve.c"]);
         println!("cargo:rustc-flags=-l dylib=lmdb")
     } else {
         let target = env::var("TARGET").unwrap();

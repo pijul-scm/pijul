@@ -1,8 +1,8 @@
-extern crate libc;
 #[macro_use]
 extern crate clap;
 
-extern crate pijul;
+extern crate libpijul;
+mod commands;
 
 use std::path::Path;
 
@@ -11,8 +11,8 @@ macro_rules! pijul_subcommand_dispatch {
         match $p {
             $(($subcommand_name, Some(args)) =>
              {
-                 let params = pijul::commands::$subcommand::parse_args(args);
-                 match pijul::commands::$subcommand::run(&params) {
+                 let params = commands::$subcommand::parse_args(args);
+                 match commands::$subcommand::run(&params) {
                      Ok(_) => (),
                      Err(e) => {
                          println!("error: {}", e);
@@ -22,9 +22,9 @@ macro_rules! pijul_subcommand_dispatch {
              }
               ),*
                 ("", None) => {
-                    let repository = pijul::commands::check::Params
+                    let repository = commands::check::Params
                     {repository : Path::new("/tmp/test")};
-                    pijul::commands::check::run(&repository).unwrap()
+                    commands::check::run(&repository).unwrap()
                 },
             _ => panic!("Incorrect subcommand name")
         }
@@ -38,7 +38,7 @@ fn main() {
             (author: "Pierre-Étienne Meunier and Florent Becker")
             (about: "Version Control: performant, distributed, easy to use; pick any three")
             );
-    let app = app.subcommands(pijul::commands::all_command_invocations());
+    let app = app.subcommands(commands::all_command_invocations());
 
     let args = app.get_matches();
 

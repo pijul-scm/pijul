@@ -23,7 +23,8 @@ use std::io;
 use std::{fmt,error};
 
 use commands::StaticSubcommand;
-use repository::fs_representation;
+extern crate libpijul;
+use self::libpijul::fs_representation;
 
 pub fn invocation() -> StaticSubcommand {
     return
