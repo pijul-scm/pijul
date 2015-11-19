@@ -16,6 +16,10 @@
   You should have received a copy of the GNU Affero General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+extern crate libc;
+
+use self::libc::{c_void,size_t};
+use self::libc::{memcmp};
 extern crate rustc_serialize;
 use self::rustc_serialize::json::{encode,decode};
 use std::io::{Read,Write};
@@ -27,6 +31,12 @@ pub type LocalKey=Vec<u8>;
 pub type ExternalKey=Vec<u8>;
 pub type ExternalHash=Vec<u8>;
 pub type Flag=u8;
+
+pub const HASH_SIZE:usize=20; // pub temporaire
+pub const LINE_SIZE:usize=4;
+pub const KEY_SIZE:usize=HASH_SIZE+LINE_SIZE;
+pub const ROOT_KEY:&'static[u8]=&[0;KEY_SIZE];
+
 
 #[derive(Debug,RustcEncodable,RustcDecodable)]
 pub struct Edge {
@@ -104,4 +114,32 @@ pub fn to_writer<W>(w:&mut W,p:&Patch)->Result<(),Error> where W:Write {
     let encoded=try!(encode(&p).map_err(Error::Encoder));
     try!(w.write(encoded.as_bytes()).map_err(Error::IO));
     Ok(())
+}
+
+pub fn dependencies(changes:&[Change])->Vec<ExternalHash> {
+    let mut deps=Vec::new();
+    fn push_dep(deps:&mut Vec<ExternalHash>,dep:ExternalHash) {
+        if !if dep.len()==HASH_SIZE {unsafe { memcmp(dep.as_ptr() as *const c_void,
+                                                     ROOT_KEY.as_ptr() as *const c_void,
+                                                     HASH_SIZE as size_t)==0 }} else {false} {
+            deps.push(dep)
+        }
+    }
+    for ch in changes {
+        match *ch {
+            Change::NewNodes { ref up_context,ref down_context, line_num:_,flag:_,nodes:_ } => {
+                for c in up_context.iter().chain(down_context.iter()) {
+                    if c.len()>LINE_SIZE { push_dep(&mut deps,c[0..c.len()-LINE_SIZE].to_vec()) }
+                }
+            },
+            Change::Edges{ref edges} =>{
+                for e in edges {
+                    if e.from.len()>LINE_SIZE { push_dep(&mut deps,e.from[0..e.from.len()-LINE_SIZE].to_vec()) }
+                    if e.to.len()>LINE_SIZE { push_dep(&mut deps,e.to[0..e.to.len()-LINE_SIZE].to_vec()) }
+                    if e.introduced_by.len()>0 { push_dep(&mut deps,e.introduced_by.clone()) }
+                }
+            }
+        }
+    }
+    deps
 }
