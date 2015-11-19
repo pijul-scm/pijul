@@ -1,4 +1,4 @@
-#include "pijul.h"
+#include <pijul.h>
 #include <stdlib.h>
 #include <stdio.h>
 int main(){
