@@ -125,7 +125,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 //println!("patch: {:?}",changes);
                 let patch=Patch::new(changes);
                 // save patch
-                println!("patch: {:?}",patch);
+                //println!("patch: {:?}",patch);
                 let patch_arc=Arc::new(patch);
                 let child_patch=patch_arc.clone();
                 let patches_dir=patches_dir(r);
