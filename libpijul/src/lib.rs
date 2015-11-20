@@ -377,35 +377,35 @@ impl <'a,W> LineBuffer<'a> for W where W:std::io::Write {
 
 
 
-struct CursIter<'a> {
+struct CursIter<'a,'b> {
     cursor:&'a mut mdb::MdbCursor,
     op:c_uint,
     edge_flag:u8,
     include_pseudo:bool,
-    key:MDB_val,
-    val:MDB_val,
+    key:&'b[u8]
 }
 
-impl <'a>CursIter<'a> {
-    fn new(curs:&mut Cursor<'a>,key:&'a [u8],flag:u8,include_pseudo:bool)->CursIter<'a>{
+impl <'a,'b>CursIter<'a,'b> {
+    fn new(curs:&mut Cursor<'a>,key:&'b [u8],flag:u8,include_pseudo:bool)->CursIter<'a,'b>{
         CursIter { cursor:unsafe { &mut *curs.cursor },
-                   key:MDB_val{mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t},
-                   val:MDB_val{mv_data:[flag].as_ptr() as *const c_void, mv_size:1},
+                   key:key,
                    include_pseudo:include_pseudo,
                    edge_flag:flag,
                    op:Op::MDB_GET_BOTH_RANGE as c_uint }
     }
 }
 
-impl <'a>Iterator for CursIter<'a> {
+impl <'a,'b>Iterator for CursIter<'a,'b> {
     type Item=&'a [u8];
     fn next(&mut self)->Option<&'a[u8]>{
         unsafe {
             // Include_pseudo works because PSEUDO_EDGE==1, hence there is no "gap" in flags between regular edges and their pseudo version, for each kind of edge.
-            let e=mdb_cursor_get(self.cursor,&mut self.key,&mut self.val,self.op as c_uint);
+            let mut key=MDB_val{mv_data:self.key.as_ptr() as *const c_void, mv_size:self.key.len() as size_t};
+            let mut val=MDB_val{mv_data:[self.edge_flag].as_ptr() as *const c_void, mv_size:1};
+            let e=mdb_cursor_get(self.cursor,&mut key,&mut val,self.op as c_uint);
             self.op=Op::MDB_NEXT_DUP as c_uint;
-            if e==0 && self.val.mv_size>0 && ((*(self.val.mv_data as *const u8) == self.edge_flag) || (self.include_pseudo && (*(self.val.mv_data as *const u8) == (self.edge_flag|PSEUDO_EDGE)))) {
-                Some(slice::from_raw_parts(self.val.mv_data as *const u8,self.val.mv_size as usize))
+            if e==0 && val.mv_size>0 && ((*(val.mv_data as *const u8) == self.edge_flag) || (self.include_pseudo && (*(val.mv_data as *const u8) == (self.edge_flag|PSEUDO_EDGE)))) {
+                Some(slice::from_raw_parts(val.mv_data as *const u8,val.mv_size as usize))
             } else {
                 None
             }
@@ -549,7 +549,7 @@ impl Repository {
                             }
                             if cs.is_some() || is_dir {
                                 unsafe {
-                                    mdb::put(self.mdb_txn,self.dbi_tree,&inode,&[],0).unwrap()
+                                    mdb::put(self.mdb_txn,self.dbi_tree,&inode,&[],0).unwrap();
                                 }
                             }
                             // push next inode onto buf.
@@ -603,7 +603,7 @@ impl Repository {
             Ok(v)=> {
                 let mut vv=v.to_vec();
                 vv[0]=1;
-                unsafe { mdb::put(self.mdb_txn,self.dbi_inodes,inode,&vv,0).unwrap() }
+                unsafe { mdb::put(self.mdb_txn,self.dbi_inodes,inode,&vv,0).unwrap() };
             },
             Err(_)=>{
                 // Was not in inodes, nothing to do.
@@ -626,7 +626,7 @@ impl Repository {
             Ok(node) => {
                 let mut node_=node.to_vec();
                 node_[0]=2;
-                unsafe { mdb::put(self.mdb_txn,self.dbi_inodes,&inode,&node_,0).unwrap() }
+                unsafe { mdb::put(self.mdb_txn,self.dbi_inodes,&inode,&node_,0).unwrap() };
             },
             Err(_)=>{
                 panic!("unregistered inode")
@@ -1411,7 +1411,7 @@ impl Repository {
                             if e.flag&FOLDER_EDGE!=0 {
                                 self.connect_down_folders(pu,pv,&internal)
                             } else {
-                                // Now if u is alive, connect u to alive descendants of v (following deleted edges from v).
+                                // Now if u is alive, connect u to alive descendants of v.
                                 let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
                                 if nonroot_is_alive(&mut cursor,pu) {
                                     self.connect_down(pu,pv,&internal);
@@ -1454,11 +1454,15 @@ impl Repository {
                                 internal as &[u8]
                             };
                             copy_nonoverlapping(u.as_ptr(), pu.as_mut_ptr(), HASH_SIZE);
+                            copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
+                                                pu.as_mut_ptr().offset(HASH_SIZE as isize),
+                                                LINE_SIZE);
                             self.connect_up(&pu,&pv,&internal)
                         }
                     }
                     lnum0= (*line_num)+nodes.len()-1;
-                    for i in 0..LINE_SIZE { pv[HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
+                    unsafe { copy_nonoverlapping(internal.as_ptr(), pu.as_mut_ptr(), HASH_SIZE); }
+                    for i in 0..LINE_SIZE { pu[HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
                     for c in down_context {
                         unsafe {
                             let u= if c.len()>LINE_SIZE {
@@ -1467,7 +1471,10 @@ impl Repository {
                                 internal as &[u8]
                             };
                             copy_nonoverlapping(u.as_ptr(), pv.as_mut_ptr(), HASH_SIZE);
-                            self.connect_down(&pv,&pu,&internal)
+                            copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
+                                                pv.as_mut_ptr().offset(HASH_SIZE as isize),
+                                                LINE_SIZE);
+                            self.connect_down(&pu,&pv,&internal);
                         }
                     }
                 }
@@ -1476,7 +1483,7 @@ impl Repository {
         for ref dep in patch.dependencies.iter() {
             let dep_internal=self.internal_hash(&dep).unwrap();
             unsafe {
-                mdb::put(self.mdb_txn,self.dbi_revdep,dep_internal,internal,0).unwrap()
+                mdb::put(self.mdb_txn,self.dbi_revdep,dep_internal,internal,0).unwrap();
             }
         }
         Ok(())
@@ -1507,37 +1514,41 @@ impl Repository {
 
     /// Connect b to the alive ancestors of a (adding pseudo-folder edges if necessary).
     fn connect_up(&mut self, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
-        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, a:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>, folder_buf:&mut Vec<u8>) {
+        //println!("connect_up: {} {}",to_hex(a),to_hex(b));
+        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, a:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>, folder_buf:&mut Vec<u8>,is_first:bool) {
+            //println!("connect: {}",to_hex(a));
             if !visited.contains(a) {
                 visited.insert(a);
                 // Follow parent edges.
                 let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
                 for a1 in CursIter::new(&mut cursor,&a,PARENT_EDGE|DELETED_EDGE,false) {
-                    connect(visited,repo,&a1[1..(1+KEY_SIZE)],internal_patch_id,buf,folder_buf);
+                    connect(visited,repo,&a1[1..(1+KEY_SIZE)],internal_patch_id,buf,folder_buf,false);
                 }
-                // Test for life of the current node
-                if nonroot_is_alive(&mut cursor,a) {
-                    //println!("key is alive");
-                    buf.push(PSEUDO_EDGE|PARENT_EDGE);
-                    buf.extend(a);
-                    buf.extend(internal_patch_id)
-                }
+                if !is_first {
+                    // Test for life of the current node
+                    if nonroot_is_alive(&mut cursor,a) {
+                        //println!("key is alive");
+                        buf.push(PSEUDO_EDGE|PARENT_EDGE);
+                        buf.extend(a);
+                        buf.extend(internal_patch_id)
+                    }
 
-                // Look at all deleted folder parents, and add them.
-                for a1 in CursIter::new(&mut cursor,&a,PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE,false) {
-                    folder_buf.push(PSEUDO_EDGE|PARENT_EDGE|FOLDER_EDGE);
-                    folder_buf.extend(a);
-                    folder_buf.extend(internal_patch_id);
-                    folder_buf.push(PSEUDO_EDGE|FOLDER_EDGE);
-                    folder_buf.extend(a1);
-                    folder_buf.extend(internal_patch_id);
+                    // Look at all deleted folder parents, and add them.
+                    for a1 in CursIter::new(&mut cursor,&a,PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE,false) {
+                        folder_buf.push(PSEUDO_EDGE|PARENT_EDGE|FOLDER_EDGE);
+                        folder_buf.extend(a);
+                        folder_buf.extend(internal_patch_id);
+                        folder_buf.push(PSEUDO_EDGE|FOLDER_EDGE);
+                        folder_buf.extend(a1);
+                        folder_buf.extend(internal_patch_id);
+                    }
                 }
             }
         }
         let mut visited=HashSet::new();
         let mut buf=Vec::new();
         let mut folder_buf=Vec::new();
-        connect(&mut visited, self,a,internal_patch_id,&mut buf,&mut folder_buf);
+        connect(&mut visited, self,a,internal_patch_id,&mut buf,&mut folder_buf,true);
         let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         unsafe {
             copy_nonoverlapping(b.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
@@ -1568,30 +1579,32 @@ impl Repository {
 
     /// Connect a to the alive descendants of b (not including folder descendants).
     fn connect_down(&mut self, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
-        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>) {
+        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>, is_first:bool) {
             if !visited.contains(b) {
                 visited.insert(b);
                 let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
                 for b1 in CursIter::new(&mut cursor,&b,DELETED_EDGE,false) {
-                    connect(visited,repo,&b1[1..(1+KEY_SIZE)],internal_patch_id,buf);
+                    connect(visited,repo,&b1[1..(1+KEY_SIZE)],internal_patch_id,buf,false);
                 }
-                // for all alive descendants
-                for b1 in CursIter::new(&mut cursor,&b,0,true) {
-                    buf.push(PSEUDO_EDGE);
-                    buf.extend(&b1[1..(1+KEY_SIZE)]);
-                    buf.extend(internal_patch_id)
-                }
-                // if b is a zombie (we got to b through a deleted edge but it also has alive edges)
-                if nonroot_is_alive(&mut cursor,b) {
-                    buf.push(PSEUDO_EDGE);
-                    buf.extend(b);
-                    buf.extend(internal_patch_id)
+                if !is_first {
+                    // for all alive descendants
+                    for b1 in CursIter::new(&mut cursor,&b,0,true) {
+                        buf.push(PSEUDO_EDGE);
+                        buf.extend(&b1[1..(1+KEY_SIZE)]);
+                        buf.extend(internal_patch_id)
+                    }
+                    // if b is a zombie (we got to b through a deleted edge but it also has alive edges)
+                    if nonroot_is_alive(&mut cursor,b) {
+                        buf.push(PSEUDO_EDGE);
+                        buf.extend(b);
+                        buf.extend(internal_patch_id)
+                    }
                 }
             }
         }
         let mut visited=HashSet::new();
         let mut buf=Vec::new();
-        connect(&mut visited, self,b,internal_patch_id,&mut buf);
+        connect(&mut visited, self,b,internal_patch_id,&mut buf,true);
         let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         unsafe {
             copy_nonoverlapping(a.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);

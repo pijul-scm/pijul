@@ -92,11 +92,11 @@ pub unsafe fn cursor_get<'a>(cursor:&Cursor,key:&[u8],val:Option<&[u8]>,op:Op)->
     }
 }
 
-pub unsafe fn put(txn:*mut MdbTxn,dbi:MdbDbi,key:&[u8],val:&[u8],flag:c_uint)->Result<(),c_int> {
+pub unsafe fn put(txn:*mut MdbTxn,dbi:MdbDbi,key:&[u8],val:&[u8],flag:c_uint)->Result<c_int,c_int> {
     let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
     let mut v=MDB_val { mv_data:val.as_ptr() as *const c_void, mv_size:val.len() as size_t };
     let e=mdb_put(txn,dbi,&mut k,&mut v,flag);
-    if e==0 { Ok(()) } else {Err(e)}
+    if e==0 || e==MDB_KEYEXIST { Ok(e) } else {Err(e)}
 }
 
 pub unsafe fn del(txn:*mut MdbTxn,dbi:MdbDbi,key:&[u8],val:Option<&[u8]>)->Result<(),c_int> {
@@ -120,6 +120,7 @@ pub const MDB_DUPSORT: c_uint = 0x04;
 //const MDB_REVERSEDUP: c_uint =  0x40;
 pub const MDB_CREATE: c_uint = 0x40000;
 pub const MDB_NOTFOUND: c_int = -30798;
+pub const MDB_KEYEXIST: c_int = -30799;
 
 pub const MDB_NODUPDATA:c_uint = 0x20;
 
