@@ -1,0 +1,51 @@
+#!/bin/bash
+
+cd /tmp
+rm -Rf a b c
+mkdir a
+cd /tmp/a
+pijul init
+
+cat << EOF > /tmp/a/a
+A
+B
+C
+D
+E
+F
+G
+EOF
+
+pijul add a
+pijul record
+
+cd /tmp
+pijul get a b
+
+echo "recording in b"
+cd /tmp/b
+cat << EOF > /tmp/b/a
+A
+B
+C
+  X
+D
+E
+F
+G
+EOF
+pijul record
+
+echo "recording in a"
+cd /tmp/a
+cat << EOF > /tmp/a/a
+A
+G
+EOF
+pijul record
+
+echo "pulling from b"
+pijul pull ../b
+
+cd /tmp/a
+dot -Tpdf -o /tmp/a/test.pdf debug
