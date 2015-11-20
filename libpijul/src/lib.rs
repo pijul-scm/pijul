@@ -1684,13 +1684,12 @@ impl Repository {
         loop {
             let e = unsafe {mdb_get(self.mdb_txn,self.dbi_revtree,&mut v_inode, &mut v_next)};
             if e==0 {
+                components.push(unsafe { slice::from_raw_parts((v_next.mv_data as *const u8).offset(INODE_SIZE as isize),
+                                                               (v_next.mv_size as usize-INODE_SIZE)) });
+                v_inode.mv_data=v_next.mv_data;
+                v_inode.mv_size=v_next.mv_size;
                 if unsafe { memcmp(v_next.mv_data, ROOT_INODE.as_ptr() as *const c_void, INODE_SIZE as size_t) } == 0 {
                     break
-                } else {
-                    components.push(unsafe { slice::from_raw_parts((v_next.mv_data as *const u8).offset(INODE_SIZE as isize),
-                                                                   (v_next.mv_size as usize-INODE_SIZE)) });
-                    v_inode.mv_data=v_next.mv_data;
-                    v_inode.mv_size=v_next.mv_size;
                 }
             } else {
                 return false
