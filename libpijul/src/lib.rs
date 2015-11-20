@@ -431,10 +431,10 @@ fn nonroot_is_alive(cursor:&mut Cursor,key:&[u8])->bool {
     match unsafe { mdb::cursor_get(&cursor,&key,Some(&flag[..]),Op::MDB_GET_BOTH_RANGE) } {
         Ok(v)=>{
             if v.len()<1 { false } else {
-                v[0]==PARENT_EDGE || {
+                v[0]==flag[0] || {
                     flag[0]=PARENT_EDGE|FOLDER_EDGE;
                     match unsafe { mdb::cursor_get(&cursor,&key,Some(&flag[..]),Op::MDB_GET_BOTH_RANGE) } {
-                        Ok(w)=>if w.len()<1 { false } else { w[0]==FOLDER_EDGE|PARENT_EDGE },
+                        Ok(w)=>if w.len()<1 { false } else { w[0]==flag[0] },
                         Err(_)=>false
                     }
                 }
@@ -1414,17 +1414,8 @@ impl Repository {
                                 // Now if u is alive, connect u to alive descendants of v (following deleted edges from v).
                                 let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
                                 if nonroot_is_alive(&mut cursor,pu) {
-                                    //println!("pu ={} is alive",to_hex(pu));
-                                    let mut children=Vec::new();
-                                    for w in CursIter::new(&mut cursor,pv,DELETED_EDGE,false) {
-                                        children.extend(&w[1..(1+KEY_SIZE)]);
-                                    }
-                                    let mut i=0;
-                                    while i<children.len() {
-                                        self.connect_down(pu,&children[i..(i+KEY_SIZE)],&internal);
-                                        i+=KEY_SIZE
-                                    }
-                                }// else {println!("pu ={} is dead",to_hex(pu))}
+                                    self.connect_down(pu,pv,&internal);
+                                } else {println!("pu ={} is dead",to_hex(pu))}
                             }
                         } else {
                             let (pu,pv) = if e.flag&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
@@ -1586,13 +1577,13 @@ impl Repository {
                 }
                 // for all alive descendants
                 for b1 in CursIter::new(&mut cursor,&b,0,true) {
-                    buf.push(PSEUDO_EDGE|PARENT_EDGE);
+                    buf.push(PSEUDO_EDGE);
                     buf.extend(&b1[1..(1+KEY_SIZE)]);
                     buf.extend(internal_patch_id)
                 }
                 // if b is a zombie (we got to b through a deleted edge but it also has alive edges)
                 if nonroot_is_alive(&mut cursor,b) {
-                    buf.push(PSEUDO_EDGE|PARENT_EDGE);
+                    buf.push(PSEUDO_EDGE);
                     buf.extend(b);
                     buf.extend(internal_patch_id)
                 }
