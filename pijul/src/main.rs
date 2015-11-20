@@ -21,11 +21,7 @@ macro_rules! pijul_subcommand_dispatch {
                  }
              }
               ),*
-                ("", None) => {
-                    let repository = commands::check::Params
-                    {repository : Path::new("/tmp/test")};
-                    commands::check::run(&repository).unwrap()
-                },
+                ("", None) => {},
             _ => panic!("Incorrect subcommand name")
         }
     }}
