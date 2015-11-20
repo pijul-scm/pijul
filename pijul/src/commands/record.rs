@@ -31,9 +31,6 @@ use std::fmt;
 use std::error;
 use std::thread;
 
-extern crate crypto;
-use self::crypto::digest::Digest;
-use self::crypto::sha2::Sha512;
 
 use std::io::{BufWriter,BufReader,BufRead};
 use std::fs::File;
@@ -109,35 +106,6 @@ impl From<io::Error> for Error {
     }
 }
 
-fn write_patch<'a>(patch:&Patch,dir:&Path)->Result<Vec<u8>,Error>{
-    let mut name:[u8;20]=[0;20];
-    fn make_name(dir:&Path,name:&mut [u8])->std::path::PathBuf{
-        for i in 0..name.len() { let r:u8=rand::random(); name[i] = 97 + (r%26) }
-        let tmp=dir.join(std::str::from_utf8(&name[..]).unwrap());
-        if std::fs::metadata(&tmp).is_err() { tmp } else { make_name(dir,name) }
-    }
-    let tmp=make_name(&dir,&mut name);
-    {
-        let mut buffer = BufWriter::new(try!(File::create(&tmp)));
-        try!(patch.to_writer(&mut buffer).map_err(Error::Repository));
-    }
-    // hash
-    let mut buffer = BufReader::new(try!(File::open(&tmp).map_err(Error::IoError))); // change to uuid
-    let mut hasher = Sha512::new();
-    loop {
-        let len= match buffer.fill_buf() {
-            Ok(buf)=> if buf.len()==0 { break } else {
-                hasher.input(buf);buf.len()
-            },
-            Err(e)=>return Err(Error::IoError(e))
-        };
-        buffer.consume(len)
-    }
-    let mut hash=vec![0;hasher.output_bytes()];
-    hasher.result(&mut hash);
-    try!(std::fs::rename(tmp,dir.join(to_hex(&hash)).with_extension("cbor")).map_err(Error::IoError));
-    Ok(hash)
-}
 
 pub fn run(params : &Params) -> Result<Option<()>, Error> {
     match find_repo_root(&params.repository){
@@ -162,7 +130,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let child_patch=patch_arc.clone();
                 let patches_dir=patches_dir(r);
                 let hash_child=thread::spawn(move || {
-                    write_patch(&child_patch,&patches_dir)
+                    child_patch.save(&patches_dir)
                 });
                 let mut internal=[0;HASH_SIZE];
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
@@ -183,7 +151,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                         Ok(Some(()))
                     },
                     Ok(Err(x)) => {
-                        Err(x)
+                        Err(Error::Repository(x))
                     },
                     Err(_)=>{
                         Err(Error::SavingPatch)

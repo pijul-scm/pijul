@@ -9,6 +9,7 @@ build="build.rs"
 libc = "*"
 rustc-serialize="0.3"
 rand = "*"
+rust-crypto="*"
 
 [build-dependencies]
 gcc="*"
