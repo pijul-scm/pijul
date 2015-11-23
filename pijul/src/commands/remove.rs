@@ -16,6 +16,7 @@
   You should have received a copy of the GNU Affero General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+
 use commands::fs_operation;
 use commands::fs_operation::Operation;
 use commands::StaticSubcommand;
@@ -37,11 +38,6 @@ pub fn invocation() -> StaticSubcommand {
              );
 }
 
-// pub struct Params<'a> {
-//     pub added_files : Vec<&'a Path>,
-//     pub repository : &'a Path
-// }
-
 pub type Params<'a> = fs_operation::Params<'a>;
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
@@ -52,5 +48,5 @@ pub type Error<'a> = fs_operation::Error<'a>;
 
 
 pub fn run<'a>(args : &Params<'a>) -> Result<Option<()>, Error<'a>> {
-    fs_operation::run(args, Operation::Add)
+    fs_operation::run(args, Operation::Remove)
 }
