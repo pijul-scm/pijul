@@ -258,7 +258,7 @@ impl From<io::Error> for Error {
 impl Drop for Repository {
     fn drop(&mut self){
         unsafe {
-            println!("dropping repository");
+            //println!("dropping repository");
             if std::thread::panicking() {
                 mdb_txn_abort(self.mdb_txn);
             } else {
