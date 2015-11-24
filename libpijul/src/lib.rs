@@ -621,17 +621,92 @@ impl Repository {
                 Err(_)=>{ panic!("this path doesn't exist") }
             }
         }
-        // Now the inode for "path" is in "inode"
-        match unsafe { mdb::get(self.mdb_txn,self.dbi_inodes,&inode) } {
-            Ok(node) => {
-                let mut node_=node.to_vec();
-                node_[0]=2;
-                unsafe { mdb::put(self.mdb_txn,self.dbi_inodes,&inode,&node_,0).unwrap() };
-            },
-            Err(_)=>{
-                panic!("unregistered inode")
+
+        fn rec_delete(repo:&mut Repository,curs:&Cursor,key:&[u8])->bool {
+            unsafe {
+                let mut children=Vec::new();
+                // First, kill the inode itself, if it exists (or mark it deleted)
+                let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
+                let mut v : MDB_val = std::mem::zeroed();
+                let mut e = mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint);
+
+                while e==0 && v.mv_size>0 && memcmp(k.mv_data,key.as_ptr() as *const c_void,INODE_SIZE as size_t)==0 {
+                    debug_assert!(v.mv_size as usize==INODE_SIZE);
+                    children.push(
+                        (std::slice::from_raw_parts(v.mv_data as *const u8,INODE_SIZE).to_vec(),
+                         std::slice::from_raw_parts(v.mv_data as *const u8,INODE_SIZE).to_vec())
+                            );
+                    e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint);
+                }
+                for (a,b) in children {
+                    if rec_delete(repo,curs,&b) {
+                        mdb::del(repo.mdb_txn,repo.dbi_tree,&a,Some(&b));
+                        mdb::del(repo.mdb_txn,repo.dbi_revtree,&b,Some(&a));
+                    }
+                }
+                let mut node_=[0;3+KEY_SIZE];
+                match mdb::get(repo.mdb_txn,repo.dbi_inodes,key) {
+                    Ok(node) => {
+                        debug_assert!(node.len()==KEY_SIZE);
+                        copy_nonoverlapping(node.as_ptr() as *const c_void,
+                                            node_.as_ptr() as *mut c_void,
+                                            3+KEY_SIZE);
+                        node_[0]=2;
+                        mdb::put(repo.mdb_txn,repo.dbi_inodes,key,&node_[..],0).unwrap();
+                        false
+                    },
+                    Err(MDB_NOTFOUND)=>true,
+                    Err(_)=>{
+                        panic!("delete panic")
+                    }
+                }
+
             }
         }
+        let curs=Cursor::new(self.mdb_txn,self.dbi_tree).unwrap();
+        rec_delete(self,&curs,&inode);
+    }
+
+
+
+    pub fn list_files(&self)->Vec<PathBuf>{
+        fn collect(repo:&Repository,curs:&Cursor,key:&[u8],pb:&Path, basename:&[u8],files:&mut Vec<PathBuf>) {
+            unsafe {
+                println!("collecting {:?}",key);
+                // First, kill the inode itself, if it exists (or mark it deleted)
+                let mut node_=[0;3+KEY_SIZE];
+                let add= match mdb::get(repo.mdb_txn,repo.dbi_inodes,key) {
+                    Ok(node) => node[0]<2,
+                    Err(MDB_NOTFOUND)=> true,
+                    Err(_)=>panic!("list_files panic")
+                };
+                if add {
+                    let next_pb=pb.join(std::str::from_utf8_unchecked(basename));
+                    let next_pb_=next_pb.clone();
+                    files.push(next_pb);
+                    let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
+                    let mut v : MDB_val = std::mem::zeroed();
+                    let mut e = mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint);
+                    let mut next:[u8;INODE_SIZE]=[0;INODE_SIZE];
+                    while e==0 && v.mv_size>0 && memcmp(k.mv_data,key.as_ptr() as *const c_void,INODE_SIZE as size_t)==0 {
+
+                        collect(repo,curs,
+                                std::slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize),
+                                next_pb_.as_path(),
+                                std::slice::from_raw_parts((k.mv_data as *const u8).offset(INODE_SIZE as isize),
+                                                           k.mv_size as usize-INODE_SIZE),
+                                files);
+
+                        e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_NEXT_DUP as c_uint);
+                    }
+                }
+            }
+        }
+        let mut files=Vec::new();
+        let mut pathbuf=PathBuf::new();
+        let curs=Cursor::new(self.mdb_txn,self.dbi_tree).unwrap();
+        collect(self,&curs,&ROOT_INODE[..], &mut pathbuf, &[], &mut files);
+        files
     }
 
 
@@ -1108,7 +1183,9 @@ impl Repository {
                         unimplemented!() // Remove all known vertices from this file, for else "missing context" conflicts will not be detected.
                     } else if current_node[0]==0 {
                         let ret=self.retrieve(&current_node[3..]);
-                        self.diff(line_num,actions, &mut ret.unwrap(), realpath.as_path()).unwrap()
+                        println!("case=0, retrieved");
+                        self.diff(line_num,actions, &mut ret.unwrap(), realpath.as_path()).unwrap();
+                        println!("case=0, diff done");
                     } else {
                         panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
                     };
@@ -1415,7 +1492,7 @@ impl Repository {
                                 let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
                                 if nonroot_is_alive(&mut cursor,pu) {
                                     self.connect_down(pu,pv,&internal);
-                                } else {println!("pu ={} is dead",to_hex(pu))}
+                                }// else {println!("pu ={} is dead",to_hex(pu))}
                             }
                         } else {
                             let (pu,pv) = if e.flag&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };

@@ -16,35 +16,52 @@
   You should have received a copy of the GNU Affero General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-
 use commands::fs_operation;
 use commands::fs_operation::Operation;
 use commands::StaticSubcommand;
 use clap::{SubCommand, ArgMatches,Arg};
+extern crate libpijul;
 use commands::error;
+use self::libpijul::{Repository};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
+use std::path::Path;
 
 pub fn invocation() -> StaticSubcommand {
     return 
-        SubCommand::with_name("remove")
-        .about("remove file from the repository")
-        .arg(Arg::with_name("files")
+        SubCommand::with_name("ls")
+        .about("list tracked files")
+        .arg(Arg::with_name("dir")
              .multiple(true)
-             .help("Files to remove from the repository.")
-             .required(true)
+             .help("Prefix of the list")
              )
         .arg(Arg::with_name("repository")
              .long("repository")
-             .help("Repository to remove files from.")
+             .help("Repository to list.")
              );
 }
 
-pub type Params<'a> = fs_operation::Params<'a>;
-
-pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
-    return fs_operation::parse_args(args);
+pub struct Params<'a> {
+    pub repository : &'a Path
 }
 
+pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
+    Params { repository:Path::new(args.value_of("repository").unwrap_or(".")) }
+}
 
-pub fn run<'a>(args : &Params<'a>) -> Result<Option<()>, error::Error<'a>> {
-    fs_operation::run(args, Operation::Remove)
+pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error<'a>> {
+    let pwd = args.repository;
+    match find_repo_root(&pwd){
+        None => return Err(error::Error::NotInARepository),
+        Some(r) =>
+        {
+            let repo_dir=pristine_dir(r);
+            let mut repo = try!(Repository::new(&repo_dir).map_err(error::Error::Repository));
+            println!("listing");
+            let files=repo.list_files();
+            for f in files {
+                println!("{:?}",f)
+            }
+            Ok(())
+        }
+    }
 }

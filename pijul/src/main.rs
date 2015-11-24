@@ -46,7 +46,8 @@ fn main() {
                                "record" => record,
                                "pull" => pull,
                                "get" => get,
-                               "remove" => remove
+                               "remove" => remove,
+                               "ls" => ls
                                );
 }
 

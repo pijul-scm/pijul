@@ -11,7 +11,9 @@ pub mod add;
 pub mod pull;
 pub mod get;
 pub mod remove;
+pub mod ls;
 mod test;
+pub mod error;
 
 pub fn all_command_invocations() -> Vec<StaticSubcommand> {
     return vec![
@@ -22,7 +24,8 @@ pub fn all_command_invocations() -> Vec<StaticSubcommand> {
         add::invocation(),
         pull::invocation(),
         get::invocation(),
-        remove::invocation()
+        remove::invocation(),
+        ls::invocation()
         ];
 }
 

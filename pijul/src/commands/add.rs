@@ -19,6 +19,7 @@
 use commands::fs_operation;
 use commands::fs_operation::Operation;
 use commands::StaticSubcommand;
+use commands::error;
 use clap::{SubCommand, ArgMatches,Arg};
 
 
@@ -48,7 +49,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
     return fs_operation::parse_args(args);
 }
 
-pub type Error<'a> = fs_operation::Error<'a>;
+pub type Error<'a> = error::Error<'a>;
 
 
 pub fn run<'a>(args : &Params<'a>) -> Result<Option<()>, Error<'a>> {
