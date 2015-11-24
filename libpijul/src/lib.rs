@@ -206,6 +206,7 @@ pub struct Repository{
 pub enum Error{
     IoError(io::Error),
     AlreadyApplied,
+    AlreadyAdded,
     FsRepresentation(fs_representation::Error),
     PatchDecoding(rustc_serialize::json::DecoderError),
     PatchEncoding(rustc_serialize::json::EncoderError)
@@ -215,6 +216,7 @@ impl fmt::Display for Error {
         match *self {
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
             Error::AlreadyApplied => write!(f, "Patch already applied"),
+            Error::AlreadyAdded => write!(f, "File already here"),
             Error::FsRepresentation(ref err) => write!(f, "FS Representation error: {}",err),
             Error::PatchEncoding(ref err) => write!(f, "Patch encoding error {}",err),
             Error::PatchDecoding(ref err) => write!(f, "Patch decoding error {}",err)
@@ -227,6 +229,7 @@ impl error::Error for Error {
         match *self {
             Error::IoError(ref err) => err.description(),
             Error::AlreadyApplied => "Patch already applied",
+            Error::AlreadyAdded => "File already here",
             Error::FsRepresentation(ref err) => err.description(),
             Error::PatchEncoding(ref err) => err.description(),
             Error::PatchDecoding(ref err) => err.description()
@@ -238,6 +241,7 @@ impl error::Error for Error {
             Error::IoError(ref err) => Some(err),
             Error::FsRepresentation(ref err) => Some(err),
             Error::AlreadyApplied => None,
+            Error::AlreadyAdded => None,
             Error::PatchEncoding(ref err) => Some(err),
             Error::PatchDecoding(ref err) => Some(err)
         }
@@ -519,47 +523,45 @@ impl Repository {
         }
     }
 
-    fn add_inode(&mut self, inode:&Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),()>{
+    fn add_inode(&mut self, inode:&Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error>{
         let mut buf:Inode=vec![0;INODE_SIZE];
         let mut components=path.components();
         let mut cs=components.next();
         while let Some(s)=cs { // need to peek at the next element, so no for.
             cs=components.next();
-            match s.as_os_str().to_str(){
-                Some(ss) => {
-                    buf.truncate(INODE_SIZE);
-                    buf.extend(ss.as_bytes());
-                    match unsafe { mdb::get(self.mdb_txn,self.dbi_tree,&buf) } {
-                        Ok(v)=> {
-                            // replace buf with existing inode
-                            buf.clear();
-                            let _=unsafe { copy_nonoverlapping(v.as_ptr(),buf.as_mut_ptr(),v.len()) };
-                        },
-                        Err(_) =>{
-                            let mut inode_:[u8;INODE_SIZE]=[0;INODE_SIZE];
-                            let inode = if cs.is_none() && inode.is_some() {
-                                inode.unwrap()
-                            } else {
-                                self.create_new_inode(&mut inode_);
-                                &inode_[..]
-                            };
-                            unsafe {
-                                mdb::put(self.mdb_txn,self.dbi_tree,&buf,&inode,0).unwrap();
-                                mdb::put(self.mdb_txn,self.dbi_revtree,&inode,&buf,0).unwrap();
-                            }
-                            if cs.is_some() || is_dir {
-                                unsafe {
-                                    mdb::put(self.mdb_txn,self.dbi_tree,&inode,&[],0).unwrap();
-                                }
-                            }
-                            // push next inode onto buf.
-                            buf.clear();
-                            buf.extend(inode)
-                        }
+            let ss=s.as_os_str().to_str().unwrap();
+            buf.truncate(INODE_SIZE);
+            buf.extend(ss.as_bytes());
+            match unsafe { mdb::get(self.mdb_txn,self.dbi_tree,&buf) } {
+                Ok(v)=> {
+                    if cs.is_none() {
+                        return Err(Error::AlreadyAdded)
+                    } else {
+                        // replace buf with existing inode
+                        buf.clear();
+                        buf.extend(v);
                     }
                 },
-                None => {
-                    return Err(())
+                Err(_) =>{
+                    let mut inode_:[u8;INODE_SIZE]=[0;INODE_SIZE];
+                    let inode = if cs.is_none() && inode.is_some() {
+                        inode.unwrap()
+                    } else {
+                        self.create_new_inode(&mut inode_);
+                        &inode_[..]
+                    };
+                    unsafe {
+                        mdb::put(self.mdb_txn,self.dbi_tree,&buf,&inode,0).unwrap();
+                        mdb::put(self.mdb_txn,self.dbi_revtree,&inode,&buf,0).unwrap();
+                    }
+                    if cs.is_some() || is_dir {
+                        unsafe {
+                            mdb::put(self.mdb_txn,self.dbi_tree,&inode,&[],0).unwrap();
+                        }
+                    }
+                    // push next inode onto buf.
+                    buf.clear();
+                    buf.extend(inode)
                 }
             }
         }
@@ -567,8 +569,7 @@ impl Repository {
     }
     /// Adds a file in the repository. Additions need to be recorded in
     /// order to produce a patch.
-    pub fn add_file(&mut self, path:&std::path::Path, is_dir:bool)->Result<(),()>{
-        //println!("Adding {:?}",path);
+    pub fn add_file(&mut self, path:&std::path::Path, is_dir:bool)->Result<(),Error>{
         self.add_inode(&None,path,is_dir)
     }
 
@@ -614,34 +615,48 @@ impl Repository {
     pub fn remove_file(&mut self, path:&std::path::Path) {
         let mut inode=Vec::new();
         inode.extend(ROOT_INODE);
-        for c in path.components() {
-            inode.extend(c.as_os_str().to_str().unwrap().as_bytes());
-            match unsafe { mdb::get(self.mdb_txn,self.dbi_tree,&inode) } {
-                Ok(x)=> { inode.clear(); inode.extend(x) },
-                Err(_)=>{ panic!("this path doesn't exist") }
+        let mut comp=path.components();
+        let mut c=comp.next();
+        loop {
+            match c {
+                Some(sc)=>{
+                    //println!("inode {} + {:?}",to_hex(&inode),sc);
+                    inode.extend(sc.as_os_str().to_str().unwrap().as_bytes());
+                    match unsafe { mdb::get(self.mdb_txn,self.dbi_tree,&inode) } {
+                        Ok(x)=> { c=comp.next();
+                                  if c.is_some() {inode.clear(); inode.extend(x) }
+                        },
+                        Err(_)=>{ panic!("this path doesn't exist") }
+                    }
+                },
+                _=>break
             }
         }
 
         fn rec_delete(repo:&mut Repository,curs:&Cursor,key:&[u8])->bool {
             unsafe {
+                //println!("rec_delete {}",to_hex(key));
                 let mut children=Vec::new();
                 // First, kill the inode itself, if it exists (or mark it deleted)
                 let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
                 let mut v : MDB_val = std::mem::zeroed();
                 let mut e = mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint);
 
-                while e==0 && v.mv_size>0 && memcmp(k.mv_data,key.as_ptr() as *const c_void,INODE_SIZE as size_t)==0 {
-                    debug_assert!(v.mv_size as usize==INODE_SIZE);
-                    children.push(
-                        (std::slice::from_raw_parts(v.mv_data as *const u8,INODE_SIZE).to_vec(),
-                         std::slice::from_raw_parts(v.mv_data as *const u8,INODE_SIZE).to_vec())
-                            );
+                while e==0 && memcmp(k.mv_data,key.as_ptr() as *const c_void,key.len() as size_t)==0 {
+                    //debug_assert!(v.mv_size as usize==INODE_SIZE);
+                    if v.mv_size>0 {
+                        children.push(
+                            (std::slice::from_raw_parts(k.mv_data as *const u8,k.mv_size as usize).to_vec(),
+                             std::slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize).to_vec())
+                                );
+                    }
                     e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint);
                 }
                 for (a,b) in children {
                     if rec_delete(repo,curs,&b) {
-                        mdb::del(repo.mdb_txn,repo.dbi_tree,&a,Some(&b));
-                        mdb::del(repo.mdb_txn,repo.dbi_revtree,&b,Some(&a));
+                        //println!("deleting {} {}",to_hex(&a),to_hex(&b));
+                        mdb::del(repo.mdb_txn,repo.dbi_tree,&a,Some(&b)).unwrap();
+                        mdb::del(repo.mdb_txn,repo.dbi_revtree,&b,Some(&a)).unwrap();
                     }
                 }
                 let mut node_=[0;3+KEY_SIZE];
@@ -670,11 +685,9 @@ impl Repository {
 
 
     pub fn list_files(&self)->Vec<PathBuf>{
-        fn collect(repo:&Repository,curs:&Cursor,key:&[u8],pb:&Path, basename:&[u8],files:&mut Vec<PathBuf>) {
+        fn collect(repo:&Repository,key:&[u8],pb:&Path, basename:&[u8],files:&mut Vec<PathBuf>) {
             unsafe {
-                println!("collecting {:?}",key);
-                // First, kill the inode itself, if it exists (or mark it deleted)
-                let mut node_=[0;3+KEY_SIZE];
+                //println!("collecting {:?},{:?}",to_hex(key),std::str::from_utf8_unchecked(basename));
                 let add= match mdb::get(repo.mdb_txn,repo.dbi_inodes,key) {
                     Ok(node) => node[0]<2,
                     Err(MDB_NOTFOUND)=> true,
@@ -683,20 +696,20 @@ impl Repository {
                 if add {
                     let next_pb=pb.join(std::str::from_utf8_unchecked(basename));
                     let next_pb_=next_pb.clone();
-                    files.push(next_pb);
+                    if basename.len()>0 { files.push(next_pb) }
+                    let curs=Cursor::new(repo.mdb_txn,repo.dbi_tree).unwrap();
                     let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
                     let mut v : MDB_val = std::mem::zeroed();
                     let mut e = mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint);
-                    let mut next:[u8;INODE_SIZE]=[0;INODE_SIZE];
-                    while e==0 && v.mv_size>0 && memcmp(k.mv_data,key.as_ptr() as *const c_void,INODE_SIZE as size_t)==0 {
-
-                        collect(repo,curs,
-                                std::slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize),
-                                next_pb_.as_path(),
-                                std::slice::from_raw_parts((k.mv_data as *const u8).offset(INODE_SIZE as isize),
-                                                           k.mv_size as usize-INODE_SIZE),
-                                files);
-
+                    while e==0 && memcmp(k.mv_data,key.as_ptr() as *const c_void,INODE_SIZE as size_t)==0 {
+                        if v.mv_size>0 {
+                            collect(repo,
+                                    std::slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize),
+                                    next_pb_.as_path(),
+                                    std::slice::from_raw_parts((k.mv_data as *const u8).offset(INODE_SIZE as isize),
+                                                               k.mv_size as usize-INODE_SIZE),
+                                    files);
+                        }
                         e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_NEXT_DUP as c_uint);
                     }
                 }
@@ -704,8 +717,7 @@ impl Repository {
         }
         let mut files=Vec::new();
         let mut pathbuf=PathBuf::new();
-        let curs=Cursor::new(self.mdb_txn,self.dbi_tree).unwrap();
-        collect(self,&curs,&ROOT_INODE[..], &mut pathbuf, &[], &mut files);
+        collect(self,&ROOT_INODE[..], &mut pathbuf, &[], &mut files);
         files
     }
 
