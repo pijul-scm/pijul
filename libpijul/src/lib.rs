@@ -1194,10 +1194,11 @@ impl Repository {
                         actions.push(Change::Edges{edges:edges});
                         unimplemented!() // Remove all known vertices from this file, for else "missing context" conflicts will not be detected.
                     } else if current_node[0]==0 {
+                        //println!("retrieving");
                         let ret=self.retrieve(&current_node[3..]);
-                        println!("case=0, retrieved");
+                        //println!("case=0, retrieved");
                         self.diff(line_num,actions, &mut ret.unwrap(), realpath.as_path()).unwrap();
-                        println!("case=0, diff done");
+                        //println!("case=0, diff done");
                     } else {
                         panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
                     };
@@ -1497,14 +1498,43 @@ impl Repository {
                         }
                         if e.flag&DELETED_EDGE!=0 {
                             let (pu,pv)= if e.flag&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
+                            let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
                             if e.flag&FOLDER_EDGE!=0 {
                                 self.connect_down_folders(pu,pv,&internal)
                             } else {
                                 // Now if u is alive, connect u to alive descendants of v.
-                                let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
                                 if nonroot_is_alive(&mut cursor,pu) {
                                     self.connect_down(pu,pv,&internal);
                                 }// else {println!("pu ={} is dead",to_hex(pu))}
+                            }
+                            if !nonroot_is_alive(&mut cursor,pv) {
+                                unsafe {
+                                    let mut a:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+                                    let mut b:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+
+                                    for flag in [PARENT_EDGE|PSEUDO_EDGE,PARENT_EDGE|PSEUDO_EDGE|FOLDER_EDGE].iter() {
+                                        let f=[*flag];
+                                        let mut k = MDB_val{ mv_data:pv.as_ptr() as *const c_void,mv_size:pv.len() as size_t };
+                                        let mut v = MDB_val{ mv_data:f.as_ptr() as *const c_void,mv_size:1 };
+                                        let mut e = mdb_cursor_get(cursor.cursor, &mut k,&mut v,
+                                                                   Op::MDB_GET_BOTH_RANGE as c_uint);
+                                        while e==0 && (*(v.mv_data as *const u8)) == *flag {
+                                            copy_nonoverlapping(v.mv_data,a.as_mut_ptr() as *mut c_void,v.mv_size as usize);
+                                            copy_nonoverlapping(v.mv_data,b.as_mut_ptr() as *mut c_void,v.mv_size as usize);
+                                            copy_nonoverlapping(pv.as_ptr() as *const c_void,
+                                                                b.as_mut_ptr().offset(1) as *mut c_void,KEY_SIZE);
+                                            mdb_cursor_del(cursor.cursor,0);
+                                            b[0]=b[0]^PARENT_EDGE;
+                                            mdb::del(self.mdb_txn,self.dbi_nodes,&a[1..(1+KEY_SIZE)],
+                                                     Some(&b[..])).unwrap();
+
+                                            k.mv_data=pv.as_ptr() as *const c_void;k.mv_size=pv.len() as size_t;
+                                            v.mv_data=f.as_ptr() as *const c_void; v.mv_size=1;
+                                            e = mdb_cursor_get(cursor.cursor, &mut k,&mut v,
+                                                               Op::MDB_GET_BOTH_RANGE as c_uint);
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             let (pu,pv) = if e.flag&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };

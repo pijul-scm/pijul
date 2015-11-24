@@ -87,7 +87,7 @@ void rehash(struct hashtable*t){
 
 void insert(struct hashtable*t,char*key,struct c_line*value){
   int h=(hash_key(key) % t->size);
-  while((t->table[2*h]) && (strncmp(t->table [2*h], key, KEY_SIZE) != 0)) {
+  while((t->table[2*h]) && (memcmp(t->table [2*h], key, KEY_SIZE) != 0)) {
     h = (h+1) % t->size;
   }
   if(!(t->table[2*h]))
