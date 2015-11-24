@@ -22,17 +22,16 @@ use clap::{SubCommand, ArgMatches, Arg};
 extern crate libpijul;
 use commands::StaticSubcommand;
 use self::libpijul::{Repository,Patch,HASH_SIZE};
-use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root, branch_changes_file,to_hex};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root, branch_changes_file};
 use std::sync::Arc;
 
-use std;
 use std::io;
 use std::fmt;
 use std::error;
 use std::thread;
 
 
-use std::io::{BufWriter,BufReader,BufRead};
+use std::io::{BufWriter};
 use std::fs::File;
 extern crate rand;
 use std::path::{Path};
@@ -135,7 +134,8 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let mut internal=[0;HASH_SIZE];
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 repo.new_internal(&mut internal);
-                repo.apply(&patch_arc, &internal[..]);
+                //println!("applying");
+                repo.apply(&patch_arc, &internal[..]).unwrap();
                 //println!("sync");
                 repo.sync_file_additions(&patch_arc.changes[..],&syncs, &internal);
                 if cfg!(debug_assertions){
@@ -147,7 +147,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                     Ok(Ok(hash))=> {
                         repo.register_hash(&internal[..],&hash[..]);
                         //println!("writing changes {:?}",internal);
-                        repo.write_changes_file(&branch_changes_file(r,repo.get_current_branch()));
+                        repo.write_changes_file(&branch_changes_file(r,repo.get_current_branch())).unwrap();
                         Ok(Some(()))
                     },
                     Ok(Err(x)) => {

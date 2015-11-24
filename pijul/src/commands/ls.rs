@@ -17,7 +17,6 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use commands::fs_operation;
-use commands::fs_operation::Operation;
 use commands::StaticSubcommand;
 use clap::{SubCommand, ArgMatches,Arg};
 extern crate libpijul;
@@ -55,8 +54,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error<'a>> {
         Some(r) =>
         {
             let repo_dir=pristine_dir(r);
-            let mut repo = try!(Repository::new(&repo_dir).map_err(error::Error::Repository));
-            println!("listing");
+            let repo = try!(Repository::new(&repo_dir).map_err(error::Error::Repository));
             let files=repo.list_files();
             for f in files {
                 println!("{:?}",f)
