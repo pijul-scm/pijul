@@ -12,6 +12,7 @@ pub mod pull;
 pub mod get;
 pub mod remove;
 pub mod ls;
+pub mod revert;
 mod test;
 pub mod error;
 
@@ -25,7 +26,8 @@ pub fn all_command_invocations() -> Vec<StaticSubcommand> {
         pull::invocation(),
         get::invocation(),
         remove::invocation(),
-        ls::invocation()
+        ls::invocation(),
+        revert::invocation()
         ];
 }
 

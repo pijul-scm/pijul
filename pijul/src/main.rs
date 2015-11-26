@@ -47,7 +47,8 @@ fn main() {
                                "pull" => pull,
                                "get" => get,
                                "remove" => remove,
-                               "ls" => ls
+                               "ls" => ls,
+                               "revert" => revert
                                );
 }
 

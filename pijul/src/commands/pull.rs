@@ -219,7 +219,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                     }
                     let mut internal=[0;HASH_SIZE];
                     repo.new_internal(&mut internal);
-                    println!("pulling and applying patch {}",to_hex(patch_hash));
+                    //println!("pulling and applying patch {}",to_hex(patch_hash));
                     repo.apply(&patch, &internal[..]);
                     *patches_were_applied=true;
                     repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);

@@ -15,7 +15,6 @@ fn main() {
         };
     remove_file("empty.c").unwrap();
     if has_lmdb {
-        gcc::compile_library("libretrieve.a",&["src/retrieve.c"]);
         println!("cargo:rustc-flags=-l dylib=lmdb")
     } else {
         let target = env::var("TARGET").unwrap();
@@ -27,20 +26,12 @@ fn main() {
                 .define("_WIN32",None)
                 .include("src/repository")
                 .compile("liblmdb.a");
-            gcc::Config::new()
-                .file("src/repository/retrieve.c")
-                .include("src/repository")
-                .compile("libretrieve.a");
         } else {
             gcc::Config::new()
                 .file("src/repository/midl.c")
                 .file("src/repository/mdb.c")
                 .include("src/repository")
                 .compile("liblmdb.a");
-            gcc::Config::new()
-                .file("src/repository/retrieve.c")
-                .include("src/repository")
-                .compile("libretrieve.a");
         }
     }
 }
