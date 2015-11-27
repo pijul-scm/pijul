@@ -98,3 +98,42 @@ fn add_remove_nothing_to_record() {
         Some(()) => panic!("add remove left a trace")
     }
 }
+
+#[test]
+fn no_remove_without_add() {
+    let dir = tempdir::TempDir::new("pijul").unwrap();
+    let init_params = init::Params { location : &dir.path(), allow_nested : false};
+    init::run(&init_params).unwrap();
+    let fpath = &dir.path().join("toto");
+    let file = fs::File::create(&fpath).unwrap();
+    let add_params = add::Params { repository : &dir.path(), touched_files : vec![&fpath] };
+    match add::run(&add_params).unwrap() {
+        Some (()) => (),
+        None => panic!("no file added")        
+    };
+    let record_params = record::Params { repository : &dir.path() };
+    match record::run(&record_params).unwrap() {
+        None => panic!("file add is not going to be recorded"),
+        Some(()) => ()
+    }
+}
+
+
+// #[test]
+// fn add_record_remove_pull() {
+//     let dir = tempdir::TempDir::new("pijul").unwrap();
+//     let init_params = init::Params { location : &dir.path(), allow_nested : false};
+//     init::run(&init_params).unwrap();
+//     let fpath = &dir.path().join("toto");
+//     let file = fs::File::create(&fpath).unwrap();
+//     let add_params = add::Params { repository : &dir.path(), added_files : vec![&fpath] };
+//     match add::run(&add_params).unwrap() {
+//         Some (()) => (),
+//         None => panic!("no file added")        
+//     };
+//     let record_params = record::Params { repository : &dir.path() };
+//     match record::run(&record_params).unwrap() {
+//         None => panic!("file add is not going to be recorded"),
+//         Some(()) => ()
+//     }
+// }
