@@ -9,7 +9,9 @@ clap = "*"
 rust-crypto = "*"
 regex="0.1.41"
 rand= "*"
-
+log="*"
+time="*"
+env_logger="*"
 libpijul = {path="../libpijul"}
 
 [dev-dependencies]

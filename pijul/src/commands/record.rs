@@ -36,6 +36,7 @@ use std::fs::File;
 extern crate rand;
 use std::path::{Path};
 
+extern crate time;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -112,10 +113,14 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
         Some(r) =>
         {
             let repo_dir=pristine_dir(r);
+            let t0=time::precise_time_s();
             let (changes,syncs)= {
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 try!(repo.record(&r).map_err(Error::Repository))
             };
+            let t1=time::precise_time_s();
+            info!("computed patch in {}s", t1-t0);
+
             //println!("recorded");
             if changes.is_empty() {
                 println!("Nothing to record");
@@ -129,19 +134,31 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let child_patch=patch_arc.clone();
                 let patches_dir=patches_dir(r);
                 let hash_child=thread::spawn(move || {
-                    child_patch.save(&patches_dir)
+                    let t0=time::precise_time_s();
+                    let hash=child_patch.save(&patches_dir);
+                    let t1=time::precise_time_s();
+                    info!("saved patch in {}s", t1-t0);
+                    hash
                 });
+
+                let t0=time::precise_time_s();
+
                 let mut internal=[0;HASH_SIZE];
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 repo.new_internal(&mut internal);
                 //println!("applying");
                 repo.apply(&patch_arc, &internal).unwrap();
                 //println!("sync");
+                let t1=time::precise_time_s();
+                //info!("applied patch in {}s", t1-t0);
                 repo.sync_file_additions(&patch_arc.changes[..],&syncs, &internal);
+                /*
                 if cfg!(debug_assertions){
                     let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
                     repo.debug(&mut buffer);
-                }
+                }*/
+                let t2=time::precise_time_s();
+                info!("applied patch in {}s", t2-t0);
 
                 match hash_child.join() {
                     Ok(Ok(hash))=> {
