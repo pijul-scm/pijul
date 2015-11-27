@@ -6,7 +6,8 @@ use self::libc::{c_int, c_uint,c_char,c_void,size_t,mode_t};
 use self::libc::{c_int, c_uint,c_char,c_void,size_t};
 use std::ptr;
 
-use std::io::Error;
+use std::io::{Error};
+
 use std::marker::PhantomData;
 use std::path::Path;
 use std::ops::BitOr;
@@ -49,25 +50,25 @@ pub enum Op {
 }
 
 extern "C" {
-    pub fn mdb_env_create(env: *mut *mut MdbEnv) -> c_int;
-    pub fn mdb_env_open(env: *mut MdbEnv, path: *const c_char, flags: c_uint, mode: mode_t) -> c_int;
-    pub fn mdb_env_close(env: *mut MdbEnv);
-    pub fn mdb_env_set_maxdbs(env: *mut MdbEnv,maxdbs:c_uint)->c_int;
-    pub fn mdb_env_set_mapsize(env: *mut MdbEnv,mapsize:size_t)->c_int;
-    pub fn mdb_reader_check(env:*mut MdbEnv,dead:*mut c_int)->c_int;
-    pub fn mdb_txn_begin(env: *mut MdbEnv,parent: *mut MdbTxn, flags:c_uint, txn: *mut *mut MdbTxn)->c_int;
-    pub fn mdb_txn_commit(txn: *mut MdbTxn)->c_int;
-    pub fn mdb_txn_abort(txn: *mut MdbTxn);
-    pub fn mdb_dbi_open(txn: *mut MdbTxn, name: *const c_char, flags:c_uint, dbi:*mut MdbDbi)->c_int;
-    pub fn mdb_get(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
-    pub fn mdb_put(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
-    pub fn mdb_del(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
-    pub fn mdb_cursor_get(cursor: *mut MdbCursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
-    pub fn mdb_cursor_put(cursor: *mut MdbCursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
-    pub fn mdb_cursor_del(cursor: *mut MdbCursor, flags:c_uint)->c_int;
-    pub fn mdb_cursor_open(txn: *mut MdbTxn, dbi:MdbDbi, cursor:*mut *mut MdbCursor)->c_int;
-    pub fn mdb_cursor_close(cursor: *mut MdbCursor);
-    pub fn mdb_drop(txn:*mut MdbTxn,dbi:MdbDbi,del:c_int)->c_int;
+    fn mdb_env_create(env: *mut *mut MdbEnv) -> c_int;
+    fn mdb_env_open(env: *mut MdbEnv, path: *const c_char, flags: c_uint, mode: mode_t) -> c_int;
+    fn mdb_env_close(env: *mut MdbEnv);
+    fn mdb_env_set_maxdbs(env: *mut MdbEnv,maxdbs:c_uint)->c_int;
+    fn mdb_env_set_mapsize(env: *mut MdbEnv,mapsize:size_t)->c_int;
+    fn mdb_reader_check(env:*mut MdbEnv,dead:*mut c_int)->c_int;
+    fn mdb_txn_begin(env: *mut MdbEnv,parent: *mut MdbTxn, flags:c_uint, txn: *mut *mut MdbTxn)->c_int;
+    fn mdb_txn_commit(txn: *mut MdbTxn)->c_int;
+    fn mdb_txn_abort(txn: *mut MdbTxn);
+    fn mdb_dbi_open(txn: *mut MdbTxn, name: *const c_char, flags:c_uint, dbi:*mut MdbDbi)->c_int;
+    fn mdb_get(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
+    fn mdb_put(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    fn mdb_del(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
+    fn mdb_cursor_get(cursor: *mut MdbCursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    fn mdb_cursor_put(cursor: *mut MdbCursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    fn mdb_cursor_del(cursor: *mut MdbCursor, flags:c_uint)->c_int;
+    fn mdb_cursor_open(txn: *mut MdbTxn, dbi:MdbDbi, cursor:*mut *mut MdbCursor)->c_int;
+    fn mdb_cursor_close(cursor: *mut MdbCursor);
+    fn mdb_drop(txn:*mut MdbTxn,dbi:MdbDbi,del:c_int)->c_int;
 }
 
 
@@ -75,13 +76,13 @@ pub struct Env { env:*mut MdbEnv }
 
 pub struct Txn<'a> { txn:*mut MdbTxn,env:PhantomData<&'a Env> }
 
-fn txn<'a>(env:&'a Env,parent:*mut MdbTxn)->Result<Txn<'a>,c_int> {
+fn txn<'a>(env:&'a Env,parent:*mut MdbTxn)->Result<Txn<'a>,Error> {
     let txn=ptr::null_mut();
     let e= unsafe {mdb_txn_begin(env.env,parent,0,std::mem::transmute(&txn)) };
     if e==0 {
         Ok(Txn { txn:txn,env:PhantomData })
     } else {
-        Err(e)
+        Err(Error::from_raw_os_error(e))
     }
 }
 pub struct Env_ { env:*mut MdbEnv }
@@ -107,10 +108,34 @@ impl Env_ {
             }
         }
     }
+    pub fn reader_check(&self)->Result<usize,std::io::Error> {
+        unsafe {
+            let mut dead:c_int=0;
+            let e=mdb_reader_check(self.env,&mut dead);
+            if e != 0 { Err(std::io::Error::from_raw_os_error(e)) }
+            else { Ok(dead as usize) }
+
+        }
+    }
+    pub fn set_maxdbs(&self,dbs:usize)->Result<(),std::io::Error> {
+        unsafe {
+            let e=mdb_env_set_maxdbs(self.env,dbs as c_uint);
+            if e != 0 { Err(std::io::Error::from_raw_os_error(e)) }
+            else { Ok(()) }
+        }
+    }
+    pub fn set_mapsize(&self,size:usize)->Result<(),std::io::Error> {
+        unsafe {
+            let e=mdb_env_set_mapsize(self.env,size);
+            if e != 0 { Err(std::io::Error::from_raw_os_error(e)) }
+            else { Ok(()) }
+        }
+    }
 }
 
+
 impl Env {
-    pub fn txn<'a>(&'a self)->Result<Txn<'a>,c_int> {
+    pub fn txn<'a>(&'a self)->Result<Txn<'a>,Error> {
         txn(&self,std::ptr::null_mut())
     }
 }
@@ -118,19 +143,19 @@ impl Env {
 pub struct Dbi<'a> { dbi:MdbDbi, env:PhantomData<&'a Env> }
 
 impl <'a>Txn<'a> {
-    pub fn commit(self)->Result<(),c_int> {
+    pub fn commit(self)->Result<(),Error> {
         let e=unsafe {mdb_txn_commit(self.txn)};
-        if e==0 { Ok(()) } else { Err(e) }
+        if e==0 { Ok(()) } else { Err(Error::from_raw_os_error(e)) }
     }
     pub fn abort(self) {
         unsafe {mdb_txn_abort(self.txn)}
     }
-    pub fn dbi_open(&self,name:&[u8],flag:c_uint)->Result<Dbi<'a>,c_int> {
+    pub fn dbi_open(&self,name:&[u8],flag:c_uint)->Result<Dbi<'a>,Error> {
         let mut d=0;
         let e=unsafe { mdb_dbi_open(self.txn,name.as_ptr() as *const c_char,flag,&mut d) };
-        if e==0 { Ok(Dbi { dbi:d, env:self.env }) } else { Err(e) }
+        if e==0 { Ok(Dbi { dbi:d, env:self.env }) } else { Err(Error::from_raw_os_error(e)) }
     }
-    pub fn get<'b>(&'b self,dbi:&Dbi<'a>,key:&[u8])->Result<Option<&'b[u8]>,c_int> {
+    pub fn get<'b>(&'b self,dbi:&Dbi<'a>,key:&[u8])->Result<Option<&'b[u8]>,Error> {
         unsafe {
             let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             let mut v=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
@@ -139,19 +164,19 @@ impl <'a>Txn<'a> {
             if e==0 { Ok(Some(std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize))) }
             else if e==MDB_NOTFOUND {
                 Ok(None)
-            } else {Err(e)}
+            } else {Err(Error::from_raw_os_error(e))}
         }
     }
-    pub fn put<'b>(&'b mut self,dbi:&Dbi<'a>,key:&[u8],value:&[u8],flags:usize)->Result<(),c_int> {
+    pub fn put<'b>(&'b mut self,dbi:&Dbi<'a>,key:&[u8],value:&[u8],flags:usize)->Result<(),Error> {
         unsafe {
             let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             let mut v=MDB_val { mv_data:value.as_ptr() as *const c_void, mv_size:value.len() as size_t };
             let e=mdb_put(self.txn,dbi.dbi,&mut k,&mut v,flags as c_uint);
-            if e==0 { Ok(()) } else { Err(e) }
+            if e==0 { Ok(()) } else { Err(Error::from_raw_os_error(e)) }
         }
     }
 
-    pub fn del<'b>(&'b mut self,dbi:&Dbi<'a>,key:&[u8],val:Option<&[u8]>)->Result<bool,c_int> {
+    pub fn del<'b>(&'b mut self,dbi:&Dbi<'a>,key:&[u8],val:Option<&[u8]>)->Result<bool,std::io::Error> {
         unsafe {
             let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             let e= match val {
@@ -161,21 +186,29 @@ impl <'a>Txn<'a> {
                 },
                 None => mdb_del(self.txn,dbi.dbi,&mut k,std::ptr::null_mut())
             };
-            if e==0 { Ok(true) } else if e==MDB_NOTFOUND { Ok(false) } else { Err(e) }
+            if e==0 { Ok(true) } else if e==MDB_NOTFOUND { Ok(false) } else { Err(Error::from_raw_os_error(e)) }
+        }
+    }
+
+    pub fn drop<'b>(&'b mut self,dbi:&Dbi<'a>,delete_dbi:bool)->Result<(),std::io::Error> {
+        unsafe {
+            let e=mdb_drop(self.txn,dbi.dbi,if delete_dbi { 1 } else { 0 });
+            if e==0 { Ok(()) }
+            else { Err(std::io::Error::from_raw_os_error(e)) }
         }
     }
 
 
-    pub fn txn<'b>(&'b self,env:&'a Env)->Result<Txn<'b>,c_int> {
+    pub fn txn<'b>(&'b self,env:&'a Env)->Result<Txn<'b>,Error> {
         txn(env,self.txn)
     }
 
 
-    pub fn cursor<'b>(&'b mut self,dbi:&Dbi)->Result<Cursor<'b>,c_int> {
+    pub fn cursor<'b>(&'b mut self,dbi:&Dbi)->Result<Cursor<'b>,std::io::Error> {
         unsafe {
             let curs=ptr::null_mut();
             let e=mdb_cursor_open(self.txn,dbi.dbi,std::mem::transmute(&curs));
-            if e!=0 { Err(e) } // Error::from_raw_os_error(e)) }
+            if e!=0 { Err(std::io::Error::from_raw_os_error(e)) }
             else { Ok(Cursor { cursor:curs,txn:PhantomData }) }
         }
     }
