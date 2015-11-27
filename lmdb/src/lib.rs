@@ -13,7 +13,6 @@ use std::io::{Error};
 
 use std::marker::PhantomData;
 use std::path::Path;
-use std::ops::BitOr;
 #[allow(missing_copy_implementations)]
 pub enum MdbEnv {}
 pub enum MdbTxn {}
