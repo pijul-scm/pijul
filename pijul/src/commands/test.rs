@@ -5,6 +5,7 @@ use std::io;
 use std::fs;
 use commands::{init, info, record, add, remove};
 use std::error::Error;
+use commands::error;
 
 #[test]
 fn init_creates_repo() -> ()
@@ -106,15 +107,11 @@ fn no_remove_without_add() {
     init::run(&init_params).unwrap();
     let fpath = &dir.path().join("toto");
     let file = fs::File::create(&fpath).unwrap();
-    let add_params = add::Params { repository : &dir.path(), touched_files : vec![&fpath] };
-    match add::run(&add_params).unwrap() {
-        Some (()) => (),
-        None => panic!("no file added")        
-    };
-    let record_params = record::Params { repository : &dir.path() };
-    match record::run(&record_params).unwrap() {
-        None => panic!("file add is not going to be recorded"),
-        Some(()) => ()
+    let rem_params = remove::Params { repository : &dir.path(), touched_files : vec![&fpath] };
+    match remove::run(&rem_params) {
+        Ok(_) => panic!("inexistant file can be removed"),
+        Err(error::Error::Repository(FileNotInRepo)) => (),
+        Err(_) => panic!("funky error when trying to remove inexistant file")
     }
 }
 
