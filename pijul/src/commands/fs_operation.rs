@@ -54,7 +54,11 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                 let mut repo = try!(Repository::new(&repo_dir).map_err(error::Error::Repository));
                 match op {
                     Operation::Add => repo.add_file(file.as_path(),m.is_dir()).unwrap(),
-                    Operation::Remove => repo.remove_file(file.as_path())
+                    Operation::Remove =>
+                        match repo.remove_file(file.as_path()) {
+                            Ok(_) => (),
+                            Err(e) => return Err(error::Error::Repository(e))
+                        }
                 }
             }
             Ok(Some(()))

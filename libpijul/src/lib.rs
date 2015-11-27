@@ -215,6 +215,7 @@ pub enum Error{
     IoError(io::Error),
     AlreadyApplied,
     AlreadyAdded,
+    FileNotInRepo(PathBuf),
     FsRepresentation(fs_representation::Error),
     PatchDecoding(rustc_serialize::json::DecoderError),
     PatchEncoding(rustc_serialize::json::EncoderError)
@@ -227,7 +228,8 @@ impl fmt::Display for Error {
             Error::AlreadyAdded => write!(f, "File already here"),
             Error::FsRepresentation(ref err) => write!(f, "FS Representation error: {}",err),
             Error::PatchEncoding(ref err) => write!(f, "Patch encoding error {}",err),
-            Error::PatchDecoding(ref err) => write!(f, "Patch decoding error {}",err)
+            Error::PatchDecoding(ref err) => write!(f, "Patch decoding error {}",err),
+            Error::FileNotInRepo(ref path) => write!(f, "File {} not tracked", path.display())
         }
     }
 }
@@ -240,7 +242,8 @@ impl error::Error for Error {
             Error::AlreadyAdded => "File already here",
             Error::FsRepresentation(ref err) => err.description(),
             Error::PatchEncoding(ref err) => err.description(),
-            Error::PatchDecoding(ref err) => err.description()
+            Error::PatchDecoding(ref err) => err.description(),
+            Error::FileNotInRepo(_) => "Operation on untracked file"
         }
     }
 
@@ -251,7 +254,8 @@ impl error::Error for Error {
             Error::AlreadyApplied => None,
             Error::AlreadyAdded => None,
             Error::PatchEncoding(ref err) => Some(err),
-            Error::PatchDecoding(ref err) => Some(err)
+            Error::PatchDecoding(ref err) => Some(err),
+            Error::FileNotInRepo(_) => None
         }
     }
 }
@@ -551,7 +555,7 @@ impl Repository {
     }
 
 
-    pub fn move_file(&mut self, path:&std::path::Path, path_:&std::path::Path,is_dir:bool) {
+    pub fn move_file(&mut self, path:&std::path::Path, path_:&std::path::Path,is_dir:bool) -> Result<(), Error>{
 
         let inode= &mut (Vec::new());
         let parent= &mut (Vec::new());
@@ -566,7 +570,7 @@ impl Repository {
                     (*inode).extend(x);
                 },
                 Err(_)=>{
-                    panic!("this path doesn't exist")
+                    return Err(Error::FileNotInRepo(path.to_path_buf()))
                 }
             }
         }
@@ -586,10 +590,11 @@ impl Repository {
             Err(_)=>{
                 // Was not in inodes, nothing to do.
             }
-        }
+        };
+        Ok(())
     }
 
-    pub fn remove_file(&mut self, path:&std::path::Path) {
+    pub fn remove_file(&mut self, path:&std::path::Path) -> Result<(), Error>{
         let mut inode=Vec::new();
         inode.extend(ROOT_INODE);
         let mut comp=path.components();
@@ -603,7 +608,7 @@ impl Repository {
                         Ok(x)=> { c=comp.next();
                                   if c.is_some() {inode.clear(); inode.extend(x) }
                         },
-                        Err(_)=>{ panic!("this path doesn't exist") }
+                        Err(_) => return Err(Error::FileNotInRepo(path.to_path_buf()))
                     }
                 },
                 _=>break
@@ -657,6 +662,7 @@ impl Repository {
         }
         let curs=Cursor::new(self.mdb_txn,self.dbi_tree).unwrap();
         rec_delete(self,&curs,&inode);
+        Ok(())
     }
 
 
