@@ -149,7 +149,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 //println!("applying");
                 repo.apply(&patch_arc, &internal).unwrap();
                 //println!("sync");
-                let t1=time::precise_time_s();
+                //let t1=time::precise_time_s();
                 //info!("applied patch in {}s", t1-t0);
                 repo.sync_file_additions(&patch_arc.changes[..],&syncs, &internal);
                 /*
@@ -165,6 +165,8 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                         repo.register_hash(&internal[..],&hash[..]);
                         //println!("writing changes {:?}",internal);
                         repo.write_changes_file(&branch_changes_file(r,repo.get_current_branch())).unwrap();
+                        let t3=time::precise_time_s();
+                        info!("changes files took {}s to write", t3-t2);
                         Ok(Some(()))
                     },
                     Ok(Err(x)) => {
