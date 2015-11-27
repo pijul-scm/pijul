@@ -3,13 +3,15 @@ name = "libpijul"
 version = "0.1.0"
 authors = ["Pierre-Étienne Meunier","Florent Becker"]
 license = "AGPL-3.0"
-build="build.rs"
+build = "build.rs"
 
 [dependencies]
 libc = "*"
 rustc-serialize="0.3"
 rand = "*"
 rust-crypto="*"
+lmdb = {path="../lmdb"}
+
 
 [build-dependencies]
 gcc="*"

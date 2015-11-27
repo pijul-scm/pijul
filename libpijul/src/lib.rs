@@ -300,67 +300,6 @@ struct Line<'a> {
     lowlink:usize,
     scc:usize
 }
-/*
-extern "C"{
-    // retrieve uses hash tables growing monotonically. For time and
-    // memory, we need it in C (or with fast hashtables and no copy of
-    // anything) + free without RC.
-    fn c_retrieve(txn:*mut MdbTxn,dbi_nodes:MdbDbi,
-                  key:*const c_char,
-                  p_lines:*mut *mut c_line,
-                  p_children:*mut *mut c_int);
-    fn c_free_line(c_line:*mut c_line,c_children:*mut c_int);
-}
- */
-
-fn tarjan(line:&mut Graph)->usize{
-    fn dfs<'a>(stack:&mut Vec<usize>,index:&mut usize, scc:&mut usize, g:&mut Graph<'a>, n_l:usize){
-        {
-            let mut l=&mut (g.lines[n_l]);
-            (*l).index = *index;
-            (*l).lowlink = *index;
-            (*l).flags |= LINE_ONSTACK | LINE_VISITED;
-        }
-        stack.push(n_l);
-        *index = *index + 1;
-        //println!("{} > 0",(*l).n_children);
-        for i in 0..g.lines[n_l].n_children {
-            //let mut l=&mut (g.lines[n_l]);
-
-            //println!("children: {:?} {} {}",l,(*l).children,(*l).n_children);
-            let n_child = g.children[g.lines[n_l].children + i];
-
-            if g.lines[n_child].flags & LINE_VISITED == 0 {
-                dfs(stack,index,scc,g,n_child);
-                g.lines[n_l].lowlink=std::cmp::min(g.lines[n_l].lowlink, g.lines[n_child].lowlink);
-            } else {
-                if g.lines[n_child].flags & LINE_ONSTACK != 0 {
-                    g.lines[n_l].lowlink=std::cmp::min(g.lines[n_l].lowlink, g.lines[n_child].index)
-                }
-            }
-        }
-
-        if g.lines[n_l].index == g.lines[n_l].lowlink {
-            //println!("SCC: {:?}",slice::from_raw_parts((*l).key,KEY_SIZE));
-            loop {
-                match stack.pop() {
-                    None=>break,
-                    Some(n_p)=>{
-                        g.lines[n_p].scc=*scc;
-                        g.lines[n_p].flags = g.lines[n_p].flags ^ LINE_ONSTACK;
-                        if n_p == n_l { break }
-                    }
-                }
-            }
-            *scc+=1
-        }
-    }
-    let mut stack=vec!();
-    let mut index=0;
-    let mut scc=0;
-    dfs(&mut stack, &mut index, &mut scc, line, 0);
-    (scc-1) as usize
-}
 
 struct Graph<'a> {
     lines:Vec<Line<'a>>,
@@ -420,7 +359,16 @@ impl <'a,'b>Iterator for CursIter<'a,'b> {
             let mut val=MDB_val{mv_data:[self.edge_flag].as_ptr() as *const c_void, mv_size:1};
             let e=mdb_cursor_get(self.cursor,&mut key,&mut val,self.op as c_uint);
             self.op=Op::MDB_NEXT_DUP as c_uint;
-            if e==0 && val.mv_size>0 && ((*(val.mv_data as *const u8) == self.edge_flag) || (self.include_pseudo && (*(val.mv_data as *const u8) == (self.edge_flag|PSEUDO_EDGE)))) {
+
+            if e==0 {
+                println!("curs_iter: {} {}", self.include_pseudo,(*(val.mv_data as *const u8)))
+            }
+
+
+
+            if e==0
+                && ((*(val.mv_data as *const u8) == self.edge_flag)
+                    || (self.include_pseudo && (*(val.mv_data as *const u8) == (self.edge_flag|PSEUDO_EDGE)))) {
                 Some(slice::from_raw_parts(val.mv_data as *const u8,val.mv_size as usize))
             } else {
                 None
@@ -488,7 +436,7 @@ impl Repository {
             let e=mdb_env_set_maxdbs(env,10);
             if e != 0 { println!("mdb_env_set_maxdbs");
                         return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
-            let e=mdb_env_set_mapsize(env,std::ops::Shl::shl(1,30) as size_t);
+            let e=mdb_env_set_mapsize(env,std::ops::Shl::shl(1, 30) as size_t);
             if e !=0 { println!("mdb_env_set_mapsize");
                        return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
 
@@ -769,6 +717,7 @@ impl Repository {
                         let mut l=Line {
                             key:key,flags:0,children:children.len(),n_children:0,index:0,lowlink:0,scc:0
                         };
+                        println!("retrieve {}",to_hex(key));
                         l.children=children.len();
                         for child in CursIter::new(curs,key,0,true) {
                             unsafe {
@@ -807,9 +756,67 @@ impl Repository {
     }
 
 
+
+
+
+    fn tarjan(&self,line:&mut Graph)->usize{
+        fn dfs<'a>(repo:&Repository,stack:&mut Vec<usize>,index:&mut usize, scc:&mut usize, g:&mut Graph<'a>, n_l:usize){
+            {
+                let mut l=&mut (g.lines[n_l]);
+                (*l).index = *index;
+                (*l).lowlink = *index;
+                (*l).flags |= LINE_ONSTACK | LINE_VISITED;
+                println!("{}, {} chi",to_hex((*l).key),(*l).n_children);
+                unsafe {
+                    println!("contents: {}",std::str::from_utf8_unchecked(repo.contents((*l).key)));
+                }
+            }
+            stack.push(n_l);
+            *index = *index + 1;
+            for i in 0..g.lines[n_l].n_children {
+                //let mut l=&mut (g.lines[n_l]);
+
+                let n_child = g.children[g.lines[n_l].children + i];
+                println!("children: {}",to_hex(g.lines[n_child].key));
+
+                if g.lines[n_child].flags & LINE_VISITED == 0 {
+                    dfs(repo,stack,index,scc,g,n_child);
+                    g.lines[n_l].lowlink=std::cmp::min(g.lines[n_l].lowlink, g.lines[n_child].lowlink);
+                } else {
+                    if g.lines[n_child].flags & LINE_ONSTACK != 0 {
+                        g.lines[n_l].lowlink=std::cmp::min(g.lines[n_l].lowlink, g.lines[n_child].index)
+                    }
+                }
+            }
+
+            if g.lines[n_l].index == g.lines[n_l].lowlink {
+                //println!("SCC: {:?}",slice::from_raw_parts((*l).key,KEY_SIZE));
+                loop {
+                    match stack.pop() {
+                        None=>break,
+                        Some(n_p)=>{
+                            g.lines[n_p].scc=*scc;
+                            g.lines[n_p].flags = g.lines[n_p].flags ^ LINE_ONSTACK;
+                            if n_p == n_l { break }
+                        }
+                    }
+                }
+                *scc+=1
+            }
+        }
+        let mut stack=vec!();
+        let mut index=0;
+        let mut scc=0;
+        dfs(self,&mut stack, &mut index, &mut scc, line, 0);
+        (scc-1) as usize
+    }
+
+
+
+
     fn output_file<'a,B>(&'a self,buf:&mut B,graph:Graph<'a>) where B:LineBuffer<'a> {
         let mut graph=graph;
-        let max_level=tarjan(&mut graph);
+        let max_level=self.tarjan(&mut graph);
         let mut counts=vec![0;max_level+1];
         let mut lines=vec![vec!();max_level+1];
         for i in 0..lines.len() { lines[i]=Vec::new() }

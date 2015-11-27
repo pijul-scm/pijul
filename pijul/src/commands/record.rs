@@ -135,7 +135,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 repo.new_internal(&mut internal);
                 //println!("applying");
-                repo.apply(&patch_arc, &internal[..]).unwrap();
+                repo.apply(&patch_arc, &internal).unwrap();
                 //println!("sync");
                 repo.sync_file_additions(&patch_arc.changes[..],&syncs, &internal);
                 if cfg!(debug_assertions){

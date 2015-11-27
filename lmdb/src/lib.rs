@@ -1,5 +1,8 @@
-#![allow(dead_code)]
 extern crate libc;
+#[macro_use]
+extern crate bitflags;
+
+
 #[cfg(not(windows))]
 use self::libc::{c_int, c_uint,c_char,c_void,size_t,mode_t};
 #[cfg(windows)]
@@ -96,11 +99,11 @@ impl Env_ {
             Err(e)
         }
     }
-    pub fn open(self,path:&Path,flags:Open,mode:mode_t)->Result<Env,c_int> {
+    pub fn open(self,path:&Path,flags:c_uint,mode:mode_t)->Result<Env,c_int> {
         unsafe {
-            let Open(flags)=flags;
             let e=mdb_env_open(self.env,path.to_str().unwrap().as_ptr() as *const c_char,
-                               flags,mode);
+                               flags,
+                               mode);
             if e==0 {
                 Ok(Env { env:self.env })
             } else {
@@ -126,7 +129,7 @@ impl Env_ {
     }
     pub fn set_mapsize(&self,size:usize)->Result<(),std::io::Error> {
         unsafe {
-            let e=mdb_env_set_mapsize(self.env,size);
+            let e=mdb_env_set_mapsize(self.env,size as size_t);
             if e != 0 { Err(std::io::Error::from_raw_os_error(e)) }
             else { Ok(()) }
         }
@@ -150,9 +153,9 @@ impl <'a>Txn<'a> {
     pub fn abort(self) {
         unsafe {mdb_txn_abort(self.txn)}
     }
-    pub fn dbi_open(&self,name:&[u8],flag:c_uint)->Result<Dbi<'a>,Error> {
+    pub fn dbi_open(&self,name:&[u8],flag:DbiOpen)->Result<Dbi<'a>,Error> {
         let mut d=0;
-        let e=unsafe { mdb_dbi_open(self.txn,name.as_ptr() as *const c_char,flag,&mut d) };
+        let e=unsafe { mdb_dbi_open(self.txn,name.as_ptr() as *const c_char,flag.bits(),&mut d) };
         if e==0 { Ok(Dbi { dbi:d, env:self.env }) } else { Err(Error::from_raw_os_error(e)) }
     }
     pub fn get<'b>(&'b self,dbi:&Dbi<'a>,key:&[u8])->Result<Option<&'b[u8]>,Error> {
@@ -167,11 +170,11 @@ impl <'a>Txn<'a> {
             } else {Err(Error::from_raw_os_error(e))}
         }
     }
-    pub fn put<'b>(&'b mut self,dbi:&Dbi<'a>,key:&[u8],value:&[u8],flags:usize)->Result<(),Error> {
+    pub fn put<'b>(&'b mut self,dbi:&Dbi<'a>,key:&[u8],value:&[u8],flags:Put)->Result<(),Error> {
         unsafe {
             let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             let mut v=MDB_val { mv_data:value.as_ptr() as *const c_void, mv_size:value.len() as size_t };
-            let e=mdb_put(self.txn,dbi.dbi,&mut k,&mut v,flags as c_uint);
+            let e=mdb_put(self.txn,dbi.dbi,&mut k,&mut v,flags.bits());
             if e==0 { Ok(()) } else { Err(Error::from_raw_os_error(e)) }
         }
     }
@@ -271,26 +274,23 @@ impl <'a>Cursor<'a> {
     }
 }
 
-pub struct Open(c_uint);
-impl BitOr for Open {
-    type Output=Open;
-    fn bitor(self,rhs:Open)->Open {
-        let Open(a)=self;
-        let Open(b)=rhs;
-        Open(a|b)
+bitflags! {
+    flags DbiOpen:c_uint {
+        const MDB_REVERSEKEY=0x02,
+        const MDB_DUPSORT=0x04,
+        const MDB_INTEGERKEY=0x08,
+        const MDB_DUPFIXED=0x10,
+        const MDB_INTEGERDUP=0x20,
+        const MDB_REVERSEDUP=0x40,
+        const MDB_CREATE=0x40000
     }
 }
-
-pub const MDB_REVERSEKEY: Open = Open(0x02);
-pub const MDB_DUPSORT: Open = Open(0x04);
-pub const MDB_INTEGERKEY: Open = Open(0x08);
-pub const MDB_DUPFIXED: Open = Open(0x10);
-pub const MDB_INTEGERDUP: Open = Open(0x20);
-pub const MDB_REVERSEDUP: Open =  Open(0x40);
-pub const MDB_CREATE: Open = Open(0x40000);
-
 
 pub const MDB_NOTFOUND: c_int = -30798;
 pub const MDB_KEYEXIST: c_int = -30799;
 
-pub const MDB_NODUPDATA:c_uint = 0x20;
+bitflags! {
+    flags Put:c_uint {
+        const MDB_NODUPDATA=0x20
+    }
+}
