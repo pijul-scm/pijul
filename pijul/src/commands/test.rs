@@ -23,6 +23,7 @@ fn init_nested_forbidden() {
     let sub_init_params = init::Params { location : &subdir, allow_nested : false};
     match init::run(&sub_init_params) {
         Ok(_) => panic!("Creating a forbidden nested repository"),
+
         Err(init::Error::InARepository) => (),
         Err(_) => panic!("Failed in a funky way while creating a nested repository")       
     }
@@ -110,7 +111,6 @@ fn no_remove_without_add() {
         Err(_) => panic!("funky error when trying to remove inexistant file")
     }
 }
-
 
 // #[test]
 // fn add_record_remove_pull() {

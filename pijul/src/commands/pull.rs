@@ -98,6 +98,51 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
              remote_id : remote_id }
 }
 
+#[derive(Debug)]
+pub enum Error{
+    NotInARepository,
+    IoError(io::Error),
+    //Serde(serde_cbor::error::Error),
+    Repository(libpijul::Error)
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Error::NotInARepository => write!(f, "Not in a repository"),
+            Error::IoError(ref err) => write!(f, "IO error: {}", err),
+            //Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
+            Error::Repository(ref err) => write!(f, "Repository error: {}", err)
+        }
+    }
+}
+
+impl error::Error for Error {
+    fn description(&self) -> &str {
+        match *self {
+            Error::NotInARepository => "not in a repository",
+            Error::IoError(ref err) => error::Error::description(err),
+            //Error::Serde(ref err) => serde_cbor::error::Error::description(err),
+            Error::Repository(ref err) => libpijul::Error::description(err)
+        }
+    }
+
+    fn cause(&self) -> Option<&error::Error> {
+        match *self {
+            Error::IoError(ref err) => Some(err),
+            Error::NotInARepository => None,
+            //Error::Serde(ref err) => Some(err),
+            Error::Repository(ref err) => Some(err)
+        }
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Error {
+        Error::IoError(err)
+    }
+}
+
 pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
     let pwd = args.repository;
     match find_repo_root(&pwd){

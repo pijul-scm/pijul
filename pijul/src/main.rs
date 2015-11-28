@@ -3,10 +3,12 @@ extern crate clap;
 #[macro_use]
 extern crate log;
 
-
 extern crate libpijul;
 mod commands;
 
+use std::path::Path;
+
+use log::*;
 extern crate env_logger;
 
 macro_rules! pijul_subcommand_dispatch {
