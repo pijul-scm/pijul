@@ -20,14 +20,8 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::fs::{metadata,create_dir_all};
-use std::io;
-extern crate rustc_serialize;
-use self::rustc_serialize::json::{encode,decode};
-use std::io::{BufWriter,BufReader,Read,Write};
-use std::fs::File;
-use std::str::{from_utf8};
-use std::fmt;
-use std::error;
+
+use std;
 
 pub fn pijul_dir_name() -> &'static Path {
     return Path::new(".pijul")
@@ -58,7 +52,7 @@ pub fn find_repo_root(dir : &Path) -> Option<&Path> {
     }
 }
 
-pub fn create(dir : &Path) -> io::Result<()> {
+pub fn create(dir : &Path) -> std::io::Result<()> {
     let mut repo_dir = repo_dir(dir);
     try!(create_dir_all(&repo_dir));
     repo_dir.push("pristine");
@@ -69,63 +63,6 @@ pub fn create(dir : &Path) -> io::Result<()> {
     Ok(())
 }
 
-
-
-#[derive(Debug)]
-pub enum Error{
-    IO(io::Error),
-    Encoder(rustc_serialize::json::EncoderError),
-    Decoder(rustc_serialize::json::DecoderError)
-}
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Error::IO(ref err) => write!(f, "IO error: {}", err),
-            Error::Encoder(ref err) => write!(f, "Encoder error: {}", err),
-            Error::Decoder(ref err) => write!(f, "Decoder error: {}", err)
-        }
-    }
-}
-
-impl error::Error for Error {
-    fn description(&self) -> &str {
-        match *self {
-            Error::IO(ref err) => err.description(),
-            Error::Encoder(ref err) => err.description(),
-            Error::Decoder(ref err) => err.description()
-        }
-    }
-
-    fn cause(&self) -> Option<&error::Error> {
-        match *self {
-            Error::IO(ref err) => Some(err),
-            Error::Encoder(ref err) => Some(err),
-            Error::Decoder(ref err) => Some(err)
-        }
-    }
-}
-
-
-pub fn write_changes(patches:&Vec<Vec<u8>>,changes_file:&Path)->Result<(),Error>{
-    let file=try!(File::create(changes_file).map_err(Error::IO));
-    let mut buffer = BufWriter::new(file);
-    //try!(serde_cbor::ser::to_writer(&mut buffer,&patches).map_err(Error::Serde));
-    let encoded=try!(encode(&patches).map_err(Error::Encoder));
-    try!(buffer.write(encoded.as_bytes()).map_err(Error::IO));
-    Ok(())
-}
-
-pub fn read_changes(changes_file:&Path)->Result<Vec<Vec<u8>>,Error> {
-    let file=try!(File::open(changes_file).map_err(Error::IO));
-    let mut r = BufReader::new(file);
-    let mut s=Vec::new();
-    try!(r.read_to_end(&mut s).map_err(Error::IO));
-    let ss=from_utf8(&s).unwrap();
-    let dec:Vec<Vec<u8>>=try!(decode(ss).map_err(Error::Decoder));
-    Ok(dec)
-}
-
-// The following is from the rust project, see http://rust-lang.org/COPYRIGHT.
 pub fn to_hex(x:&[u8]) -> String {
     let mut v = Vec::with_capacity(x.len() * 2);
     for &byte in x.iter() {

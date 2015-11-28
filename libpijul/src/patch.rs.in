@@ -1,0 +1,180 @@
+/*
+  Copyright Florent Becker and Pierre-Etienne Meunier 2015.
+
+  This file is part of Pijul.
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU Affero General Public License for more details.
+
+  You should have received a copy of the GNU Affero General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+use std::path::Path;
+use std::path::PathBuf;
+use std::fs::{metadata};
+
+use std::io::{BufWriter,BufReader,Read,Write,BufRead};
+use std::fs::File;
+use std::str::{from_utf8};
+
+use std;
+extern crate serde_cbor;
+use self::serde_cbor::{to_writer};
+
+extern crate crypto;
+use self::crypto::digest::Digest;
+use self::crypto::sha2::Sha512;
+
+extern crate rand;
+extern crate libc;
+use self::libc::{memcmp,c_void,size_t};
+
+pub type LocalKey=Vec<u8>;
+pub type ExternalKey=Vec<u8>;
+pub type ExternalHash=Vec<u8>;
+pub type Flag=u8;
+
+use error::Error;
+use fs_representation::{to_hex};
+
+#[derive(Debug,Serialize,Deserialize)]
+pub struct Edge {
+    pub from:ExternalKey,
+    pub to:ExternalKey,
+    pub flag:Flag,
+    pub introduced_by:ExternalHash
+}
+
+
+#[derive(Debug,Serialize,Deserialize)]
+pub enum Change {
+    NewNodes{
+        up_context:Vec<ExternalKey>,
+        down_context:Vec<ExternalKey>,
+        flag:Flag,
+        line_num:usize,
+        nodes:Vec<Vec<u8>>
+    },
+    Edges{ edges:Vec<Edge> }
+}
+
+
+#[derive(Debug,Serialize,Deserialize)]
+pub struct Patch {
+    pub changes:Vec<Change>,
+    pub dependencies:Vec<ExternalHash>
+}
+
+impl Patch {
+
+    pub fn new(changes:Vec<Change>)->Patch {
+        let deps=dependencies(&changes);
+        Patch {
+            changes:changes,
+            dependencies:deps
+        }
+    }
+    pub fn empty()->Patch {
+        Patch { changes:vec!(), dependencies:vec!() }
+    }
+    pub fn from_reader<R>(r:&mut R)->Result<Patch,Error> where R:Read {
+        let p=try!(serde_cbor::de::from_reader(r).map_err(Error::PatchDecoding));
+        Ok(p)
+    }
+
+    pub fn to_writer<W>(&self,w:&mut W)->Result<(),Error> where W:Write {
+        try!(serde_cbor::ser::to_writer(w,self).map_err(Error::PatchEncoding));
+        Ok(())
+    }
+    pub fn save(&self,dir:&Path)->Result<Vec<u8>,Error>{
+        let mut name:[u8;20]=[0;20]; // random name initially
+        fn make_name(dir:&Path,name:&mut [u8])->std::path::PathBuf{
+            for i in 0..name.len() { let r:u8=rand::random(); name[i] = 97 + (r%26) }
+            let tmp=dir.join(std::str::from_utf8(&name[..]).unwrap());
+            if std::fs::metadata(&tmp).is_err() { tmp } else { make_name(dir,name) }
+        }
+        let tmp=make_name(&dir,&mut name);
+        {
+            let mut buffer = BufWriter::new(try!(File::create(&tmp)));
+            try!(self.to_writer(&mut buffer));
+        }
+        // hash
+        let mut buffer = BufReader::new(try!(File::open(&tmp).map_err(Error::IoError))); // change to uuid
+        let mut hasher = Sha512::new();
+        loop {
+            let len= match buffer.fill_buf() {
+                Ok(buf)=> if buf.len()==0 { break } else {
+                    hasher.input(buf);buf.len()
+                },
+                Err(e)=>return Err(Error::IoError(e))
+            };
+            buffer.consume(len)
+        }
+        let mut hash=vec![0;hasher.output_bytes()];
+        hasher.result(&mut hash);
+        try!(std::fs::rename(tmp,dir.join(to_hex(&hash)).with_extension("cbor")).map_err(Error::IoError));
+        Ok(hash)
+    }
+
+}
+
+
+pub fn write_changes(patches:&Vec<Vec<u8>>,changes_file:&Path)->Result<(),Error>{
+    let file=try!(File::create(changes_file).map_err(Error::IoError));
+    let mut buffer = BufWriter::new(file);
+    try!(serde_cbor::ser::to_writer(&mut buffer,&patches).map_err(Error::PatchEncoding));
+    //let encoded=try!(encode(&patches).map_err(Error::Encoder));
+    //try!(buffer.write(encoded.as_bytes()).map_err(Error::IO));
+    Ok(())
+}
+
+pub fn read_changes(changes_file:&Path)->Result<Vec<Vec<u8>>,Error> {
+    let file=try!(File::open(changes_file).map_err(Error::IoError));
+    let mut r = BufReader::new(file);
+    let dec=try!(serde_cbor::de::from_reader(&mut r).map_err(Error::PatchDecoding));
+    /*let mut s=Vec::new();
+    try!(r.read_to_end(&mut s).map_err(Error::IO));
+    let ss=from_utf8(&s).unwrap();
+    let dec:Vec<Vec<u8>>=try!(decode(ss).map_err(Error::Decoder));*/
+    Ok(dec)
+}
+pub fn dependencies(changes:&[Change])->Vec<ExternalHash> {
+    let mut deps=Vec::new();
+    fn push_dep(deps:&mut Vec<ExternalHash>,dep:ExternalHash) {
+        if !if dep.len()==HASH_SIZE {unsafe { memcmp(dep.as_ptr() as *const c_void,
+                                                     ROOT_KEY.as_ptr() as *const c_void,
+                                                     HASH_SIZE as size_t)==0 }} else {false} {
+            deps.push(dep)
+        }
+    }
+    for ch in changes {
+        match *ch {
+            Change::NewNodes { ref up_context,ref down_context, line_num:_,flag:_,nodes:_ } => {
+                for c in up_context.iter().chain(down_context.iter()) {
+                    if c.len()>LINE_SIZE { push_dep(&mut deps,c[0..c.len()-LINE_SIZE].to_vec()) }
+                }
+            },
+            Change::Edges{ref edges} =>{
+                for e in edges {
+                    if e.from.len()>LINE_SIZE { push_dep(&mut deps,e.from[0..e.from.len()-LINE_SIZE].to_vec()) }
+                    if e.to.len()>LINE_SIZE { push_dep(&mut deps,e.to[0..e.to.len()-LINE_SIZE].to_vec()) }
+                    if e.introduced_by.len()>0 { push_dep(&mut deps,e.introduced_by.clone()) }
+                }
+            }
+        }
+    }
+    deps
+}
+
+pub const HASH_SIZE:usize=20; // pub temporaire
+pub const LINE_SIZE:usize=4;
+pub const KEY_SIZE:usize=HASH_SIZE+LINE_SIZE;
+pub const ROOT_KEY:&'static[u8]=&[0;KEY_SIZE];

@@ -13,6 +13,10 @@ rust-crypto="*"
 lmdb = {path="../lmdb"}
 time="*"
 log="0.3"
+serde="*"
+serde_cbor="*"
 
 [build-dependencies]
 gcc="*"
+syntex="*"
+serde_codegen="*"

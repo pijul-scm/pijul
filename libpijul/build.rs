@@ -3,6 +3,13 @@ use std::process::{Command};
 use std::io::{Write};
 use std::fs::{File,remove_file};
 use std::env;
+
+extern crate syntex;
+extern crate serde_codegen;
+
+use std::path::Path;
+
+
 fn main() {
     {
         let mut f = File::create("empty.c").unwrap();
@@ -34,4 +41,15 @@ fn main() {
                 .compile("liblmdb.a");
         }
     }
+
+
+    let out_dir = env::var_os("OUT_DIR").unwrap();
+
+    let src = Path::new("src/patch.rs.in");
+    let dst = Path::new(&out_dir).join("patch.rs");
+
+    let mut registry = syntex::Registry::new();
+
+    serde_codegen::register(&mut registry);
+    registry.expand("", &src, &dst).unwrap();
 }

@@ -17,10 +17,10 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 extern crate libc;
-extern crate rustc_serialize;
+extern crate time;
+extern crate serde;
 #[macro_use]
 extern crate log;
-extern crate time;
 
 use self::libc::{c_int, c_uint,c_char,c_uchar,c_void,size_t};
 use self::libc::{memcmp};
@@ -32,19 +32,19 @@ use std::str;
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-extern crate rand;
 use std::path::{PathBuf,Path};
 
-use std::io::prelude::*;
-use std::io;
-use std::error;
-
-use std::fmt;
+use std::io::{Write,BufRead,Read};
 use std::collections::HashSet;
 use std::fs::{metadata};
 pub mod fs_representation;
+use self::fs_representation::*;
+pub mod patch;
+use self::patch::*;
 
-use self::fs_representation::{to_hex};
+pub mod error;
+use self::error::Error;
+
 
 #[cfg(not(windows))]
 use std::os::unix::fs::PermissionsExt;
@@ -54,143 +54,7 @@ use std::fs;
 mod mdb;
 use self::mdb::*;
 
-use self::rustc_serialize::json::{encode,decode};
-
-
-extern crate crypto;
-use self::crypto::digest::Digest;
-use self::crypto::sha2::Sha512;
-
-use std::io::{BufWriter,BufReader};
-use std::fs::File;
-
-
-pub type LocalKey=Vec<u8>;
-pub type ExternalKey=Vec<u8>;
-pub type ExternalHash=Vec<u8>;
-pub type Flag=u8;
-
-pub const HASH_SIZE:usize=20; // pub temporaire
-pub const LINE_SIZE:usize=4;
-pub const KEY_SIZE:usize=HASH_SIZE+LINE_SIZE;
-pub const ROOT_KEY:&'static[u8]=&[0;KEY_SIZE];
-
-
-#[derive(Debug,RustcEncodable,RustcDecodable)]
-pub struct Edge {
-    pub from:ExternalKey,
-    pub to:ExternalKey,
-    pub flag:Flag,
-    pub introduced_by:ExternalHash
-}
-
-
-#[derive(Debug,RustcEncodable,RustcDecodable)]
-pub enum Change {
-    NewNodes{
-        up_context:Vec<ExternalKey>,
-        down_context:Vec<ExternalKey>,
-        flag:Flag,
-        line_num:usize,
-        nodes:Vec<Vec<u8>>
-    },
-    Edges{ edges:Vec<Edge> }
-}
-
-
-#[derive(Debug,RustcEncodable,RustcDecodable)]
-pub struct Patch {
-    pub changes:Vec<Change>,
-    pub dependencies:Vec<ExternalHash>
-}
-
-impl Patch {
-
-    pub fn new(changes:Vec<Change>)->Patch {
-        let deps=dependencies(&changes);
-        Patch {
-            changes:changes,
-            dependencies:deps
-        }
-    }
-    pub fn empty()->Patch {
-        Patch { changes:vec!(), dependencies:vec!() }
-    }
-    pub fn from_reader<R>(r:&mut R)->Result<Patch,Error> where R:Read {
-        let mut s=Vec::new();
-        try!(r.read_to_end(&mut s).map_err(Error::IoError));
-        let ss=std::str::from_utf8(&s).unwrap();
-        let dec:Patch=try!(decode(ss).map_err(Error::PatchDecoding));
-        Ok(dec)
-    }
-
-    pub fn to_writer<W>(&self,w:&mut W)->Result<(),Error> where W:Write {
-        let encoded=try!(encode(self).map_err(Error::PatchEncoding));
-        try!(w.write(encoded.as_bytes()).map_err(Error::IoError));
-        Ok(())
-    }
-    pub fn save(&self,dir:&Path)->Result<Vec<u8>,Error>{
-        let mut name:[u8;20]=[0;20];
-        fn make_name(dir:&Path,name:&mut [u8])->std::path::PathBuf{
-            for i in 0..name.len() { let r:u8=rand::random(); name[i] = 97 + (r%26) }
-            let tmp=dir.join(std::str::from_utf8(&name[..]).unwrap());
-            if std::fs::metadata(&tmp).is_err() { tmp } else { make_name(dir,name) }
-        }
-        let tmp=make_name(&dir,&mut name);
-        {
-            let mut buffer = BufWriter::new(try!(File::create(&tmp)));
-            try!(self.to_writer(&mut buffer));
-        }
-        // hash
-        let mut buffer = BufReader::new(try!(File::open(&tmp).map_err(Error::IoError))); // change to uuid
-        let mut hasher = Sha512::new();
-        loop {
-            let len= match buffer.fill_buf() {
-                Ok(buf)=> if buf.len()==0 { break } else {
-                    hasher.input(buf);buf.len()
-                },
-                Err(e)=>return Err(Error::IoError(e))
-            };
-            buffer.consume(len)
-        }
-        let mut hash=vec![0;hasher.output_bytes()];
-        hasher.result(&mut hash);
-        try!(std::fs::rename(tmp,dir.join(to_hex(&hash)).with_extension("cbor")).map_err(Error::IoError));
-        Ok(hash)
-    }
-
-}
-pub fn dependencies(changes:&[Change])->Vec<ExternalHash> {
-    let mut deps=Vec::new();
-    fn push_dep(deps:&mut Vec<ExternalHash>,dep:ExternalHash) {
-        if !if dep.len()==HASH_SIZE {unsafe { memcmp(dep.as_ptr() as *const c_void,
-                                                     ROOT_KEY.as_ptr() as *const c_void,
-                                                     HASH_SIZE as size_t)==0 }} else {false} {
-            deps.push(dep)
-        }
-    }
-    for ch in changes {
-        match *ch {
-            Change::NewNodes { ref up_context,ref down_context, line_num:_,flag:_,nodes:_ } => {
-                for c in up_context.iter().chain(down_context.iter()) {
-                    if c.len()>LINE_SIZE { push_dep(&mut deps,c[0..c.len()-LINE_SIZE].to_vec()) }
-                }
-            },
-            Change::Edges{ref edges} =>{
-                for e in edges {
-                    if e.from.len()>LINE_SIZE { push_dep(&mut deps,e.from[0..e.from.len()-LINE_SIZE].to_vec()) }
-                    if e.to.len()>LINE_SIZE { push_dep(&mut deps,e.to[0..e.to.len()-LINE_SIZE].to_vec()) }
-                    if e.introduced_by.len()>0 { push_dep(&mut deps,e.introduced_by.clone()) }
-                }
-            }
-        }
-    }
-    deps
-}
-
-
-
-
+extern crate rand;
 
 
 
@@ -210,62 +74,6 @@ pub struct Repository{
     dbi_revinodes:MdbDbi
 }
 
-#[derive(Debug)]
-pub enum Error{
-    IoError(io::Error),
-    AlreadyApplied,
-    AlreadyAdded,
-    FileNotInRepo(PathBuf),
-    FsRepresentation(fs_representation::Error),
-    PatchDecoding(rustc_serialize::json::DecoderError),
-    PatchEncoding(rustc_serialize::json::EncoderError)
-}
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Error::IoError(ref err) => write!(f, "IO error: {}", err),
-            Error::AlreadyApplied => write!(f, "Patch already applied"),
-            Error::AlreadyAdded => write!(f, "File already here"),
-            Error::FsRepresentation(ref err) => write!(f, "FS Representation error: {}",err),
-            Error::PatchEncoding(ref err) => write!(f, "Patch encoding error {}",err),
-            Error::PatchDecoding(ref err) => write!(f, "Patch decoding error {}",err),
-            Error::FileNotInRepo(ref path) => write!(f, "File {} not tracked", path.display())
-        }
-    }
-}
-
-impl error::Error for Error {
-    fn description(&self) -> &str {
-        match *self {
-            Error::IoError(ref err) => err.description(),
-            Error::AlreadyApplied => "Patch already applied",
-            Error::AlreadyAdded => "File already here",
-            Error::FsRepresentation(ref err) => err.description(),
-            Error::PatchEncoding(ref err) => err.description(),
-            Error::PatchDecoding(ref err) => err.description(),
-            Error::FileNotInRepo(_) => "Operation on untracked file"
-        }
-    }
-
-    fn cause(&self) -> Option<&error::Error> {
-        match *self {
-            Error::IoError(ref err) => Some(err),
-            Error::FsRepresentation(ref err) => Some(err),
-            Error::AlreadyApplied => None,
-            Error::AlreadyAdded => None,
-            Error::PatchEncoding(ref err) => Some(err),
-            Error::PatchDecoding(ref err) => Some(err),
-            Error::FileNotInRepo(_) => None
-        }
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Error {
-        Error::IoError(err)
-    }
-}
-
 
 impl Drop for Repository {
     fn drop(&mut self){
@@ -274,10 +82,7 @@ impl Drop for Repository {
             if std::thread::panicking() {
                 mdb_txn_abort(self.mdb_txn);
             } else {
-                let t0=time::precise_time_s();
                 mdb_txn_commit(self.mdb_txn);
-                let t1=time::precise_time_s();
-                info!("commit: {}s",t1-t0);
             }
             mdb_env_close(self.mdb_env)
         }
@@ -1226,7 +1031,7 @@ impl Repository {
                            &lines_b);
                 //println!("/local_diff");
                 let t1=time::precise_time_s();
-                //info!("diff took {}s",t1-t0);
+                info!("diff took {}s",t1-t0);
                 Ok(())
             },
             Err(e)=>Err(e)
@@ -1522,8 +1327,7 @@ impl Repository {
                                     //println!("    reconnecting {} {}",to_hex(&parents[i..(i+KEY_SIZE)]),
                                     //to_hex(&children[j..(j+KEY_SIZE)]));
                                     self.add_pseudo_edge(&parents[i..(i+KEY_SIZE)],
-                                                         &children[j..(j+KEY_SIZE)],
-                                                         internal_patch_id);
+                                                         &children[j..(j+KEY_SIZE)]);
                                     j+=KEY_SIZE
                                 }
                                 i+=KEY_SIZE
@@ -1635,7 +1439,7 @@ impl Repository {
             }
         }
     }
-    fn add_pseudo_edge(&mut self,pu:&[u8],pv:&[u8],internal:&[u8]){
+    fn add_pseudo_edge(&mut self,pu:&[u8],pv:&[u8]){
         let mut u:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let mut v:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         u[0]= PARENT_EDGE|PSEUDO_EDGE;
@@ -1832,7 +1636,7 @@ impl Repository {
                     }
             }
         }
-        try!(fs_representation::write_changes(&patches,changes_file).map_err(Error::FsRepresentation));
+        try!(patch::write_changes(&patches,changes_file));
         Ok(())
     }
 
