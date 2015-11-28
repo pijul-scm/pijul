@@ -1,4 +1,3 @@
-#[test]
 extern crate tempdir;
 
 //use commands::{init, info, record, add, remove};

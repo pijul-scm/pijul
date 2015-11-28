@@ -13,6 +13,7 @@ pub mod get;
 pub mod remove;
 pub mod ls;
 pub mod revert;
+#[cfg(test)]
 mod test;
 pub mod error;
 
