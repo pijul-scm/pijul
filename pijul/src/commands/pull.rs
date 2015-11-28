@@ -21,17 +21,17 @@ use clap::{SubCommand, ArgMatches,Arg};
 
 use commands::StaticSubcommand;
 extern crate libpijul;
-use self::libpijul::{Repository,Patch,DEFAULT_BRANCH,HASH_SIZE};
-use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root, patches_dir, branch_changes_file,to_hex,read_changes};
-use std::io;
-use std::fmt;
-use std::error;
+use self::libpijul::{Repository,DEFAULT_BRANCH};
+use self::libpijul::patch::{Patch,read_changes,HASH_SIZE};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root, patches_dir, branch_changes_file,to_hex};
 use std::path::{Path,PathBuf};
 use std::io::{BufWriter,BufReader};
 use std::fs::File;
 use std::collections::hash_set::{HashSet};
 use std::collections::hash_map::{HashMap};
 use std::fs::{hard_link,metadata};
+
+use commands::error::Error;
 
 /*
 extern crate ssh2;
@@ -98,51 +98,6 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
              remote_id : remote_id }
 }
 
-#[derive(Debug)]
-pub enum Error{
-    NotInARepository,
-    IoError(io::Error),
-    //Serde(serde_cbor::error::Error),
-    Repository(libpijul::Error)
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Error::NotInARepository => write!(f, "Not in a repository"),
-            Error::IoError(ref err) => write!(f, "IO error: {}", err),
-            //Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
-            Error::Repository(ref err) => write!(f, "Repository error: {}", err)
-        }
-    }
-}
-
-impl error::Error for Error {
-    fn description(&self) -> &str {
-        match *self {
-            Error::NotInARepository => "not in a repository",
-            Error::IoError(ref err) => error::Error::description(err),
-            //Error::Serde(ref err) => serde_cbor::error::Error::description(err),
-            Error::Repository(ref err) => libpijul::Error::description(err)
-        }
-    }
-
-    fn cause(&self) -> Option<&error::Error> {
-        match *self {
-            Error::IoError(ref err) => Some(err),
-            Error::NotInARepository => None,
-            //Error::Serde(ref err) => Some(err),
-            Error::Repository(ref err) => Some(err)
-        }
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Error {
-        Error::IoError(err)
-    }
-}
-
 pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
     let pwd = args.repository;
     match find_repo_root(&pwd){
@@ -197,7 +152,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                         let remote_file=patches_dir(path).join(&hash).with_extension("cbor");
                         let local_file=local_patches.join(&hash).with_extension("cbor");
                         if metadata(&local_file).is_err() {
-                            try!(hard_link(&remote_file,&local_file).map_err(Error::IoError));
+                            try!(hard_link(&remote_file,&local_file));
                         }
                         Ok(local_file)
                     },
@@ -210,17 +165,17 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             fn apply_patches(repo:&mut Repository, branch:&[u8], remote:&Remote, local_patches:&Path, patch_hash:&[u8], patches_were_applied:&mut bool)->Result<(),Error>{
                 // download this patch
                 //println!("has patch : {:?}",patch_hash);
-                if !try!(repo.has_patch(branch,patch_hash).map_err(Error::Repository)) {
+                if !try!(repo.has_patch(branch,patch_hash)) {
                     let local_patch=try!(download_patch(remote,local_patches,patch_hash));
                     let mut buffer = BufReader::new(try!(File::open(local_patch)));
-                    let patch=try!(Patch::from_reader(&mut buffer).map_err(Error::Repository));
+                    let patch=try!(Patch::from_reader(&mut buffer));
                     for dep in patch.dependencies.iter() {
                         try!(apply_patches(repo,branch,remote,local_patches,&dep,patches_were_applied))
                     }
                     let mut internal=[0;HASH_SIZE];
                     repo.new_internal(&mut internal);
                     //println!("pulling and applying patch {}",to_hex(patch_hash));
-                    repo.apply(&patch, &internal);
+                    try!(repo.apply(&patch, &internal));
                     *patches_were_applied=true;
                     repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);
                     repo.register_hash(&internal[..],patch_hash);
@@ -230,13 +185,13 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 }
             }
             let repo_dir=pristine_dir(r);
-            let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
+            let mut repo = try!(Repository::new(&repo_dir));
             let local_patches=patches_dir(r);
             let current_branch=repo.get_current_branch().to_vec();
             let pending={
                 let (changes,_)= {
-                    let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                    try!(repo.record(&r).map_err(Error::Repository))
+                    let mut repo = try!(Repository::new(&repo_dir));
+                    try!(repo.record(&r))
                 };
                 Patch { changes:changes,
                         dependencies:vec!() }
@@ -246,8 +201,8 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 try!(apply_patches(&mut repo,&current_branch,&args.remote,&local_patches,p,&mut patches_were_applied))
             }
             if patches_were_applied {
-                repo.write_changes_file(&branch_changes_file(r,&current_branch));
-                repo.output_repository(&r,&pending);
+                try!(repo.write_changes_file(&branch_changes_file(r,&current_branch)));
+                try!(repo.output_repository(&r,&pending));
             }
             if cfg!(debug_assertions){
                 let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());

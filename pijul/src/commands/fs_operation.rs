@@ -4,7 +4,7 @@ extern crate libpijul;
 use clap::ArgMatches;
 use self::libpijul::{Repository};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
-use std::path::{Path};
+use std::path::{Path,PathBuf};
 use std::fs::{metadata};
 use commands::error;
 
@@ -29,7 +29,7 @@ pub enum Operation { Add,
                      Remove }
 
 pub fn run<'a>(args : &Params<'a>, op : Operation)
-               -> Result<Option<()>, error::Error<'a>> {
+               -> Result<Option<()>, error::Error> {
     let files = &args.touched_files;
     let pwd = args.repository;
     match find_repo_root(&pwd){
@@ -43,8 +43,11 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                         if iter_after((pwd.join(*file)).components(), r.components()).is_none() {
                             return Err(error::Error::NotInARepository)
                         },
-                    Err(_) =>
-                        return Err(error::Error::PathNotFound(*file))
+                    Err(_) => {
+                        let mut p=PathBuf::new();
+                        p.push(*file);
+                        return Err(error::Error::PathNotFound(p));
+                    }
                 }
             }
             for file in &files[..] {

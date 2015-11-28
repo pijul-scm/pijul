@@ -16,7 +16,6 @@
   You should have received a copy of the GNU Affero General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use commands::fs_operation;
 use commands::StaticSubcommand;
 use clap::{SubCommand, ArgMatches,Arg};
 extern crate libpijul;
@@ -47,7 +46,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
     Params { repository:Path::new(args.value_of("repository").unwrap_or(".")) }
 }
 
-pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error<'a>> {
+pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error> {
     let pwd = args.repository;
     match find_repo_root(&pwd){
         None => return Err(error::Error::NotInARepository),

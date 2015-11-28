@@ -19,9 +19,7 @@
 extern crate clap;
 use clap::{SubCommand, Arg, ArgMatches};
 use std::path::Path;
-use std::io;
-use std::{fmt,error};
-
+use commands::error::Error;
 use commands::StaticSubcommand;
 extern crate libpijul;
 use self::libpijul::fs_representation;
@@ -49,64 +47,17 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
     }
 }
 
-#[derive(Debug)]
-pub enum Error {
-    InARepository,
-    IoError(io::Error)
-}
-
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Error::InARepository => write!(f, "In a repository"),
-            Error::IoError(ref err) => write!(f, "IO error: {}", err),
-        }
-    }
-}
-
-impl error::Error for Error {
-    fn description(&self) -> &str {
-        match *self {
-            Error::InARepository => "already in a repository",
-            Error::IoError(ref err) => error::Error::description(err),
-        }
-    }
-
-    fn cause(&self) -> Option<&error::Error> {
-        match *self {
-            Error::IoError(ref err) => Some(err),
-            Error::InARepository => None
-        }
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Error {
-        Error::IoError(err)
-    }
-}
-
 pub fn run (p : &Params) -> Result<(), Error> {
     let dir = p.location;
-    match fs_representation::find_repo_root(&dir) {
-        Some(d) =>
-            {
-                if p.allow_nested
-                {
-                    try!(fs_representation::create(&dir));
-                    Ok(())
-                }
-                else
-                {
-                    let err_string = format!("Found repository at {}, refusing to create a nested repository.", d.display());
-                    Err(Error::InARepository)
-                }
-            }
-        None =>
-        {
+    if fs_representation::find_repo_root(&dir).is_some() {
+        if p.allow_nested {
             try!(fs_representation::create(&dir));
             Ok(())
+        } else {
+            Err(Error::InARepository)
         }
+    } else {
+        try!(fs_representation::create(&dir));
+        Ok(())
     }
 }

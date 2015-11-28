@@ -21,18 +21,15 @@ use clap::{SubCommand, ArgMatches, Arg};
 
 extern crate libpijul;
 use commands::StaticSubcommand;
-use self::libpijul::{Repository,Patch,HASH_SIZE};
+use self::libpijul::{Repository};
+use self::libpijul::patch::{Patch,HASH_SIZE};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root, branch_changes_file};
 use std::sync::Arc;
 
-use std::io;
-use std::fmt;
-use std::error;
 use std::thread;
 
+use commands::error::Error;
 
-use std::io::{BufWriter};
-use std::fs::File;
 extern crate rand;
 use std::path::{Path};
 
@@ -56,56 +53,6 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 {
     Params { repository : Path::new(args.value_of("repository").unwrap_or("."))}
 }
-
-#[derive(Debug)]
-pub enum Error {
-    NotInARepository,
-    IoError(io::Error),
-    //Serde(serde_cbor::error::Error),
-    SavingPatch,
-    Repository(libpijul::Error)
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Error::NotInARepository => write!(f, "Not in a repository"),
-            Error::IoError(ref err) => write!(f, "IO error: {}", err),
-            //Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
-            Error::Repository(ref err) => write!(f, "Repository: {}", err),
-            Error::SavingPatch => write!(f, "Patch saving error"),
-        }
-    }
-}
-
-impl error::Error for Error {
-    fn description(&self) -> &str {
-        match *self {
-            Error::NotInARepository => "not in a repository",
-            Error::IoError(ref err) => error::Error::description(err),
-            //Error::Serde(ref err) => serde_cbor::error::Error::description(err),
-            Error::Repository(ref err) => libpijul::Error::description(err),
-            Error::SavingPatch => "saving patch"
-        }
-    }
-
-    fn cause(&self) -> Option<&error::Error> {
-        match *self {
-            Error::IoError(ref err) => Some(err),
-            //Error::Serde(ref err) => Some(err),
-            Error::Repository(ref err) => Some(err),
-            Error::NotInARepository => None,
-            Error::SavingPatch => None
-        }
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Error {
-        Error::IoError(err)
-    }
-}
-
 
 pub fn run(params : &Params) -> Result<Option<()>, Error> {
     match find_repo_root(&params.repository){
@@ -173,7 +120,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                         Err(Error::Repository(x))
                     },
                     Err(_)=>{
-                        Err(Error::SavingPatch)
+                        panic!("saving patch")
                     }
                 }
             }

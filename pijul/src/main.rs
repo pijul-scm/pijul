@@ -7,26 +7,7 @@ extern crate log;
 extern crate libpijul;
 mod commands;
 
-use std::path::Path;
-
-use log::*;
 extern crate env_logger;
-
-/*
-struct SimpleLogger;
-
-impl log::Log for SimpleLogger {
-    fn enabled(&self, metadata: &LogMetadata) -> bool {
-        metadata.level() <= LogLevel::Info
-    }
-
-    fn log(&self, record: &LogRecord) {
-        if self.enabled(record.metadata()) {
-            println!("{} - {}", record.level(), record.args());
-        }
-    }
-}
-*/
 
 macro_rules! pijul_subcommand_dispatch {
     ($p:expr => $($subcommand_name:expr => $subcommand:ident),*) => {{
@@ -50,12 +31,6 @@ macro_rules! pijul_subcommand_dispatch {
 }
 
 fn main() {
-    /*
-    log::set_logger(|max_log_level| {
-        max_log_level.set(LogLevelFilter::Info);
-        Box::new(SimpleLogger)
-    }).unwrap();
-     */
     env_logger::init().unwrap();
     let app = clap_app!(
         pijul =>

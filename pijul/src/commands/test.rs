@@ -1,11 +1,8 @@
 #[test]
 extern crate tempdir;
 
-use std::io;
-use std::fs;
-use commands::{init, info, record, add, remove};
-use std::error::Error;
-use commands::error;
+//use commands::{init, info, record, add, remove};
+//use commands::error;
 
 #[test]
 fn init_creates_repo() -> ()

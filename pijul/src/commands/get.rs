@@ -20,12 +20,11 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches,Arg};
 
 use commands::StaticSubcommand;
-use std::fmt;
-use std::error;
 
 use super::pull;
 use super::init;
 
+use commands::error::Error;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -58,39 +57,9 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
     Params { pull_params:x }
 }
 
-#[derive(Debug)]
-pub enum Error{
-    Init(init::Error),
-    Pull(pull::Error)
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Error::Init(ref err) => write!(f, "Init error: {}",err),
-            Error::Pull(ref err) => write!(f, "Pull error: {}", err)
-        }
-    }
-}
-
-impl error::Error for Error {
-    fn description(&self) -> &str {
-        match *self {
-            Error::Init(ref err) => init::Error::description(err),
-            Error::Pull(ref err) => pull::Error::description(err),
-        }
-    }
-
-    fn cause(&self) -> Option<&error::Error> {
-        match *self {
-            Error::Init(ref err) => Some(err),
-            Error::Pull(ref err) => Some(err)
-        }
-    }
-}
 
 pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
-    try!(init::run(&init::Params { location:args.pull_params.repository, allow_nested:false }).map_err(Error::Init));
-    try!(pull::run(&args.pull_params).map_err(Error::Pull));
+    try!(init::run(&init::Params { location:args.pull_params.repository, allow_nested:false }));
+    try!(pull::run(&args.pull_params));
     Ok(())
 }

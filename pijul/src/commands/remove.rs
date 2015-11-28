@@ -45,6 +45,6 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
 }
 
 
-pub fn run<'a>(args : &Params<'a>) -> Result<Option<()>, error::Error<'a>> {
+pub fn run<'a>(args : &Params<'a>) -> Result<Option<()>, error::Error> {
     fs_operation::run(args, Operation::Remove)
 }
