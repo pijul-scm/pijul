@@ -28,9 +28,8 @@ use std::sync::Arc;
 
 use std::thread;
 
+use commands::error::Error;
 
-use std::io::{BufWriter};
-use std::fs::File;
 extern crate rand;
 use std::path::{Path};
 

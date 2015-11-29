@@ -21,25 +21,12 @@ use clap::{SubCommand, ArgMatches,Arg};
 
 use commands::StaticSubcommand;
 extern crate libpijul;
-use self::libpijul::{Repository,Patch,DEFAULT_BRANCH,HASH_SIZE};
-use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root, patches_dir, branch_changes_file,to_hex,read_changes};
-use std::io;
-use std::fmt;
-use std::error;
-use std::path::{Path,PathBuf};
-use std::io::{BufWriter,BufReader};
-use std::fs::File;
-use std::collections::hash_set::{HashSet};
-use std::collections::hash_map::{HashMap};
-use std::fs::{hard_link,metadata};
+use self::libpijul::{Repository};
+use self::libpijul::patch::{Patch};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
+use std::path::{Path};
 
-/*
-extern crate ssh2;
-use std::net::TcpStream;
-use self::ssh2::Session;
-*/
-extern crate regex;
-use self::regex::Regex;
+use commands::error;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -59,60 +46,15 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
     Params { repository : repository }
 }
 
-#[derive(Debug)]
-pub enum Error{
-    NotInARepository,
-    IoError(io::Error),
-    //Serde(serde_cbor::error::Error),
-    Repository(libpijul::Error)
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Error::NotInARepository => write!(f, "Not in a repository"),
-            Error::IoError(ref err) => write!(f, "IO error: {}", err),
-            //Error::Serde(ref err) => write!(f, "Serialization error: {}", err),
-            Error::Repository(ref err) => write!(f, "Repository error: {}", err)
-        }
-    }
-}
-
-impl error::Error for Error {
-    fn description(&self) -> &str {
-        match *self {
-            Error::NotInARepository => "not in a repository",
-            Error::IoError(ref err) => error::Error::description(err),
-            //Error::Serde(ref err) => serde_cbor::error::Error::description(err),
-            Error::Repository(ref err) => libpijul::Error::description(err)
-        }
-    }
-
-    fn cause(&self) -> Option<&error::Error> {
-        match *self {
-            Error::IoError(ref err) => Some(err),
-            Error::NotInARepository => None,
-            //Error::Serde(ref err) => Some(err),
-            Error::Repository(ref err) => Some(err)
-        }
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Error {
-        Error::IoError(err)
-    }
-}
-
-pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
+pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error> {
     let pwd = args.repository;
     match find_repo_root(&pwd){
         None => return Err(error::Error::NotInARepository),
         Some(r) =>
         {
             let repo_dir=pristine_dir(r);
-            let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-            repo.output_repository(&r,&Patch::empty());
+            let mut repo = try!(Repository::new(&repo_dir));
+            try!(repo.output_repository(&r,&Patch::empty()));
             Ok(())
         }
     }

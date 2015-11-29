@@ -50,7 +50,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 pub fn run (p : &Params) -> Result<(), Error> {
     let dir = p.location;
     match fs_representation::find_repo_root(&dir) {
-        Some(d) =>
+        Some(_) =>
             {
                 if p.allow_nested
                 {
@@ -59,7 +59,6 @@ pub fn run (p : &Params) -> Result<(), Error> {
                 }
                 else
                 {
-                    let err_string = format!("Found repository at {}, refusing to create a nested repository.", d.display());
                     Err(Error::InARepository)
                 }
             }
@@ -67,11 +66,6 @@ pub fn run (p : &Params) -> Result<(), Error> {
         {
             try!(fs_representation::create(&dir));
             Ok(())
-        } else {
-            Err(Error::InARepository)
         }
-    } else {
-        try!(fs_representation::create(&dir));
-        Ok(())
     }
 }

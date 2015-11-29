@@ -1,7 +1,8 @@
 extern crate tempdir;
 
-//use commands::{init, info, record, add, remove};
-//use commands::error;
+use commands::{init, info, record, add, remove};
+use commands::error;
+use std::fs;
 
 #[test]
 fn init_creates_repo() -> ()
@@ -24,7 +25,7 @@ fn init_nested_forbidden() {
     match init::run(&sub_init_params) {
         Ok(_) => panic!("Creating a forbidden nested repository"),
 
-        Err(init::Error::InARepository) => (),
+        Err(error::Error::InARepository) => (),
         Err(_) => panic!("Failed in a funky way while creating a nested repository")       
     }
 }
