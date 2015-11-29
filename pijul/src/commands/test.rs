@@ -1,6 +1,6 @@
 extern crate tempdir;
 
-use commands::{init, info, record, add, remove};
+use commands::{init, info, record, add, remove, pull};
 use commands::error;
 use std::fs;
 
@@ -113,21 +113,32 @@ fn no_remove_without_add() {
     }
 }
 
-// #[test]
-// fn add_record_remove_pull() {
-//     let dir = tempdir::TempDir::new("pijul").unwrap();
-//     let init_params = init::Params { location : &dir.path(), allow_nested : false};
-//     init::run(&init_params).unwrap();
-//     let fpath = &dir.path().join("toto");
-//     let file = fs::File::create(&fpath).unwrap();
-//     let add_params = add::Params { repository : &dir.path(), added_files : vec![&fpath] };
-//     match add::run(&add_params).unwrap() {
-//         Some (()) => (),
-//         None => panic!("no file added")        
-//     };
-//     let record_params = record::Params { repository : &dir.path() };
-//     match record::run(&record_params).unwrap() {
-//         None => panic!("file add is not going to be recorded"),
-//         Some(()) => ()
-//     }
-// }
+#[test]
+fn add_record_pull() {
+    let dir = tempdir::TempDir::new("pijul").unwrap();
+    let dir_a = &dir.path().join("a");
+    let dir_b = &dir.path().join("b");
+    fs::create_dir(dir_a);
+    fs::create_dir(dir_b);
+    let init_params_a = init::Params { location : &dir_a, allow_nested : false};
+    let init_params_b = init::Params { location : &dir_b, allow_nested : false};
+    init::run(&init_params_a).unwrap();
+    init::run(&init_params_b).unwrap();
+    let fpath = &dir_a.join("toto");
+    let file = fs::File::create(&fpath).unwrap();
+    let add_params = add::Params { repository : &dir_a,
+                                   touched_files : vec![&fpath] };
+    match add::run(&add_params).unwrap() {
+        Some (()) => (),
+        None => panic!("no file added")        
+    };
+    let record_params = record::Params { repository : &dir_a };
+    match record::run(&record_params).unwrap() {
+        None => panic!("file add is not going to be recorded"),
+        Some(()) => ()
+    }
+    let pull_params = pull::Params { repository : &dir_b,
+                                     remote_id : "test_repository_a",
+                                     remote : pull::Remote::Local{ path: &dir_a}};
+    pull::run(&pull_params).unwrap()
+}
