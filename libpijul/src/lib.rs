@@ -794,25 +794,19 @@ impl Repository {
     /// ("result").
     pub fn new_internal(&mut self,result:&mut[u8]) {
         let curs=Cursor::new(self.mdb_txn,self.dbi_external).unwrap();
-        let root_key=&ROOT_KEY[0..HASH_SIZE];
-        let last=
-            unsafe {
-                let mut k:MDB_val=std::mem::zeroed();
-                let mut v:MDB_val=std::mem::zeroed();
-                let e=mdb_cursor_get(curs.cursor,&mut k,&mut v, Op::MDB_LAST as c_uint);
-                if e==0 && (k.mv_size as usize)>=HASH_SIZE {
-                    slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize)
-                } else {
-                    root_key
-                }
-            };
-        fn create_new(r:&mut [u8],last:&[u8],i:usize){
-            if i>0 {
-                if last[i]==0xff { r[i]=0; create_new(r,last,i-1) }
-                else { r[i]=last[i]+1 }
+        fn generate(result:&mut[u8]){
+            for i in 0..result.len() {
+                result[i]=rand::random()
             }
         }
-        create_new(result,last,last.len()-1);
+        generate(result);
+        loop {
+            if ! unsafe {mdb::get(self.mdb_txn,self.dbi_external,result).is_ok() } {
+                break
+            } else {
+                generate(result);
+            }
+        }
     }
 
     pub fn register_hash(&mut self,internal:&[u8],external:&[u8]){
@@ -826,36 +820,29 @@ impl Repository {
 
 
 
-    fn delete_edges<'a>(&self, edges:&mut Vec<Edge>, key:&'a[u8]){
+    fn delete_edges<'a>(&self, edges:&mut Vec<Edge>, key:&'a[u8],flag:u8){
         // Get external key for "key"
         //println!("delete key: {}",to_hex(key));
         let ext_key=self.external_key(key);
-        //println!("/ext");
-        // Then collect edges to delete
         let curs=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-        for c in [PARENT_EDGE, PARENT_EDGE|FOLDER_EDGE].iter() {
-            unsafe {
-                let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
-                let mut v = MDB_val{ mv_data:(c as *const c_uchar) as *const c_void, mv_size:1 };
-                let mut e= mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_GET_BOTH_RANGE as c_uint);
-                // take all parent or folder-parent edges:
-                //println!("e={}",e);
-                while e==0 && v.mv_size>0 && *(v.mv_data as (*mut c_uchar)) == *c {
-                    if (v.mv_size as usize) < 1+HASH_SIZE+KEY_SIZE {
-                        panic!("Wrong encoding in delete_edges")
-                    }
-                    // look up the external hash up.
-                    let pv=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1), KEY_SIZE as usize);
-                    let pp=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1+KEY_SIZE as isize), HASH_SIZE as usize);
-                    //println!("get key pv");
-                    let _=self.external_key(pv);
-                    //println!("get key pp");
-                    let _=self.external_key(pp);
-                    //println!("pushing");
-                    edges.push(Edge { from:ext_key.clone(), to:self.external_key(pv), flag:(*c)^DELETED_EDGE, introduced_by:self.external_key(pp) });
-                    //println!("/pushed");
-                    e= mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_NEXT_DUP as c_uint);
+        //for c in [PARENT_EDGE, PARENT_EDGE|FOLDER_EDGE].iter() {
+        unsafe {
+            let flag=[flag];
+            let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
+            let mut v = MDB_val{ mv_data:flag.as_ptr() as *const c_void, mv_size:1 };
+            let mut e= mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_GET_BOTH_RANGE as c_uint);
+            while e==0 && v.mv_size>0 && *(v.mv_data as (*mut c_uchar)) == flag[0] {
+                if (v.mv_size as usize) < 1+HASH_SIZE+KEY_SIZE {
+                    panic!("Wrong encoding in delete_edges")
                 }
+                // look up the external hash.
+                let pv=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1), KEY_SIZE as usize);
+                let pp=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1+KEY_SIZE as isize), HASH_SIZE as usize);
+                edges.push(Edge { from:ext_key.clone(), to:self.external_key(pv), introduced_by:self.external_key(pp) });
+
+                k.mv_data=key.as_ptr() as *const c_void;
+                k.mv_size=key.len() as size_t;
+                e=mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_NEXT_DUP as c_uint);
             }
         }
     }
@@ -908,9 +895,9 @@ impl Repository {
                 let mut edges=Vec::with_capacity(lines.len());
                 for i in 0..lines.len() {
                     //unsafe {println!("- {}",std::str::from_utf8_unchecked(repo.contents(lines[i])));}
-                    repo.delete_edges(&mut edges,lines[i])
+                    repo.delete_edges(&mut edges,lines[i],PARENT_EDGE)
                 }
-                actions.push(Change::Edges{edges:edges})
+                actions.push(Change::Edges{edges:edges,flag:PARENT_EDGE|DELETED_EDGE})
             }
             let mut oi=None;
             let mut oj=None;
@@ -1077,18 +1064,17 @@ impl Repository {
                         let mut edges=Vec::new();
                         // Now take all grandparents of l2, delete them.
                         let mut curs_parents=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                        for parent in CursIter::new(&mut curs_parents,&current_node[3..],FOLDER_EDGE,true) {
+                        for parent in CursIter::new(&mut curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true) {
                             let mut curs_grandparents=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                            for grandparent in CursIter::new(&mut curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE,true) {
+                            for grandparent in CursIter::new(&mut curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true) {
                                 edges.push(Edge {
                                     from:self.external_key(&parent),
                                     to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
-                                    flag:grandparent[0],
                                     introduced_by:self.external_key(&grandparent[1+KEY_SIZE..])
                                 });
                             }
                         }
-                        actions.push(Change::Edges{edges:edges});
+                        actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
 
                         let mut name=Vec::with_capacity(basename.len()+2);
                         name.push(((int_attr >> 8) & 0xff) as u8);
@@ -1112,24 +1098,22 @@ impl Repository {
                         let mut edges=Vec::new();
                         // Now take all grandparents of l2, delete them.
                         let mut curs_parents=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                        for parent in CursIter::new(&mut curs_parents,&current_node[3..],FOLDER_EDGE,true) {
+                        for parent in CursIter::new(&mut curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true) {
                             edges.push(Edge {
                                 from:self.external_key(&current_node[3..]),
                                 to:self.external_key(&parent[1..(1+KEY_SIZE)]),
-                                flag:parent[0],
                                 introduced_by:self.external_key(&parent[1+KEY_SIZE..])
                             });
                             let mut curs_grandparents=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                            for grandparent in CursIter::new(&mut curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE,true) {
+                            for grandparent in CursIter::new(&mut curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true) {
                                 edges.push(Edge {
                                     from:self.external_key(&parent),
                                     to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
-                                    flag:grandparent[0],
                                     introduced_by:self.external_key(&grandparent[1+KEY_SIZE..])
                                 });
                             }
                         }
-                        actions.push(Change::Edges{edges:edges});
+                        actions.push(Change::Edges{edges:edges,flag:FOLDER_EDGE|PARENT_EDGE|DELETED_EDGE});
                         unimplemented!() // Remove all known vertices from this file, for else "missing context" conflicts will not be detected.
                     } else if current_node[0]==0 {
                         //println!("retrieving");
@@ -1259,16 +1243,18 @@ impl Repository {
         let mut children=Vec::new();
         let mut parents=Vec::new();
         let zero:[u8;HASH_SIZE]=[0;HASH_SIZE];
+        let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+        let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+        let mut time_newnodes=0f64;
+        let mut time_edges=0f64;
         for ch in changes {
             match *ch {
-                Change::Edges{ref edges} =>
+                Change::Edges{ref flag, ref edges} => {
+                    let time0=time::precise_time_s();
                     for e in edges {
                         // First remove the deleted version of the edge
-                        let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-                        let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-
-                        pu[0]=e.flag ^ DELETED_EDGE ^ PARENT_EDGE;
-                        pv[0]=e.flag ^ DELETED_EDGE;
+                        pu[0]=*flag ^ DELETED_EDGE ^ PARENT_EDGE;
+                        pv[0]=*flag ^ DELETED_EDGE;
                         unsafe {
                             let u=self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
                             copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize),
@@ -1293,56 +1279,79 @@ impl Repository {
                             let _=mdb::del(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)], Some(&pv));
                             let _=mdb::del(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)], Some(&pu));
                             // Then add the new edges
-                            pu[0]=e.flag^PARENT_EDGE;
-                            pv[0]=e.flag;
+                            pu[0]=*flag^PARENT_EDGE;
+                            pv[0]=*flag;
                             //println!("new edge: {}\n          {}",to_hex(&pu),to_hex(&pv));
                             mdb::put(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
                             mdb::put(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
                         }
+                    }
+                    // Now, we have assumed that edges is connected. Let's pseudo-reconnect things.
+                    if flag & DELETED_EDGE != 0 {
 
+                        let (pu,pv) = {
+                            let e=edges.first().unwrap();
+                            unsafe {
+                                let u=self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
+                                copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize),
+                                                    pu.as_mut_ptr().offset(1+HASH_SIZE as isize), LINE_SIZE);
+                                copy_nonoverlapping(u.as_ptr(),pu.as_mut_ptr().offset(1), HASH_SIZE);
 
-                        if e.flag & DELETED_EDGE != 0 {
-                            let (pu,pv) = if e.flag&PARENT_EDGE!=0 { (&pv[1..(1+KEY_SIZE)],&pu[1..(1+KEY_SIZE)]) }
-                            else { (&pu[1..(1+KEY_SIZE)],&pv[1..(1+KEY_SIZE)]) };
-                            // Reconnect !
-                            // Connect all alive ascendants of pv to all alive descendants of pv.
-                            children.clear();
-                            parents.clear();
-                            for w in CursIter::new(&mut cursor,pv,0,true) {
-                                if is_alive(&mut alive, &w[1..(1+KEY_SIZE)]) {
-                                    children.push(PSEUDO_EDGE);
-                                    children.extend(&w[1..(1+KEY_SIZE)]);
-                                    children.extend(&zero[..]);
-                                }
+                                let e=edges.last().unwrap();
+                                let v=self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]).unwrap();
+                                copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize),
+                                                    pv.as_mut_ptr().offset(1+HASH_SIZE as isize), LINE_SIZE);
+                                copy_nonoverlapping(v.as_ptr(),pv.as_mut_ptr().offset(1), HASH_SIZE);
                             }
-                            if is_alive(&mut alive, pu) {
-                                parents.push(PSEUDO_EDGE);
-                                parents.extend(pu);
-                                parents.extend(&zero[..]);
+                            if flag&PARENT_EDGE != 0 {
+                                (&pv[1..(1+KEY_SIZE)],&pu[1..(1+KEY_SIZE)])
+                            } else {
+                                (&pu[1..(1+KEY_SIZE)],&pv[1..(1+KEY_SIZE)])
                             }
-                            for w in CursIter::new(&mut cursor,pv,PARENT_EDGE,true) {
-                                if is_alive(&mut alive, &w[1..(1+KEY_SIZE)]) {
-                                    parents.push(PSEUDO_EDGE);
-                                    parents.extend(&w[1..(1+KEY_SIZE)]);
-                                    parents.extend(&zero[..]);
-                                }
-                            }
-                            let mut i=0;
-                            while i<parents.len() {
-                                let mut j=0;
-                                while j<children.len() {
-                                    //println!("reconnecting {}",to_hex(&parents[i..(i+1+HASH_SIZE+KEY_SIZE)]));
-                                    //to_hex(&children[j..(j+KEY_SIZE)]));
-                                    self.add_pseudo_edge(&parents[i..(i+1+KEY_SIZE+HASH_SIZE)],
-                                                         &children[j..(j+1+KEY_SIZE+HASH_SIZE)]);
-                                    j+=1+KEY_SIZE+HASH_SIZE
-                                }
-                                i+=1+KEY_SIZE+HASH_SIZE
+                        };
+                        // Reconnect !
+                        // Connect all alive ascendants of pv to all alive descendants of pv.
+                        children.clear();
+                        parents.clear();
+                        for w in CursIter::new(&mut cursor,pv,0,true) {
+                            if is_alive(&mut alive, &w[1..(1+KEY_SIZE)]) {
+                                children.push(PSEUDO_EDGE);
+                                children.extend(&w[1..(1+KEY_SIZE)]);
+                                children.extend(&zero[..]);
                             }
                         }
-                    },
+                        if is_alive(&mut alive, pu) {
+                            parents.push(PSEUDO_EDGE|PARENT_EDGE);
+                            parents.extend(pu);
+                            parents.extend(&zero[..]);
+                        }
+                        for w in CursIter::new(&mut cursor,pv,PARENT_EDGE,true) {
+                            if is_alive(&mut alive, &w[1..(1+KEY_SIZE)]) {
+                                parents.push(PSEUDO_EDGE|PARENT_EDGE);
+                                parents.extend(&w[1..(1+KEY_SIZE)]);
+                                parents.extend(&zero[..]);
+                            }
+                        }
+                        let mut i=0;
+                        while i<parents.len() {
+                            let mut j=0;
+                            while j<children.len() {
+                                //println!("reconnecting {}",to_hex(&parents[i..(i+1+HASH_SIZE+KEY_SIZE)]));
+                                //to_hex(&children[j..(j+KEY_SIZE)]));
+                                self.add_pseudo_edge(&mut alive,
+                                                     &parents[i..(i+1+KEY_SIZE+HASH_SIZE)],
+                                                     &mut children[j..(j+1+KEY_SIZE+HASH_SIZE)]);
+                                j+=1+KEY_SIZE+HASH_SIZE
+                            }
+                            i+=1+KEY_SIZE+HASH_SIZE
+                        }
+                    }
+                    let time2=time::precise_time_s();
+                    time_edges += (time2-time0);
+                },
                 Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
                     assert!(!nodes.is_empty());
+                    let time0=time::precise_time_s();
                     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut lnum0= *line_num;
@@ -1419,9 +1428,12 @@ impl Repository {
                             mdb::put(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
                         }
                     }
+                    let time1=time::precise_time_s();
+                    time_newnodes += (time1-time0);
                 }
             }
         }
+        info!(target:"libpijul","edges: {}, newnodes: {}", time_edges,time_newnodes);
     }
 
     pub fn has_patch(&self, branch:&[u8], hash:&[u8])->Result<bool,Error>{
@@ -1445,12 +1457,43 @@ impl Repository {
             }
         }
     }
-    fn add_pseudo_edge(&mut self,pu:&[u8],pv:&[u8]){
+    // requires pu to be KEY_SIZE, pv to be 1+KEY_SIZE+HASH_SIZE
+    fn connected(&mut self,curs:&mut Cursor,pu:&[u8],pv:&mut [u8])->bool{
+        unsafe {
+            let pv_0=pv[0];
+            pv[0]=0;
+            let mut k= MDB_val { mv_data:pu.as_ptr() as *const c_void, mv_size:pu.len() as size_t };
+            let mut v= MDB_val { mv_data:pv.as_ptr() as *const c_void, mv_size:(1+KEY_SIZE) as size_t };
+            let e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_GET_BOTH_RANGE as c_uint);
+            if e==0 {
+                let x=(memcmp(pv.as_ptr() as *const c_void,
+                              v.mv_data,
+                              (1+KEY_SIZE) as size_t));
+                pv[0]=pv_0;
+                x == 0
+            } else {
+                pv[0]=PSEUDO_EDGE;
+                k.mv_data=pu.as_ptr() as *const c_void;
+                k.mv_size=pu.len() as size_t;
+                v.mv_data=pv.as_ptr() as *const c_void;
+                v.mv_size=(1+KEY_SIZE) as size_t;
+                let e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_GET_BOTH_RANGE as c_uint);
+                let x=(memcmp(pv.as_ptr() as *const c_void,
+                              v.mv_data,
+                              (1+KEY_SIZE) as size_t) ) == 0;
+                pv[0]=pv_0;
+                x
+            }
+        }
+    }
+    fn add_pseudo_edge(&mut self,curs:&mut Cursor,pu:&[u8],pv:&mut [u8]){
         unsafe {
             //copy_nonoverlapping(internal.as_ptr(),u.as_mut_ptr().offset(1+KEY_SIZE as isize),HASH_SIZE);
             //copy_nonoverlapping(internal.as_ptr(),v.as_mut_ptr().offset(1+KEY_SIZE as isize),HASH_SIZE);
-            mdb::put(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
-            mdb::put(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
+            if ! self.connected(curs,&pu[1..(1+KEY_SIZE)],pv) {
+                mdb::put(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
+                mdb::put(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
+            }
         }
     }
     fn kill_obsolete_pseudo_edges(&mut self,cursor:&mut Cursor,pv:&[u8]) {
@@ -1503,7 +1546,7 @@ impl Repository {
         //println!("/unsafe apply");
         for ch in patch.changes.iter() {
             match *ch {
-                Change::Edges{ref edges} =>{
+                Change::Edges{ref edges,ref flag} =>{
                     for e in edges {
                         let hu=self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
                         let hv=self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]).unwrap();
@@ -1517,10 +1560,10 @@ impl Repository {
                             copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize),
                                                 v.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
                         }
-                        if e.flag&DELETED_EDGE!=0 {
-                            let (pu,pv)= if e.flag&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
+                        if (*flag)&DELETED_EDGE!=0 {
+                            let (pu,pv)= if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
                             let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                            if e.flag&FOLDER_EDGE!=0 {
+                            if (*flag)&FOLDER_EDGE!=0 {
                                 self.connect_down_folders(pu,pv,&internal)
                             } else {
                                 // Now, kill obsolete pseudo edges
@@ -1529,13 +1572,13 @@ impl Repository {
                                 }
                             }
                         } else {
-                            let (pu,pv) = if e.flag&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
+                            let (pu,pv) = if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
                             let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
                             if !is_alive(&mut cursor,&pu[..]) {
                                 //panic!("should not be called here");
                                 self.connect_up(pu,pv,&internal);
                             }
-                            if e.flag&FOLDER_EDGE == 0 {
+                            if (*flag)&FOLDER_EDGE == 0 {
                                 // Now connect v to alive descendants of v (following deleted edges from v).
                                 let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
                                 let mut children=Vec::new();

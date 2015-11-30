@@ -115,7 +115,7 @@ pub unsafe fn del(txn:*mut MdbTxn,dbi:MdbDbi,key:&[u8],val:Option<&[u8]>)->Resul
 //const MDB_REVERSEKEY: c_uint = 0x02;
 pub const MDB_DUPSORT: c_uint = 0x04;
 //const MDB_INTEGERKEY: c_uint = 0x08;
-//const MDB_DUPFIXED: c_uint = 0x10;
+pub const MDB_DUPFIXED: c_uint = 0x10;
 //const MDB_INTEGERDUP: c_uint = 0x20;
 //const MDB_REVERSEDUP: c_uint =  0x40;
 pub const MDB_CREATE: c_uint = 0x40000;

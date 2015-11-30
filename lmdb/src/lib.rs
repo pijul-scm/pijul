@@ -78,9 +78,9 @@ pub struct Env { env:*mut MdbEnv }
 
 pub struct Txn<'a> { txn:*mut MdbTxn,env:PhantomData<&'a Env> }
 
-fn txn<'a>(env:&'a Env,parent:*mut MdbTxn)->Result<Txn<'a>,Error> {
+unsafe fn txn<'a,'b>(env:&'a Env,parent:*mut MdbTxn,flags:usize)->Result<Txn<'b>,Error> {
     let txn=ptr::null_mut();
-    let e= unsafe {mdb_txn_begin(env.env,parent,0,std::mem::transmute(&txn)) };
+    let e= mdb_txn_begin(env.env,parent,flags as c_uint,std::mem::transmute(&txn));
     if e==0 {
         Ok(Txn { txn:txn,env:PhantomData })
     } else {
@@ -89,16 +89,16 @@ fn txn<'a>(env:&'a Env,parent:*mut MdbTxn)->Result<Txn<'a>,Error> {
 }
 pub struct Env_ { env:*mut MdbEnv }
 impl Env_ {
-    pub fn new()->Result<Env_,c_int> {
+    pub fn new()->Result<Env_,std::io::Error> {
         let env=ptr::null_mut();
         let e= unsafe {mdb_env_create(std::mem::transmute(&env)) };
         if e==0 {
             Ok(Env_ { env:env })
         } else {
-            Err(e)
+            Err(Error::from_raw_os_error(e))
         }
     }
-    pub fn open(self,path:&Path,flags:c_uint,mode:mode_t)->Result<Env,c_int> {
+    pub fn open(self,path:&Path,flags:c_uint,mode:mode_t)->Result<Env,std::io::Error> {
         unsafe {
             let e=mdb_env_open(self.env,path.to_str().unwrap().as_ptr() as *const c_char,
                                flags,
@@ -106,7 +106,7 @@ impl Env_ {
             if e==0 {
                 Ok(Env { env:self.env })
             } else {
-                Err(e)
+                Err(std::io::Error::from_raw_os_error(e))
             }
         }
     }
@@ -137,27 +137,38 @@ impl Env_ {
 
 
 impl Env {
-    pub fn txn<'a>(&'a self)->Result<Txn<'a>,Error> {
-        txn(&self,std::ptr::null_mut())
+    pub fn txn<'a>(&'a self,flags:usize)->Result<Txn<'a>,Error> {
+        unsafe { txn(&self,std::ptr::null_mut(),flags) }
+    }
+    pub unsafe fn unsafe_txn<'a,'b>(&'b self,flags:usize)->Result<Txn<'a>,Error> {
+        txn(self,std::ptr::null_mut(),flags)
     }
 }
 
-pub struct Dbi<'a> { dbi:MdbDbi, env:PhantomData<&'a Env> }
+pub struct Dbi { dbi:MdbDbi }
 
 impl <'a>Txn<'a> {
+    pub unsafe fn unsafe_commit(&self) -> Result<(),Error> {
+        let e=mdb_txn_commit(self.txn);
+        if e==0 { Ok(()) } else { Err(Error::from_raw_os_error(e)) }
+    }
     pub fn commit(self)->Result<(),Error> {
         let e=unsafe {mdb_txn_commit(self.txn)};
         if e==0 { Ok(()) } else { Err(Error::from_raw_os_error(e)) }
     }
+    pub unsafe fn unsafe_abort(&self) {
+        mdb_txn_abort(self.txn)
+    }
     pub fn abort(self) {
         unsafe {mdb_txn_abort(self.txn)}
     }
-    pub fn dbi_open(&self,name:&[u8],flag:DbiOpen)->Result<Dbi<'a>,Error> {
+
+    pub fn dbi_open(&self,name:&[u8],flag:DbiOpen)->Result<Dbi,Error> {
         let mut d=0;
         let e=unsafe { mdb_dbi_open(self.txn,name.as_ptr() as *const c_char,flag.bits(),&mut d) };
-        if e==0 { Ok(Dbi { dbi:d, env:self.env }) } else { Err(Error::from_raw_os_error(e)) }
+        if e==0 { Ok(Dbi { dbi:d }) } else { Err(Error::from_raw_os_error(e)) }
     }
-    pub fn get<'b>(&'b self,dbi:&Dbi<'a>,key:&[u8])->Result<Option<&'b[u8]>,Error> {
+    pub fn get<'b>(&'b self,dbi:&Dbi,key:&[u8])->Result<Option<&'b[u8]>,Error> {
         unsafe {
             let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             let mut v=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
@@ -169,7 +180,7 @@ impl <'a>Txn<'a> {
             } else {Err(Error::from_raw_os_error(e))}
         }
     }
-    pub fn put<'b>(&'b mut self,dbi:&Dbi<'a>,key:&[u8],value:&[u8],flags:Put)->Result<(),Error> {
+    pub fn put<'b>(&'b mut self,dbi:&Dbi,key:&[u8],value:&[u8],flags:Put)->Result<(),Error> {
         unsafe {
             let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             let mut v=MDB_val { mv_data:value.as_ptr() as *const c_void, mv_size:value.len() as size_t };
@@ -178,7 +189,7 @@ impl <'a>Txn<'a> {
         }
     }
 
-    pub fn del<'b>(&'b mut self,dbi:&Dbi<'a>,key:&[u8],val:Option<&[u8]>)->Result<bool,std::io::Error> {
+    pub fn del<'b>(&'b mut self,dbi:&Dbi,key:&[u8],val:Option<&[u8]>)->Result<bool,std::io::Error> {
         unsafe {
             let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             let e= match val {
@@ -192,7 +203,7 @@ impl <'a>Txn<'a> {
         }
     }
 
-    pub fn drop<'b>(&'b mut self,dbi:&Dbi<'a>,delete_dbi:bool)->Result<(),std::io::Error> {
+    pub fn drop<'b>(&'b mut self,dbi:&Dbi,delete_dbi:bool)->Result<(),std::io::Error> {
         unsafe {
             let e=mdb_drop(self.txn,dbi.dbi,if delete_dbi { 1 } else { 0 });
             if e==0 { Ok(()) }
@@ -201,12 +212,12 @@ impl <'a>Txn<'a> {
     }
 
 
-    pub fn txn<'b>(&'b self,env:&'a Env)->Result<Txn<'b>,Error> {
-        txn(env,self.txn)
+    pub fn txn<'b>(&'b self,env:&'a Env,flags:usize)->Result<Txn<'b>,Error> {
+        unsafe { txn(env,self.txn,flags) }
     }
 
 
-    pub fn cursor<'b>(&'b mut self,dbi:&Dbi)->Result<Cursor<'b>,std::io::Error> {
+    pub fn cursor<'b>(&'b self,dbi:&Dbi)->Result<Cursor<'b>,std::io::Error> {
         unsafe {
             let curs=ptr::null_mut();
             let e=mdb_cursor_open(self.txn,dbi.dbi,std::mem::transmute(&curs));
@@ -214,9 +225,22 @@ impl <'a>Txn<'a> {
             else { Ok(Cursor { cursor:curs,txn:PhantomData }) }
         }
     }
+
+    pub fn cursor_mut<'b>(&'b mut self,dbi:&Dbi)->Result<MutCursor<'b>,std::io::Error> {
+        unsafe {
+            let curs=ptr::null_mut();
+            let e=mdb_cursor_open(self.txn,dbi.dbi,std::mem::transmute(&curs));
+            if e!=0 { Err(std::io::Error::from_raw_os_error(e)) }
+            else { Ok(MutCursor { cursor:curs,txn:PhantomData }) }
+        }
+    }
 }
 
 pub struct Cursor<'a> {
+    pub cursor:*mut MdbCursor,
+    txn:PhantomData<&'a Txn<'a>>
+}
+pub struct MutCursor<'a> {
     pub cursor:*mut MdbCursor,
     txn:PhantomData<&'a Txn<'a>>
 }
@@ -240,22 +264,30 @@ impl Drop for Env {
 }
 
 impl <'a>Cursor<'a> {
-    pub fn get(&self,key:&[u8],val:Option<&[u8]>,op:Op)->Result<&'a[u8],c_int> {
+    pub fn get<'b>(&'b self,key:&[u8],val:Option<&[u8]>,op:Op)->Result<(&'a[u8],&'a[u8]),c_int> {
         unsafe {
             let mut k= MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             match val {
                 Some(val)=>{
                     let mut v=MDB_val { mv_data:val.as_ptr() as *const c_void,mv_size:val.len() as size_t };
                     let e=mdb_cursor_get(self.cursor,&mut k,&mut v,op as c_uint);
-                    if e==0 { Ok(std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)) } else {Err(e)}
+                    if e==0 { Ok((std::slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize),
+                                  std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize))) } else {Err(e)}
                 },
                 None =>{
                     let mut v:MDB_val = std::mem::zeroed();
                     let e=mdb_cursor_get(self.cursor,&mut k,&mut v,op as c_uint);
-                    if e==0 { Ok(std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize)) } else {Err(e)}
+                    if e==0 { Ok((std::slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize),
+                                  std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize))) } else {Err(e)}
                 }
             }
         }
+    }
+}
+impl <'a>MutCursor<'a> {
+    pub fn get(&self,key:&[u8],val:Option<&[u8]>,op:Op)->Result<(&'a[u8],&'a[u8]),c_int> {
+        let curs = Cursor { cursor:self.cursor,txn:self.txn };
+        curs.get(key,val,op)
     }
     pub fn put(&mut self,key:&[u8],val:&[u8],flags:c_uint)->Result<(),c_int> {
         unsafe {

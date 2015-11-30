@@ -2,7 +2,7 @@
 name = "lmdb"
 version = "0.1.0"
 authors = ["Pierre-Étienne Meunier"]
-license = "AGPL-3.0"
+license = "Apache-2.0"
 build="build.rs"
 
 [dependencies]
@@ -11,4 +11,3 @@ bitflags = "*"
 
 [build-dependencies]
 gcc="*"
-

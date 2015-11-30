@@ -49,7 +49,6 @@ use fs_representation::{to_hex};
 pub struct Edge {
     pub from:ExternalKey,
     pub to:ExternalKey,
-    pub flag:Flag,
     pub introduced_by:ExternalHash
 }
 
@@ -63,7 +62,8 @@ pub enum Change {
         line_num:usize,
         nodes:Vec<Vec<u8>>
     },
-    Edges{ edges:Vec<Edge> }
+    Edges{ flag:Flag,
+           edges:Vec<Edge> }
 }
 
 
@@ -164,7 +164,7 @@ pub fn dependencies(changes:&[Change])->Vec<ExternalHash> {
                     if c.len()>LINE_SIZE { push_dep(&mut deps,c[0..c.len()-LINE_SIZE].to_vec()) }
                 }
             },
-            Change::Edges{ref edges} =>{
+            Change::Edges{ref edges,..} =>{
                 for e in edges {
                     if e.from.len()>LINE_SIZE { push_dep(&mut deps,e.from[0..e.from.len()-LINE_SIZE].to_vec()) }
                     if e.to.len()>LINE_SIZE { push_dep(&mut deps,e.to[0..e.to.len()-LINE_SIZE].to_vec()) }

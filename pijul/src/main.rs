@@ -9,6 +9,7 @@ mod commands;
 use std::path::Path;
 
 use log::*;
+extern crate time;
 
 extern crate env_logger;
 
@@ -35,6 +36,7 @@ macro_rules! pijul_subcommand_dispatch {
 
 fn main() {
     env_logger::init().unwrap();
+    let time0=time::precise_time_s();
     let app = clap_app!(
         pijul =>
             (version: "0.1.0")
@@ -56,5 +58,7 @@ fn main() {
                                "ls" => ls,
                                "revert" => revert
                                );
+    let time1=time::precise_time_s();
+    info!(target:"pijul","whole command took: {}", time1-time0);
 }
 
