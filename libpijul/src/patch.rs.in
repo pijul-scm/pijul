@@ -107,16 +107,18 @@ impl Patch {
             try!(self.to_writer(&mut buffer));
         }
         // hash
-        let mut buffer = BufReader::new(try!(File::open(&tmp).map_err(Error::IoError))); // change to uuid
         let mut hasher = Sha512::new();
-        loop {
-            let len= match buffer.fill_buf() {
-                Ok(buf)=> if buf.len()==0 { break } else {
-                    hasher.input(buf);buf.len()
-                },
-                Err(e)=>return Err(Error::IoError(e))
-            };
-            buffer.consume(len)
+        {
+            let mut buffer = BufReader::new(try!(File::open(&tmp).map_err(Error::IoError)));
+            loop {
+                let len= match buffer.fill_buf() {
+                    Ok(buf)=> if buf.len()==0 { break } else {
+                        hasher.input(buf);buf.len()
+                    },
+                    Err(e)=>return Err(Error::IoError(e))
+                };
+                buffer.consume(len)
+            }
         }
         let mut hash=vec![0;hasher.output_bytes()];
         hasher.result(&mut hash);

@@ -1254,6 +1254,11 @@ impl Repository {
     }
 
     fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:&[u8]){
+        let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
+        let mut alive=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
+        let mut children=Vec::new();
+        let mut parents=Vec::new();
+        let zero:[u8;HASH_SIZE]=[0;HASH_SIZE];
         for ch in changes {
             match *ch {
                 Change::Edges{ref edges} =>
@@ -1264,19 +1269,17 @@ impl Repository {
 
                         pu[0]=e.flag ^ DELETED_EDGE ^ PARENT_EDGE;
                         pv[0]=e.flag ^ DELETED_EDGE;
-                        let _=unsafe {
+                        unsafe {
                             let u=self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
                             copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize),
                                                 pu.as_mut_ptr().offset(1+HASH_SIZE as isize), LINE_SIZE);
-                            copy_nonoverlapping(u.as_ptr(),pu.as_mut_ptr().offset(1), HASH_SIZE)
-                        };
-                        let _=unsafe {
+                            copy_nonoverlapping(u.as_ptr(),pu.as_mut_ptr().offset(1), HASH_SIZE);
+
                             let v=self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]).unwrap();
                             copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize),
                                                 pv.as_mut_ptr().offset(1+HASH_SIZE as isize), LINE_SIZE);
-                            copy_nonoverlapping(v.as_ptr(),pv.as_mut_ptr().offset(1), HASH_SIZE)
-                        };
-                        let _=unsafe {
+                            copy_nonoverlapping(v.as_ptr(),pv.as_mut_ptr().offset(1), HASH_SIZE);
+
                             //println!("introduced by {:?}",e.introduced_by);
                             let p=self.internal_hash(&e.introduced_by).unwrap();
                             copy_nonoverlapping(p.as_ptr(),
@@ -1303,34 +1306,38 @@ impl Repository {
                             else { (&pu[1..(1+KEY_SIZE)],&pv[1..(1+KEY_SIZE)]) };
                             // Reconnect !
                             // Connect all alive ascendants of pv to all alive descendants of pv.
-                            let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                            let mut alive=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                            let mut children=Vec::new();
+                            children.clear();
+                            parents.clear();
                             for w in CursIter::new(&mut cursor,pv,0,true) {
                                 if is_alive(&mut alive, &w[1..(1+KEY_SIZE)]) {
+                                    children.push(PSEUDO_EDGE);
                                     children.extend(&w[1..(1+KEY_SIZE)]);
+                                    children.extend(&zero[..]);
                                 }
                             }
-                            let mut parents=Vec::new();
                             if is_alive(&mut alive, pu) {
+                                parents.push(PSEUDO_EDGE);
                                 parents.extend(pu);
+                                parents.extend(&zero[..]);
                             }
                             for w in CursIter::new(&mut cursor,pv,PARENT_EDGE,true) {
                                 if is_alive(&mut alive, &w[1..(1+KEY_SIZE)]) {
+                                    parents.push(PSEUDO_EDGE);
                                     parents.extend(&w[1..(1+KEY_SIZE)]);
+                                    parents.extend(&zero[..]);
                                 }
                             }
                             let mut i=0;
                             while i<parents.len() {
                                 let mut j=0;
                                 while j<children.len() {
-                                    //println!("    reconnecting {} {}",to_hex(&parents[i..(i+KEY_SIZE)]),
+                                    //println!("reconnecting {}",to_hex(&parents[i..(i+1+HASH_SIZE+KEY_SIZE)]));
                                     //to_hex(&children[j..(j+KEY_SIZE)]));
-                                    self.add_pseudo_edge(&parents[i..(i+KEY_SIZE)],
-                                                         &children[j..(j+KEY_SIZE)]);
-                                    j+=KEY_SIZE
+                                    self.add_pseudo_edge(&parents[i..(i+1+KEY_SIZE+HASH_SIZE)],
+                                                         &children[j..(j+1+KEY_SIZE+HASH_SIZE)]);
+                                    j+=1+KEY_SIZE+HASH_SIZE
                                 }
-                                i+=KEY_SIZE
+                                i+=1+KEY_SIZE+HASH_SIZE
                             }
                         }
                     },
@@ -1394,7 +1401,6 @@ impl Repository {
                         }
                         lnum = lnum+1;
                     }
-                    //println!("down context");
                     // In this last part, u is that target (downcontext), and v is the last new node.
                     pu[0]= *flag;
                     pv[0]= (*flag) ^ PARENT_EDGE;
@@ -1431,7 +1437,7 @@ impl Repository {
                         match mdb::cursor_get(&curs,branch,Some(internal),Op::MDB_GET_BOTH) {
                             Ok(_)=>Ok(true),
                             Err(MDB_NOTFOUND)=>Ok(false),
-                            Err(_)=>Ok(false) // TODO
+                            Err(_)=>unimplemented!()
                         }
                     },
                     Err(_)=>{ Ok(false) }
@@ -1440,17 +1446,11 @@ impl Repository {
         }
     }
     fn add_pseudo_edge(&mut self,pu:&[u8],pv:&[u8]){
-        let mut u:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-        let mut v:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-        u[0]= PARENT_EDGE|PSEUDO_EDGE;
-        v[0]= PSEUDO_EDGE;
         unsafe {
-            copy_nonoverlapping(pu.as_ptr(),u.as_mut_ptr().offset(1),KEY_SIZE);
-            copy_nonoverlapping(pv.as_ptr(),v.as_mut_ptr().offset(1),KEY_SIZE);
             //copy_nonoverlapping(internal.as_ptr(),u.as_mut_ptr().offset(1+KEY_SIZE as isize),HASH_SIZE);
             //copy_nonoverlapping(internal.as_ptr(),v.as_mut_ptr().offset(1+KEY_SIZE as isize),HASH_SIZE);
-            mdb::put(self.mdb_txn,self.dbi_nodes,&u[1..(1+KEY_SIZE)],&v,MDB_NODUPDATA).unwrap();
-            mdb::put(self.mdb_txn,self.dbi_nodes,&v[1..(1+KEY_SIZE)],&u,MDB_NODUPDATA).unwrap();
+            mdb::put(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
+            mdb::put(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
         }
     }
     fn kill_obsolete_pseudo_edges(&mut self,cursor:&mut Cursor,pv:&[u8]) {
