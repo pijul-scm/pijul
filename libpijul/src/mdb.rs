@@ -124,21 +124,20 @@ pub const MDB_KEYEXIST: c_int = -30799;
 
 pub const MDB_NODUPDATA:c_uint = 0x20;
 
-pub struct Cursor<'a> {
-    pub cursor:*mut MdbCursor,
-    marker:PhantomData<&'a()>
+pub struct Cursor {
+    pub cursor:*mut MdbCursor
 }
 
-impl <'a> Cursor<'a> {
-    pub fn new(txn:*mut MdbTxn,dbi:MdbDbi)->Result<Cursor<'a>,Error>{
+impl Cursor {
+    pub fn new(txn:*mut MdbTxn,dbi:MdbDbi)->Result<Cursor,Error>{
         unsafe {
             let curs=ptr::null_mut();
             let e=mdb_cursor_open(txn,dbi,std::mem::transmute(&curs));
-            if e!=0 { Err(Error::from_raw_os_error(e)) } else { Ok(Cursor { cursor:curs,marker:PhantomData }) }
+            if e!=0 { Err(Error::from_raw_os_error(e)) } else { Ok(Cursor { cursor:curs }) }
         }
     }
 }
-impl <'a> Drop for Cursor<'a> {
+impl Drop for Cursor {
     fn drop(&mut self){
         unsafe {mdb_cursor_close(self.cursor);}
     }

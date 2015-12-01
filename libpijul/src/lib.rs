@@ -21,13 +21,13 @@ extern crate time;
 extern crate serde;
 #[macro_use]
 extern crate log;
+extern crate lmdb;
 
-use self::libc::{c_int, c_uint,c_char,c_uchar,c_void,size_t};
+use self::libc::{c_char,c_uchar,c_void,size_t};
 use self::libc::{memcmp};
 use std::ptr::{copy_nonoverlapping};
 use std::ptr;
 
-use std::slice;
 use std::str;
 
 use std::collections::HashMap;
@@ -51,40 +51,35 @@ use std::os::unix::fs::PermissionsExt;
 
 use std::fs;
 
-mod mdb;
-use self::mdb::*;
-
 extern crate rand;
 
-
+use lmdb::CursorGet;
 
 /// The repository structure, on which most functions work.
-pub struct Repository{
-    mdb_env:*mut MdbEnv,
-    mdb_txn:*mut MdbTxn,
-    dbi_nodes:MdbDbi,
-    dbi_revdep:MdbDbi,
-    dbi_contents:MdbDbi,
-    dbi_internal:MdbDbi,
-    dbi_external:MdbDbi,
-    dbi_branches:MdbDbi,
-    dbi_tree:MdbDbi,
-    dbi_revtree:MdbDbi,
-    dbi_inodes:MdbDbi,
-    dbi_revinodes:MdbDbi
+pub struct Repository<'a> {
+    mdb_env:lmdb::Env,
+    mdb_txn:lmdb::Txn<'a>,
+    dbi_nodes:lmdb::Dbi,
+    dbi_revdep:lmdb::Dbi,
+    dbi_contents:lmdb::Dbi,
+    dbi_internal:lmdb::Dbi,
+    dbi_external:lmdb::Dbi,
+    dbi_branches:lmdb::Dbi,
+    dbi_tree:lmdb::Dbi,
+    dbi_revtree:lmdb::Dbi,
+    dbi_inodes:lmdb::Dbi,
+    dbi_revinodes:lmdb::Dbi
 }
 
 
-impl Drop for Repository {
+impl <'a>Drop for Repository<'a> {
     fn drop(&mut self){
         unsafe {
-            //println!("dropping repository");
             if std::thread::panicking() {
-                mdb_txn_abort(self.mdb_txn);
+                self.mdb_txn.unsafe_abort()
             } else {
-                mdb_txn_commit(self.mdb_txn);
+                self.mdb_txn.unsafe_commit().unwrap()
             }
-            mdb_env_close(self.mdb_env)
         }
     }
 }
@@ -147,48 +142,36 @@ impl <'a,W> LineBuffer<'a> for W where W:std::io::Write {
 }
 
 
-
 struct CursIter<'a,'b> {
-    cursor:&'a mut mdb::MdbCursor,
-    op:c_uint,
+    cursor:&'a lmdb::Cursor<'a>,
+    op:lmdb::Op,
     edge_flag:u8,
     include_pseudo:bool,
     key:&'b[u8]
 }
 
 impl <'a,'b>CursIter<'a,'b> {
-    fn new(curs:&mut Cursor<'a>,key:&'b [u8],flag:u8,include_pseudo:bool)->CursIter<'a,'b>{
-        CursIter { cursor:unsafe { &mut *curs.cursor },
+    fn new(curs:&'a lmdb::Cursor<'a>,key:&'b [u8],flag:u8,include_pseudo:bool)->CursIter<'a,'b>{
+        CursIter { cursor:curs,
                    key:key,
                    include_pseudo:include_pseudo,
                    edge_flag:flag,
-                   op:Op::MDB_GET_BOTH_RANGE as c_uint }
+                   op:lmdb::Op::MDB_GET_BOTH_RANGE }
     }
 }
 
 impl <'a,'b>Iterator for CursIter<'a,'b> {
     type Item=&'a [u8];
     fn next(&mut self)->Option<&'a[u8]>{
-        unsafe {
-            // Include_pseudo works because PSEUDO_EDGE==1, hence there is no "gap" in flags between regular edges and their pseudo version, for each kind of edge.
-            let mut key=MDB_val{mv_data:self.key.as_ptr() as *const c_void, mv_size:self.key.len() as size_t};
-            let mut val=MDB_val{mv_data:[self.edge_flag].as_ptr() as *const c_void, mv_size:1};
-            let e=mdb_cursor_get(self.cursor,&mut key,&mut val,self.op as c_uint);
-            self.op=Op::MDB_NEXT_DUP as c_uint;
-
-            //if e==0 {
-            //println!("curs_iter: {} {}", self.include_pseudo,(*(val.mv_data as *const u8)))
-            //}
-
-
-
-            if e==0
-                && ((*(val.mv_data as *const u8) == self.edge_flag)
-                    || (self.include_pseudo && (*(val.mv_data as *const u8) == (self.edge_flag|PSEUDO_EDGE)))) {
-                Some(slice::from_raw_parts(val.mv_data as *const u8,val.mv_size as usize))
-            } else {
-                None
-            }
+        match self.cursor.get(self.key,Some(&[self.edge_flag][..]),std::mem::replace(&mut self.op, lmdb::Op::MDB_NEXT_DUP)) {
+            Ok((_,val))=> {
+                if val[0] == self.edge_flag || (self.include_pseudo && val[0] == (self.edge_flag|PSEUDO_EDGE)) {
+                    Some(val)
+                } else {
+                    None
+                }
+            },
+            Err(_) => None
         }
     }
 }
@@ -206,21 +189,22 @@ fn permissions(attr:&std::fs::Metadata)->usize{
 
 
 // A node is alive if it has a PARENT_EDGE or a PARENT_EDGE|FOLDER_EDGE to another node (or if it is the root node, but we will never call this function on the root node).
-fn nonroot_is_alive(cursor:&mut Cursor,key:&[u8])->bool {
+fn nonroot_is_alive<'a,C:lmdb::CursorGet<'a>>(cursor:&'a C,key:&[u8])->bool {
     let mut flag=[PARENT_EDGE];
-    let alive=
-        match unsafe { mdb::cursor_get(&cursor,&key,Some(&flag[..]),Op::MDB_GET_BOTH_RANGE) } {
-            Ok(v)=>{
+    let alive= {
+        match cursor.get(&key,Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE) {
+            Ok((_,v))=>{
                 debug_assert!(v.len()>=1);
                 v[0]==flag[0]
             },
             _=>false
-        };
+        }
+    };
     let alive=
         alive || {
             flag[0]=PARENT_EDGE|FOLDER_EDGE;
-            match unsafe { mdb::cursor_get(&cursor,&key,Some(&flag[..]),Op::MDB_GET_BOTH_RANGE) } {
-                Ok(v)=>{
+            match cursor.get(&key,Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE) {
+                Ok((_,v))=>{
                     debug_assert!(v.len()>=1);
                     v[0]==flag[0]
                 },
@@ -230,81 +214,60 @@ fn nonroot_is_alive(cursor:&mut Cursor,key:&[u8])->bool {
     alive
 }
 
-fn is_alive(cursor:&mut Cursor,key:&[u8])->bool {
+fn is_alive<'a,C:lmdb::CursorGet<'a>>(cursor:&'a C,key:&[u8])->bool {
     (unsafe { memcmp(key.as_ptr() as *const c_void,
                      ROOT_KEY.as_ptr() as *const c_void,
                      ROOT_KEY.len() as size_t) == 0 })
         || nonroot_is_alive(cursor,key)
-
 }
 
-impl Repository {
-    pub fn new(path:&std::path::Path)->Result<Repository,Error>{
-        unsafe {
-            let env=ptr::null_mut();
-            let e=mdb_env_create(std::mem::transmute(&env));
-            if e != 0 { println!("mdb_env_create");
-                        return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) };
-            let mut dead:c_int=0;
-            let e=mdb_reader_check(env,&mut dead);
-            if e != 0 { println!("mdb_reader_check");
-                        return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
-            let e=mdb_env_set_maxdbs(env,10);
-            if e != 0 { println!("mdb_env_set_maxdbs");
-                        return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
-            let e=mdb_env_set_mapsize(env,std::ops::Shl::shl(1, 30) as size_t);
-            if e !=0 { println!("mdb_env_set_mapsize");
-                       return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
-
-            let pp=std::ffi::CString::new(path.to_str().unwrap()).unwrap();
-            let e=mdb_env_open(env,pp.as_ptr() as *const i8,0,0o755);
-            if e !=0 { println!("mdb_env_open {:?}", path);
-                       return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
-
-            let txn=ptr::null_mut();
-            let e=mdb_txn_begin(env,ptr::null_mut(),0,std::mem::transmute(&txn));
-            if e !=0 { println!("mdb_txn_begin");
-                       return Err(Error::IoError(std::io::Error::from_raw_os_error(e))) }
-            fn open_dbi(txn:*mut MdbTxn,name:&str,flag:c_uint)->MdbDbi {
-                let mut d=0;
-                let e=unsafe { mdb_dbi_open(txn,name.as_ptr() as *const c_char,flag,&mut d) };
-                if e==0 { d } else {
-                    panic!("Database could not be opened")
-                }
-            }
-            let repo=Repository{
-                mdb_env:env,
-                mdb_txn:txn,
-                dbi_nodes:open_dbi(txn,"nodes\0",MDB_CREATE|MDB_DUPSORT),
-                dbi_revdep:open_dbi(txn,"revdep\0",MDB_CREATE|MDB_DUPSORT),
-                dbi_contents:open_dbi(txn,"contents\0",MDB_CREATE),
-                dbi_internal:open_dbi(txn,"internal\0",MDB_CREATE),
-                dbi_external:open_dbi(txn,"external\0",MDB_CREATE),
-                dbi_branches:open_dbi(txn,"branches\0",MDB_CREATE|MDB_DUPSORT),
-                dbi_tree:open_dbi(txn,"tree\0",MDB_CREATE),
-                dbi_revtree:open_dbi(txn,"revtree\0",MDB_CREATE),
-                dbi_inodes:open_dbi(txn,"inodes\0",MDB_CREATE),
-                dbi_revinodes:open_dbi(txn,"revinodes\0",MDB_CREATE),
-            };
-            Ok(repo)
-        }
+impl <'a> Repository<'a> {
+    pub fn new(path:&std::path::Path)->Result<Repository<'a>,Error>{
+        let env=try!(lmdb::Env_::new());
+        let _=try!(env.reader_check());
+        try!(env.set_maxdbs(10));
+        try!(env.set_mapsize( (1 << 30) ));
+        let env=try!(env.open(path,0,0o755));
+        let txn=try!(unsafe { env.unsafe_txn(0) });
+        let dbi_nodes=try!(txn.dbi_open(b"nodes\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT|lmdb::MDB_DUPFIXED));
+        let dbi_revdep=try!(txn.dbi_open(b"revdep\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT));
+        let dbi_contents=try!(txn.dbi_open(b"contents\0",lmdb::MDB_CREATE));
+        let dbi_internal=try!(txn.dbi_open(b"internal\0",lmdb::MDB_CREATE));
+        let dbi_external=try!(txn.dbi_open(b"external\0",lmdb::MDB_CREATE));
+        let dbi_branches=try!(txn.dbi_open(b"branches\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT));
+        let dbi_tree=try!(txn.dbi_open(b"tree\0",lmdb::MDB_CREATE));
+        let dbi_revtree=try!(txn.dbi_open(b"revtree\0",lmdb::MDB_CREATE));
+        let dbi_inodes=try!(txn.dbi_open(b"inodes\0",lmdb::MDB_CREATE));
+        let dbi_revinodes=try!(txn.dbi_open(b"revinodes\0",lmdb::MDB_CREATE));
+        let repo=Repository{
+            mdb_env:env,
+            mdb_txn:txn,
+            dbi_nodes:dbi_nodes,
+            dbi_revdep:dbi_revdep,
+            dbi_contents:dbi_contents,
+            dbi_internal:dbi_internal,
+            dbi_external:dbi_external,
+            dbi_branches:dbi_branches,
+            dbi_tree:dbi_tree,
+            dbi_revtree:dbi_revtree,
+            dbi_inodes:dbi_inodes,
+            dbi_revinodes:dbi_revinodes
+        };
+        Ok(repo)
     }
 
 
 
     fn create_new_inode(&mut self,buf:&mut [u8]){
-        let curs_revtree=Cursor::new(self.mdb_txn,self.dbi_revtree).unwrap();
-        loop {
-            for i in 0..INODE_SIZE { buf[i]=rand::random() }
-            let mut k = MDB_val{ mv_data:buf.as_ptr() as *const c_void, mv_size:buf.len()as size_t };
-            let mut v = MDB_val{ mv_data:ptr::null_mut(), mv_size:0 };
-            let e= unsafe { mdb_cursor_get(curs_revtree.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint) };
-            if e==MDB_NOTFOUND {
-                break
-            } else if e==0 && (k.mv_size as usize)>=INODE_SIZE && unsafe { memcmp(buf.as_ptr() as *const c_void, k.mv_data as *const c_void, INODE_SIZE as size_t) } != 0 {
+        let curs_revtree=self.mdb_txn.cursor(&self.dbi_revtree).unwrap();
+        for i in 0..INODE_SIZE { buf[i]=rand::random() }
+        while let Ok((_,x))=curs_revtree.get(&buf,None,lmdb::Op::MDB_SET_RANGE) {
+            if unsafe { memcmp(buf.as_ptr() as *const c_void,
+                               x.as_ptr() as *const c_void,
+                               INODE_SIZE as size_t) } != 0 {
                 break
             } else {
-                panic!("Wrong encoding in create_new_inode")
+                for i in 0..INODE_SIZE { buf[i]=rand::random() }
             }
         }
     }
@@ -318,37 +281,39 @@ impl Repository {
             let ss=s.as_os_str().to_str().unwrap();
             buf.truncate(INODE_SIZE);
             buf.extend(ss.as_bytes());
-            match unsafe { mdb::get(self.mdb_txn,self.dbi_tree,&buf) } {
-                Ok(v)=> {
-                    if cs.is_none() {
-                        return Err(Error::AlreadyAdded)
-                    } else {
-                        // replace buf with existing inode
-                        buf.clear();
-                        buf.extend(v);
-                    }
-                },
-                Err(_) =>{
-                    let mut inode_:[u8;INODE_SIZE]=[0;INODE_SIZE];
-                    let inode = if cs.is_none() && inode.is_some() {
-                        inode.unwrap()
-                    } else {
-                        self.create_new_inode(&mut inode_);
-                        &inode_[..]
-                    };
-                    unsafe {
-                        mdb::put(self.mdb_txn,self.dbi_tree,&buf,&inode,0).unwrap();
-                        mdb::put(self.mdb_txn,self.dbi_revtree,&inode,&buf,0).unwrap();
-                    }
-                    if cs.is_some() || is_dir {
-                        unsafe {
-                            mdb::put(self.mdb_txn,self.dbi_tree,&inode,&[],0).unwrap();
+            let mut broken=false;
+            {
+                match self.mdb_txn.get(&self.dbi_tree,&buf) {
+                    Ok(Some(v))=> {
+                        if cs.is_none() {
+                            return Err(Error::AlreadyAdded)
+                        } else {
+                            // replace buf with existing inode
+                            buf.clear();
+                            buf.extend(v);
                         }
+                    },
+                    _ =>{
+                        broken=true
                     }
-                    // push next inode onto buf.
-                    buf.clear();
-                    buf.extend(inode)
                 }
+            }
+            if broken {
+                let mut inode_:[u8;INODE_SIZE]=[0;INODE_SIZE];
+                let inode = if cs.is_none() && inode.is_some() {
+                    inode.unwrap()
+                } else {
+                    self.create_new_inode(&mut inode_);
+                    &inode_[..]
+                };
+                self.mdb_txn.put(&self.dbi_tree,&buf,&inode,lmdb::Put::empty()).unwrap();
+                self.mdb_txn.put(&self.dbi_revtree,&inode,&buf,lmdb::Put::empty()).unwrap();
+                if cs.is_some() || is_dir {
+                    self.mdb_txn.put(&self.dbi_tree,&inode,&[],lmdb::Put::empty()).unwrap();
+                }
+                // push next inode onto buf.
+                buf.clear();
+                buf.extend(inode)
             }
         }
         Ok(())
@@ -368,13 +333,13 @@ impl Repository {
         (*inode).extend(ROOT_INODE);
         for c in path.components() {
             inode.extend(c.as_os_str().to_str().unwrap().as_bytes());
-            match unsafe { mdb::get(self.mdb_txn,self.dbi_tree,&inode) } {
-                Ok(x)=> {
+            match self.mdb_txn.get(&self.dbi_tree,&inode) {
+                Ok(Some(x))=> {
                     std::mem::swap(inode,parent);
                     (*inode).clear();
                     (*inode).extend(x);
                 },
-                Err(_)=>{
+                _=>{
                     return Err(Error::FileNotInRepo(path.to_path_buf()))
                 }
             }
@@ -382,23 +347,25 @@ impl Repository {
         // Now the last inode is in "*inode"
         let basename=path.file_name().unwrap();
         (*parent).extend(basename.to_str().unwrap().as_bytes());
-        let mut par=MDB_val { mv_data:parent.as_ptr() as *const c_void, mv_size:parent.len() as size_t };
-        unsafe { mdb_del(self.mdb_txn,self.dbi_tree,&mut par,std::ptr::null_mut()) };
+
+        try!(self.mdb_txn.del(&self.dbi_tree,parent,None));
+
         self.add_inode(&Some(inode),path_,is_dir).unwrap();
 
-        match unsafe { mdb::get(self.mdb_txn,self.dbi_inodes,inode) } {
-            Ok(v)=> {
-                let mut vv=v.to_vec();
-                vv[0]=1;
-                unsafe { mdb::put(self.mdb_txn,self.dbi_inodes,inode,&vv,0).unwrap() };
-            },
-            Err(_)=>{
-                // Was not in inodes, nothing to do.
-            }
+        let vv=
+            match self.mdb_txn.get(&self.dbi_inodes,inode) {
+                Ok(Some(v))=> {
+                    let mut vv=v.to_vec();
+                    vv[0]=1;
+                    Some(vv)
+                },
+                _=>None
+            };
+        if let Some(vv)=vv {
+            self.mdb_txn.put(&self.dbi_inodes,inode,&vv,lmdb::Put::empty()).unwrap()
         };
         Ok(())
     }
-
     pub fn remove_file(&mut self, path:&std::path::Path) -> Result<(), Error>{
         let mut inode=Vec::new();
         inode.extend(ROOT_INODE);
@@ -409,96 +376,111 @@ impl Repository {
                 Some(sc)=>{
                     //println!("inode {} + {:?}",to_hex(&inode),sc);
                     inode.extend(sc.as_os_str().to_str().unwrap().as_bytes());
-                    match unsafe { mdb::get(self.mdb_txn,self.dbi_tree,&inode) } {
-                        Ok(x)=> { c=comp.next();
+                    match self.mdb_txn.get(&self.dbi_tree,&inode) {
+                        Ok(Some(x))=> { c=comp.next();
                                   if c.is_some() {inode.clear(); inode.extend(x) }
                         },
-                        Err(_) => return Err(Error::FileNotInRepo(path.to_path_buf()))
+                        _ => return Err(Error::FileNotInRepo(path.to_path_buf()))
                     }
                 },
                 _=>break
             }
         }
-
-        fn rec_delete(repo:&mut Repository,curs:&Cursor,key:&[u8])->bool {
-            unsafe {
-                //println!("rec_delete {}",to_hex(key));
-                let mut children=Vec::new();
-                // First, kill the inode itself, if it exists (or mark it deleted)
-                let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
-                let mut v : MDB_val = std::mem::zeroed();
-                let mut e = mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint);
-
-                while e==0 && memcmp(k.mv_data,key.as_ptr() as *const c_void,key.len() as size_t)==0 {
-                    //debug_assert!(v.mv_size as usize==INODE_SIZE);
-                    if v.mv_size>0 {
-                        children.push(
-                            (std::slice::from_raw_parts(k.mv_data as *const u8,k.mv_size as usize).to_vec(),
-                             std::slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize).to_vec())
-                                );
+        // This function returns a boolean indicating whether the directory we are trying to delete is non-empty, and deletes it if so.
+        fn rec_delete(repo:&mut Repository,key:&[u8])->bool {
+            //println!("rec_delete {}",to_hex(key));
+            let mut children=Vec::new();
+            // First, kill the inode itself, if it exists (or mark it deleted)
+            //let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
+            //let mut v : MDB_val = std::mem::zeroed();
+            {
+                let curs=repo.mdb_txn.cursor(&repo.dbi_tree).unwrap();
+                let mut result=curs.get(&key,None,lmdb::Op::MDB_SET_RANGE);
+                loop {
+                    match result {
+                        Ok((k,v))=>
+                            if unsafe { memcmp(k.as_ptr() as *const c_void,key.as_ptr() as *const c_void,
+                                               key.len() as size_t) } ==0 {
+                                //debug_assert!(v.mv_size as usize==INODE_SIZE);
+                                if v.len()>0 {
+                                    children.push((k.to_vec(),v.to_vec()));
+                                }
+                                result=curs.get(&k,Some(&v),lmdb::Op::MDB_NEXT);
+                            } else {
+                                break
+                            },
+                        _=>break
                     }
-                    e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint);
                 }
+            }
+            {
                 for (a,b) in children {
-                    if rec_delete(repo,curs,&b) {
+                    if rec_delete(repo,&b) {
                         //println!("deleting {} {}",to_hex(&a),to_hex(&b));
-                        mdb::del(repo.mdb_txn,repo.dbi_tree,&a,Some(&b)).unwrap();
-                        mdb::del(repo.mdb_txn,repo.dbi_revtree,&b,Some(&a)).unwrap();
+                        repo.mdb_txn.del(&repo.dbi_tree,&a,Some(&b)).unwrap();
+                        repo.mdb_txn.del(&repo.dbi_revtree,&b,Some(&a)).unwrap();
                     }
                 }
-                let mut node_=[0;3+KEY_SIZE];
-                match mdb::get(repo.mdb_txn,repo.dbi_inodes,key) {
-                    Ok(node) => {
+            }
+            let mut node_=[0;3+KEY_SIZE];
+            // If the directory is empty, then mark the corresponding node as deleted (flag '2').
+            // TODO: this could be done by unsafely mutating the lmdb memory.
+            let b=
+                match repo.mdb_txn.get(&repo.dbi_inodes,key) {
+                    Ok(Some(node)) => {
                         debug_assert!(node.len()==KEY_SIZE);
-                        copy_nonoverlapping(node.as_ptr() as *const c_void,
-                                            node_.as_ptr() as *mut c_void,
-                                            3+KEY_SIZE);
+                        unsafe {
+                            copy_nonoverlapping(node.as_ptr() as *const c_void,
+                                                node_.as_ptr() as *mut c_void,
+                                                3+KEY_SIZE);
+                        }
                         node_[0]=2;
-                        mdb::put(repo.mdb_txn,repo.dbi_inodes,key,&node_[..],0).unwrap();
                         false
                     },
-                    Err(MDB_NOTFOUND)=>true,
+                    Ok(None)=>true,
                     Err(_)=>{
                         panic!("delete panic")
                     }
-                }
-
+                };
+            if !b {
+                repo.mdb_txn.put(&repo.dbi_inodes,key,&node_[..],lmdb::Put::empty()).unwrap();
             }
+            b
         }
-        let curs=Cursor::new(self.mdb_txn,self.dbi_tree).unwrap();
-        rec_delete(self,&curs,&inode);
+        rec_delete(self,&inode);
         Ok(())
     }
 
 
-
     pub fn list_files(&self)->Vec<PathBuf>{
         fn collect(repo:&Repository,key:&[u8],pb:&Path, basename:&[u8],files:&mut Vec<PathBuf>) {
-            unsafe {
-                //println!("collecting {:?},{:?}",to_hex(key),std::str::from_utf8_unchecked(basename));
-                let add= match mdb::get(repo.mdb_txn,repo.dbi_inodes,key) {
-                    Ok(node) => node[0]<2,
-                    Err(MDB_NOTFOUND)=> true,
-                    Err(_)=>panic!("list_files panic")
-                };
-                if add {
-                    let next_pb=pb.join(std::str::from_utf8_unchecked(basename));
-                    let next_pb_=next_pb.clone();
-                    if basename.len()>0 { files.push(next_pb) }
-                    let curs=Cursor::new(repo.mdb_txn,repo.dbi_tree).unwrap();
-                    let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
-                    let mut v : MDB_val = std::mem::zeroed();
-                    let mut e = mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint);
-                    while e==0 && memcmp(k.mv_data,key.as_ptr() as *const c_void,INODE_SIZE as size_t)==0 {
-                        if v.mv_size>0 {
-                            collect(repo,
-                                    std::slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize),
-                                    next_pb_.as_path(),
-                                    std::slice::from_raw_parts((k.mv_data as *const u8).offset(INODE_SIZE as isize),
-                                                               k.mv_size as usize-INODE_SIZE),
-                                    files);
-                        }
-                        e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_NEXT_DUP as c_uint);
+            //println!("collecting {:?},{:?}",to_hex(key),std::str::from_utf8_unchecked(basename));
+            let add= match repo.mdb_txn.get(&repo.dbi_inodes,key) {
+                Ok(Some(node)) => node[0]<2,
+                Ok(None)=> true,
+                Err(_)=>panic!("list_files panic")
+            };
+            if add {
+                let next_pb=pb.join(std::str::from_utf8(basename).unwrap());
+                let next_pb_=next_pb.clone();
+                if basename.len()>0 { files.push(next_pb) }
+                let curs=repo.mdb_txn.cursor(&repo.dbi_tree).unwrap();
+
+                let mut result = curs.get(key,None,lmdb::Op::MDB_SET_RANGE);
+                loop {
+                    match result {
+                        Ok((k,v))=>{
+                            if v.len()>0 && unsafe {memcmp(k.as_ptr() as *const c_void,
+                                                           key.as_ptr() as *const c_void,
+                                                           INODE_SIZE as size_t) }==0 {
+
+                                collect(repo,v,next_pb_.as_path(),&k[INODE_SIZE..],files);
+                                result=curs.get(key,Some(v),lmdb::Op::MDB_NEXT_DUP);
+                            } else {
+                                break
+                            }
+                        },
+                        _=>break
                     }
                 }
             }
@@ -510,22 +492,22 @@ impl Repository {
     }
 
 
-    pub fn get_current_branch<'a>(&self)->&'a[u8] {
-        unsafe {
-            match mdb::get(self.mdb_txn,self.dbi_branches,&[0]) {
-                Ok(b)=>b,
-                Err(_)=>DEFAULT_BRANCH.as_bytes()
-            }
+    pub fn get_current_branch(&'a self)->&'a[u8] {
+        match self.mdb_txn.get(&self.dbi_branches,&[0]) {
+            Ok(Some(b))=>b,
+            Ok(None)=>DEFAULT_BRANCH.as_bytes(),
+            Err(_)=>panic!("get_current_branch")
         }
     }
 
-    fn retrieve<'a>(&'a self,key:&'a [u8])->Result<Graph<'a>,()>{
-        fn retr<'a>(cache:&mut HashMap<&'a [u8],usize>,
-                    curs:&mut Cursor,
-                    lines:&mut Vec<Line<'a>>,
-                    children:&mut Vec<usize>,
-                    key:&'a[u8])->usize {
 
+
+    fn retrieve(&'a self,key:&'a [u8])->Result<Graph<'a>,()>{
+        fn retr<'a,'b,'c>(cache:&mut HashMap<&'a [u8],usize>,
+                          curs:&'b lmdb::Cursor<'a>,
+                          lines:&mut Vec<Line<'a>>,
+                          children:&mut Vec<usize>,
+                          key:&'a[u8])->usize {
             {
                 match cache.entry(key) {
                     Entry::Occupied(e) => return *(e.get()),
@@ -559,21 +541,20 @@ impl Repository {
             idx
         }
         let mut cache=HashMap::new();
-        let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
+        let mut cursor=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
         let mut lines=Vec::new();
         let mut children:Vec<usize>=Vec::new();
         retr(&mut cache,&mut cursor,&mut lines,&mut children,key);
         Ok(Graph { lines:lines, children:children })
     }
 
-    fn contents<'a>(&self,key:&'a[u8]) -> &'a[u8] {
-        match unsafe { mdb::get(self.mdb_txn,self.dbi_contents,key) } {
-            Ok(v)=>v,
-            Err(_) =>&[]
+    fn contents<'b>(&'a self,key:&'b[u8]) -> &'a[u8] {
+        match self.mdb_txn.get(&self.dbi_contents,key) {
+            Ok(Some(v))=>v,
+            Ok(None)=>&[],
+            Err(_) =>panic!("contents")
         }
     }
-
-
 
 
 
@@ -630,7 +611,9 @@ impl Repository {
 
 
 
-    fn output_file<'a,B>(&'a self,buf:&mut B,graph:Graph<'a>) where B:LineBuffer<'a> {
+
+
+    fn output_file<B:LineBuffer<'a>>(&'a self,buf:&mut B,graph:Graph<'a>) {
         let mut graph=graph;
         let max_level=self.tarjan(&mut graph);
         let mut counts=vec![0;max_level+1];
@@ -756,94 +739,67 @@ impl Repository {
     /// owned vector. If the key is just a patch id, it returns the
     /// corresponding external hash.
     fn external_key(&self,key:&[u8])->ExternalKey {
-        unsafe {
-            //println!("internal key:{:?}",&key[0..HASH_SIZE]);
-            if key.len()>=HASH_SIZE && memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t)==0 {
+        //println!("internal key:{:?}",&key[0..HASH_SIZE]);
+        if key.len()>=HASH_SIZE
+            && unsafe {memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t)}==0 {
                 //println!("is root key");
                 ROOT_KEY.to_vec()
             } else {
-                match mdb::get(self.mdb_txn,self.dbi_external,&key[0..HASH_SIZE]) {
-                    Ok(pv)=> {
+                match self.mdb_txn.get(&self.dbi_external,&key[0..HASH_SIZE]) {
+                    Ok(Some(pv))=> {
                         let mut result:Vec<u8>=Vec::with_capacity(pv.len()+LINE_SIZE);
                         result.extend(pv);
                         if key.len()==KEY_SIZE { result.extend(&key[HASH_SIZE..KEY_SIZE]) }
                         result
                     },
+                    Ok(None)=>{
+                        println!("internal key:{:?}",key);
+                        panic!("external key not found !")
+                    },
                     Err(_)=>{
                         println!("internal key:{:?}",key);
-                        //dump_table(self.mdb_txn,self.dbi_external);
-                        panic!("external key not found !")
+                        panic!("LMDB error !")
                     }
                 }
             }
-        }
     }
 
 
-    fn internal_hash<'a>(&self,key:&'a [u8])->Result<&'a [u8],c_int> {
-        unsafe {
-            if key.len()==HASH_SIZE && memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t)==0 {
-                Ok(ROOT_KEY)
+    fn internal_hash(&'a self,key:&[u8])->Option<&'a [u8]> {
+        if key.len()==HASH_SIZE
+            && unsafe { memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t) }==0 {
+                Some(ROOT_KEY)
             } else {
-                mdb::get(self.mdb_txn,self.dbi_internal,key)
+                self.mdb_txn.get(&self.dbi_internal,key).unwrap()
             }
-        }
     }
     /// Create a new internal patch id, register it in the "external" and
     /// "internal" bases, and write the result in its second argument
     /// ("result").
     pub fn new_internal(&mut self,result:&mut[u8]) {
-        let curs=Cursor::new(self.mdb_txn,self.dbi_external).unwrap();
-        fn generate(result:&mut[u8]){
-            for i in 0..result.len() {
-                result[i]=rand::random()
-            }
-        }
-        generate(result);
+        for i in 0..result.len() { result[i]=rand::random() }
         loop {
-            if ! unsafe {mdb::get(self.mdb_txn,self.dbi_external,result).is_ok() } {
-                break
-            } else {
-                generate(result);
+            match self.mdb_txn.get(&self.dbi_external,&result) {
+                Ok(None)=>break,
+                Ok(_)=>{for i in 0..result.len() { result[i]=rand::random() }},
+                Err(_)=>panic!("")
             }
         }
     }
 
     pub fn register_hash(&mut self,internal:&[u8],external:&[u8]){
-        unsafe {
-            //println!("register_hash: {:?}\n               {:?}",external,internal);
-            mdb::put(self.mdb_txn,self.dbi_external,internal,external,0).unwrap();
-            mdb::put(self.mdb_txn,self.dbi_internal,external,internal,0).unwrap();
-        }
+        self.mdb_txn.put(&self.dbi_external,internal,external,lmdb::Put::empty()).unwrap();
+        self.mdb_txn.put(&self.dbi_internal,external,internal,lmdb::Put::empty()).unwrap();
     }
 
 
-
-
-    fn delete_edges<'a>(&self, edges:&mut Vec<Edge>, key:&'a[u8],flag:u8){
-        // Get external key for "key"
-        //println!("delete key: {}",to_hex(key));
+    fn delete_edges(&self, edges:&mut Vec<Edge>, key:&'a[u8],flag:u8){
         let ext_key=self.external_key(key);
-        let curs=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-        //for c in [PARENT_EDGE, PARENT_EDGE|FOLDER_EDGE].iter() {
-        unsafe {
-            let flag=[flag];
-            let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
-            let mut v = MDB_val{ mv_data:flag.as_ptr() as *const c_void, mv_size:1 };
-            let mut e= mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_GET_BOTH_RANGE as c_uint);
-            while e==0 && v.mv_size>0 && *(v.mv_data as (*mut c_uchar)) == flag[0] {
-                if (v.mv_size as usize) < 1+HASH_SIZE+KEY_SIZE {
-                    panic!("Wrong encoding in delete_edges")
-                }
-                // look up the external hash.
-                let pv=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1), KEY_SIZE as usize);
-                let pp=slice::from_raw_parts((v.mv_data as *const c_uchar).offset(1+KEY_SIZE as isize), HASH_SIZE as usize);
-                edges.push(Edge { from:ext_key.clone(), to:self.external_key(pv), introduced_by:self.external_key(pp) });
-
-                k.mv_data=key.as_ptr() as *const c_void;
-                k.mv_size=key.len() as size_t;
-                e=mdb_cursor_get(curs.cursor, &mut k,&mut v,Op::MDB_NEXT_DUP as c_uint);
-            }
+        let curs=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+        for v in CursIter::new(&curs,key,flag,false) {
+            edges.push(Edge { from:ext_key.clone(),
+                              to:self.external_key(&v[1..(1+KEY_SIZE)]),
+                              introduced_by:self.external_key(&v[(1+KEY_SIZE)..]) });
         }
     }
 
@@ -1025,6 +981,8 @@ impl Repository {
         }
     }
 
+
+
     fn record_all(&self, actions:&mut Vec<Change>,
            line_num:&mut usize,updatables:&mut HashMap<Vec<u8>,Vec<u8>>,
            parent_inode:Option<&[u8]>,
@@ -1034,111 +992,41 @@ impl Repository {
         //println!("record dfs {}",to_hex(current_inode));
         if parent_inode.is_some() { realpath.push(str::from_utf8(&basename).unwrap()) }
 
-        let mut k = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
-        let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
+        //let mut k = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
+        //let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
         let mut l2=[0;LINE_SIZE];
         let current_node=
             if parent_inode.is_some() {
-                k.mv_data=current_inode.as_ptr() as *const c_void;
-                k.mv_size=INODE_SIZE as size_t;
-                let e = unsafe { mdb_get(self.mdb_txn,self.dbi_inodes,&mut k, &mut v) };
-                if e==0 { // This inode already has a corresponding node
-                    let current_node=unsafe { slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize) };
-                    //println!("Existing node: {}",to_hex(current_node));
+                match self.mdb_txn.get(&self.dbi_inodes,&current_inode) {
+                    Ok(Some(current_node))=>{
+                        let old_attr=((current_node[1] as usize) << 8) | (current_node[2] as usize);
+                        // Add the new name.
+                        let int_attr={
+                            let attr=metadata(&realpath).unwrap();
+                            let p=(permissions(&attr)) & 0o777;
+                            let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
+                            //println!("int_attr {:?} : {} {}",realpath,p,is_dir);
+                            (if p==0 { old_attr } else { p }) | is_dir
+                        };
+                        //println!("attributes: {} {}",old_attr,int_attr);
+                        if current_node[0]==1 || old_attr!=int_attr {
+                            // file moved
 
-
-                    let old_attr=((current_node[1] as usize) << 8) | (current_node[2] as usize);
-                    // Add the new name.
-                    let int_attr={
-                        let attr=metadata(&realpath).unwrap();
-                        let p=(permissions(&attr)) & 0o777;
-                        let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
-                        //println!("int_attr {:?} : {} {}",realpath,p,is_dir);
-                        (if p==0 { old_attr } else { p }) | is_dir
-                    };
-                    //println!("attributes: {} {}",old_attr,int_attr);
-                    if current_node[0]==1 || old_attr!=int_attr {
-                        // file moved
-
-                        // Delete all former names.
-                        let mut edges=Vec::new();
-                        // Now take all grandparents of l2, delete them.
-                        let mut curs_parents=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                        for parent in CursIter::new(&mut curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true) {
-                            let mut curs_grandparents=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                            for grandparent in CursIter::new(&mut curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true) {
-                                edges.push(Edge {
-                                    from:self.external_key(&parent),
-                                    to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
-                                    introduced_by:self.external_key(&grandparent[1+KEY_SIZE..])
-                                });
+                            // Delete all former names.
+                            let mut edges=Vec::new();
+                            // Now take all grandparents of l2, delete them.
+                            let mut curs_parents=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+                            for parent in CursIter::new(&mut curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true) {
+                                let mut curs_grandparents=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+                                for grandparent in CursIter::new(&mut curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true) {
+                                    edges.push(Edge {
+                                        from:self.external_key(&parent),
+                                        to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
+                                        introduced_by:self.external_key(&grandparent[1+KEY_SIZE..])
+                                    });
+                                }
                             }
-                        }
-                        actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
-
-                        let mut name=Vec::with_capacity(basename.len()+2);
-                        name.push(((int_attr >> 8) & 0xff) as u8);
-                        name.push((int_attr & 0xff) as u8);
-                        name.extend(basename);
-                        actions.push(
-                            Change::NewNodes { up_context: vec!(self.external_key(parent_node.unwrap())),
-                                               line_num: *line_num,
-                                               down_context: vec!(self.external_key(&current_node[3..])),
-                                               nodes: vec!(name),
-                                               flag:FOLDER_EDGE }
-                            );
-                        *line_num += 1;
-
-                        let ret=self.retrieve(&current_node[3..]);
-                        self.diff(line_num,actions, ret.unwrap(), realpath.as_path()).unwrap()
-
-
-                    } else if current_node[0]==2 {
-                        // file deleted. delete recursively
-                        let mut edges=Vec::new();
-                        // Now take all grandparents of l2, delete them.
-                        let mut curs_parents=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                        for parent in CursIter::new(&mut curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true) {
-                            edges.push(Edge {
-                                from:self.external_key(&current_node[3..]),
-                                to:self.external_key(&parent[1..(1+KEY_SIZE)]),
-                                introduced_by:self.external_key(&parent[1+KEY_SIZE..])
-                            });
-                            let mut curs_grandparents=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                            for grandparent in CursIter::new(&mut curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true) {
-                                edges.push(Edge {
-                                    from:self.external_key(&parent),
-                                    to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
-                                    introduced_by:self.external_key(&grandparent[1+KEY_SIZE..])
-                                });
-                            }
-                        }
-                        actions.push(Change::Edges{edges:edges,flag:FOLDER_EDGE|PARENT_EDGE|DELETED_EDGE});
-                        unimplemented!() // Remove all known vertices from this file, for else "missing context" conflicts will not be detected.
-                    } else if current_node[0]==0 {
-                        //println!("retrieving");
-                        let ret=self.retrieve(&current_node[3..]);
-                        //println!("case=0, retrieved");
-                        self.diff(line_num,actions, ret.unwrap(), realpath.as_path()).unwrap();
-                        //println!("case=0, diff done");
-                    } else {
-                        panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
-                    };
-                    Some(current_node)
-                } else {
-                    // File addition, create appropriate Newnodes.
-                    match metadata(&realpath) {
-                        Ok(attr) => {
-                            //println!("file addition, realpath={:?}", realpath);
-                            let int_attr={
-                                let attr=metadata(&realpath).unwrap();
-                                let p=permissions(&attr);
-                                let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
-                                (if p==0 { 0o755 } else { p }) | is_dir
-                            };
-                            let mut nodes=Vec::new();
-                            let mut lnum= *line_num + 1;
-                            for i in 0..(LINE_SIZE-1) { l2[i]=(lnum & 0xff) as u8; lnum=lnum>>8 }
+                            actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
 
                             let mut name=Vec::with_capacity(basename.len()+2);
                             name.push(((int_attr >> 8) & 0xff) as u8);
@@ -1147,44 +1035,113 @@ impl Repository {
                             actions.push(
                                 Change::NewNodes { up_context: vec!(self.external_key(parent_node.unwrap())),
                                                    line_num: *line_num,
-                                                   down_context: vec!(),
-                                                   nodes: vec!(name,vec!()),
+                                                   down_context: vec!(self.external_key(&current_node[3..])),
+                                                   nodes: vec!(name),
                                                    flag:FOLDER_EDGE }
                                 );
-                            *line_num += 2;
+                            *line_num += 1;
 
-                            // Reading the file
-                            if !attr.is_dir() {
-                                nodes.clear();
-                                let mut line=Vec::new();
-                                let f = std::fs::File::open(realpath.as_path());
-                                let mut f = std::io::BufReader::new(f.unwrap());
-                                loop {
-                                    match f.read_until('\n' as u8,&mut line) {
-                                        Ok(l) => if l>0 { nodes.push(line.clone());line.clear() } else { break },
-                                        Err(_) => break
-                                    }
+                            let ret=self.retrieve(&current_node[3..]);
+                            self.diff(line_num,actions, ret.unwrap(), realpath.as_path()).unwrap()
+
+
+                        } else if current_node[0]==2 {
+                            // file deleted. delete recursively
+                            let mut edges=Vec::new();
+                            // Now take all grandparents of l2, delete them.
+                            let mut curs_parents=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+                            for parent in CursIter::new(&mut curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true) {
+                                edges.push(Edge {
+                                    from:self.external_key(&current_node[3..]),
+                                    to:self.external_key(&parent[1..(1+KEY_SIZE)]),
+                                    introduced_by:self.external_key(&parent[1+KEY_SIZE..])
+                                });
+                                let mut curs_grandparents=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+                                for grandparent in CursIter::new(&mut curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true) {
+                                    edges.push(Edge {
+                                        from:self.external_key(&parent),
+                                        to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
+                                        introduced_by:self.external_key(&grandparent[1+KEY_SIZE..])
+                                    });
                                 }
-                                updatables.insert(l2.to_vec(),current_inode.to_vec());
-                                let len=nodes.len();
-                                if !nodes.is_empty() {
-                                    actions.push(
-                                        Change::NewNodes { up_context:vec!(l2.to_vec()),
-                                                           line_num: *line_num,
-                                                           down_context: vec!(),
-                                                           nodes: nodes,
-                                                           flag:0 }
-                                        );
-                                }
-                                *line_num+=len;
-                                Some(&l2[..])
-                            } else {
-                                None
                             }
-                        },
-                        Err(_)=>{
-                            panic!("error adding a file (metadata failed)")
+                            actions.push(Change::Edges{edges:edges,flag:FOLDER_EDGE|PARENT_EDGE|DELETED_EDGE});
+                            unimplemented!() // Remove all known vertices from this file, for else "missing context" conflicts will not be detected.
+                        } else if current_node[0]==0 {
+                            //println!("retrieving");
+                            let ret=self.retrieve(&current_node[3..]);
+                            //println!("case=0, retrieved");
+                            self.diff(line_num,actions, ret.unwrap(), realpath.as_path()).unwrap();
+                            //println!("case=0, diff done");
+                        } else {
+                            panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
+                        };
+                        Some(current_node)
+                    },
+                    Ok(None)=>{
+                        // File addition, create appropriate Newnodes.
+                        match metadata(&realpath) {
+                            Ok(attr) => {
+                                //println!("file addition, realpath={:?}", realpath);
+                                let int_attr={
+                                    let attr=metadata(&realpath).unwrap();
+                                    let p=permissions(&attr);
+                                    let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
+                                    (if p==0 { 0o755 } else { p }) | is_dir
+                                };
+                                let mut nodes=Vec::new();
+                                let mut lnum= *line_num + 1;
+                                for i in 0..(LINE_SIZE-1) { l2[i]=(lnum & 0xff) as u8; lnum=lnum>>8 }
+
+                                let mut name=Vec::with_capacity(basename.len()+2);
+                                name.push(((int_attr >> 8) & 0xff) as u8);
+                                name.push((int_attr & 0xff) as u8);
+                                name.extend(basename);
+                                actions.push(
+                                    Change::NewNodes { up_context: vec!(self.external_key(parent_node.unwrap())),
+                                                       line_num: *line_num,
+                                                       down_context: vec!(),
+                                                       nodes: vec!(name,vec!()),
+                                                       flag:FOLDER_EDGE }
+                                    );
+                                *line_num += 2;
+
+                                // Reading the file
+                                if !attr.is_dir() {
+                                    nodes.clear();
+                                    let mut line=Vec::new();
+                                    let f = std::fs::File::open(realpath.as_path());
+                                    let mut f = std::io::BufReader::new(f.unwrap());
+                                    loop {
+                                        match f.read_until('\n' as u8,&mut line) {
+                                            Ok(l) => if l>0 { nodes.push(line.clone());line.clear() } else { break },
+                                            Err(_) => break
+                                        }
+                                    }
+                                    updatables.insert(l2.to_vec(),current_inode.to_vec());
+                                    let len=nodes.len();
+                                    if !nodes.is_empty() {
+                                        actions.push(
+                                            Change::NewNodes { up_context:vec!(l2.to_vec()),
+                                                               line_num: *line_num,
+                                                               down_context: vec!(),
+                                                               nodes: nodes,
+                                                               flag:0 }
+                                            );
+                                    }
+                                    *line_num+=len;
+                                    Some(&l2[..])
+                                } else {
+                                    None
+                                }
+                            },
+                            Err(_)=>{
+                                panic!("error adding a file (metadata failed)")
+                            }
                         }
+                    },
+                    Err(_)=>{
+                        panic!("lmdb error")
                     }
                 }
             } else {
@@ -1195,30 +1152,24 @@ impl Repository {
         match current_node {
             None => (), // we just added a file
             Some(current_node)=>{
-                k.mv_data=current_inode.as_ptr() as *const c_void;
-                k.mv_size=INODE_SIZE as size_t;
 
-                let curs_tree=Cursor::new(self.mdb_txn,self.dbi_tree).unwrap();
-                let mut e= unsafe { mdb_cursor_get(curs_tree.cursor, &mut k,&mut v,Op::MDB_SET_RANGE as c_uint) };
-                //dump_table(self.mdb_txn,self.dbi_tree);
-                while e==0
-                    && (k.mv_size>=INODE_SIZE as size_t)
-                    && unsafe { memcmp(k.mv_data as *const c_void, current_inode.as_ptr() as *const c_void,
-                                       INODE_SIZE as size_t) } == 0 {
-
-                        let kk= unsafe { std::slice::from_raw_parts(k.mv_data as *const u8,k.mv_size as usize) };
-                        let vv= unsafe { std::slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize) };
+                let cursor=self.mdb_txn.cursor(&self.dbi_tree).unwrap();
+                let mut op=lmdb::Op::MDB_SET_RANGE;
+                while let Ok((k,v))=cursor.get(current_inode,None,op) {
+                    if unsafe{memcmp(k.as_ptr() as *const c_void,
+                                     current_inode.as_ptr() as *const c_void,
+                                     INODE_SIZE as size_t) } != 0 {
+                        break
+                    } else {
                         self.record_all(actions, line_num,updatables,
-                            Some(current_inode), // parent_inode
-                            Some(current_node), // parent_node
-                            vv,// current_inode
-                            realpath,
-                            &kk[INODE_SIZE..]);
-
-                        unsafe {
-                            e=mdb_cursor_get(curs_tree.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint);
-                        }
+                                        Some(current_inode), // parent_inode
+                                        Some(current_node), // parent_node
+                                        v,// current_inode
+                                        realpath,
+                                        &k[INODE_SIZE..]);
+                        op=lmdb::Op::MDB_NEXT;
                     }
+                }
             }
         }
         if parent_inode.is_some() { let _=realpath.pop(); }
@@ -1238,8 +1189,6 @@ impl Repository {
     }
 
     fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:&[u8]){
-        let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-        let mut alive=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
         let mut children=Vec::new();
         let mut parents=Vec::new();
         let zero:[u8;HASH_SIZE]=[0;HASH_SIZE];
@@ -1275,79 +1224,71 @@ impl Repository {
                                                 pv.as_mut_ptr().offset(1+KEY_SIZE as isize),
                                                 HASH_SIZE)
                         };
-                        unsafe {
-                            let _=mdb::del(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)], Some(&pv));
-                            let _=mdb::del(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)], Some(&pu));
-                            // Then add the new edges
-                            pu[0]=*flag^PARENT_EDGE;
-                            pv[0]=*flag;
-                            //println!("new edge: {}\n          {}",to_hex(&pu),to_hex(&pv));
-                            mdb::put(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
-                            mdb::put(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
-                        }
-                    }
-                    // Now, we have assumed that edges is connected. Let's pseudo-reconnect things.
-                    if flag & DELETED_EDGE != 0 {
-
-                        let (pu,pv) = {
-                            let e=edges.first().unwrap();
-                            unsafe {
-                                let u=self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
-                                copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize),
-                                                    pu.as_mut_ptr().offset(1+HASH_SIZE as isize), LINE_SIZE);
-                                copy_nonoverlapping(u.as_ptr(),pu.as_mut_ptr().offset(1), HASH_SIZE);
-
-                                let e=edges.last().unwrap();
-                                let v=self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]).unwrap();
-                                copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize),
-                                                    pv.as_mut_ptr().offset(1+HASH_SIZE as isize), LINE_SIZE);
-                                copy_nonoverlapping(v.as_ptr(),pv.as_mut_ptr().offset(1), HASH_SIZE);
+                        self.mdb_txn.del(&self.dbi_nodes,&pu[1..(1+KEY_SIZE)], Some(&pv)).unwrap();
+                        self.mdb_txn.del(&self.dbi_nodes,&pv[1..(1+KEY_SIZE)], Some(&pu)).unwrap();
+                        // Then add the new edges
+                        pu[0]=*flag^PARENT_EDGE;
+                        pv[0]=*flag;
+                        //println!("new edge: {}\n          {}",to_hex(&pu),to_hex(&pv));
+                        self.mdb_txn.put(&self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
+                        self.mdb_txn.put(&self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
+                        // Now, we have assumed that edges is connected. Let's pseudo-reconnect things.
+                        if flag & DELETED_EDGE != 0 {
+                            let (pu,pv) = {
+                                if flag&PARENT_EDGE != 0 {
+                                    (&mut pv,&mut pu)
+                                } else {
+                                    (&mut pu,&mut pv)
+                                }
+                            };
+                            // Reconnect !
+                            // Connect all alive ascendants of pv to all alive descendants of pv.
+                            children.clear();
+                            parents.clear();
+                            {
+                                let mut alive=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+                                let mut cursor=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+                                for w in CursIter::new(&mut cursor,&pv[1..(1+KEY_SIZE)],0,true) {
+                                    if is_alive(&mut alive, &w[1..(1+KEY_SIZE)]) {
+                                        children.push(PSEUDO_EDGE);
+                                        children.extend(&w[1..(1+KEY_SIZE)]);
+                                        children.extend(&zero[..]);
+                                    }
+                                }
+                                if is_alive(&mut alive, &pu[1..(1+KEY_SIZE)]) {
+                                    parents.push(PSEUDO_EDGE|PARENT_EDGE);
+                                    parents.extend(&pu[..]);
+                                    parents.extend(&zero[..]);
+                                }
+                                for w in CursIter::new(&mut cursor,&pv[1..(1+KEY_SIZE)],PARENT_EDGE,true) {
+                                    if is_alive(&mut alive, &w[1..(1+KEY_SIZE)]) {
+                                        parents.push(PSEUDO_EDGE|PARENT_EDGE);
+                                        parents.extend(&w[1..(1+KEY_SIZE)]);
+                                        parents.extend(&zero[..]);
+                                    }
+                                }
                             }
-                            if flag&PARENT_EDGE != 0 {
-                                (&pv[1..(1+KEY_SIZE)],&pu[1..(1+KEY_SIZE)])
-                            } else {
-                                (&pu[1..(1+KEY_SIZE)],&pv[1..(1+KEY_SIZE)])
+                            let mut i=0;
+                            while i<parents.len() {
+                                let mut j=0;
+                                while j<children.len() {
+                                    //println!("reconnecting {}",to_hex(&parents[i..(i+1+HASH_SIZE+KEY_SIZE)]));
+                                    //to_hex(&children[j..(j+KEY_SIZE)]));
+                                    let connected={
+                                        self.connected(&pu[1..(1+KEY_SIZE)],&mut pv[..])
+                                    };
+                                    if !connected {
+                                        self.add_pseudo_edge(&parents[i..(i+1+KEY_SIZE+HASH_SIZE)],
+                                                             &mut children[j..(j+1+KEY_SIZE+HASH_SIZE)]);
+                                    }
+                                    j+=1+KEY_SIZE+HASH_SIZE
+                                }
+                                i+=1+KEY_SIZE+HASH_SIZE
                             }
-                        };
-                        // Reconnect !
-                        // Connect all alive ascendants of pv to all alive descendants of pv.
-                        children.clear();
-                        parents.clear();
-                        for w in CursIter::new(&mut cursor,pv,0,true) {
-                            if is_alive(&mut alive, &w[1..(1+KEY_SIZE)]) {
-                                children.push(PSEUDO_EDGE);
-                                children.extend(&w[1..(1+KEY_SIZE)]);
-                                children.extend(&zero[..]);
-                            }
-                        }
-                        if is_alive(&mut alive, pu) {
-                            parents.push(PSEUDO_EDGE|PARENT_EDGE);
-                            parents.extend(pu);
-                            parents.extend(&zero[..]);
-                        }
-                        for w in CursIter::new(&mut cursor,pv,PARENT_EDGE,true) {
-                            if is_alive(&mut alive, &w[1..(1+KEY_SIZE)]) {
-                                parents.push(PSEUDO_EDGE|PARENT_EDGE);
-                                parents.extend(&w[1..(1+KEY_SIZE)]);
-                                parents.extend(&zero[..]);
-                            }
-                        }
-                        let mut i=0;
-                        while i<parents.len() {
-                            let mut j=0;
-                            while j<children.len() {
-                                //println!("reconnecting {}",to_hex(&parents[i..(i+1+HASH_SIZE+KEY_SIZE)]));
-                                //to_hex(&children[j..(j+KEY_SIZE)]));
-                                self.add_pseudo_edge(&mut alive,
-                                                     &parents[i..(i+1+KEY_SIZE+HASH_SIZE)],
-                                                     &mut children[j..(j+1+KEY_SIZE+HASH_SIZE)]);
-                                j+=1+KEY_SIZE+HASH_SIZE
-                            }
-                            i+=1+KEY_SIZE+HASH_SIZE
                         }
                     }
                     let time2=time::precise_time_s();
-                    time_edges += (time2-time0);
+                    time_edges += time2-time0;
                 },
                 Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
                     assert!(!nodes.is_empty());
@@ -1356,7 +1297,7 @@ impl Repository {
                     let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut lnum0= *line_num;
                     for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
-                    let _= unsafe {
+                    unsafe {
                         copy_nonoverlapping(internal_patch_id.as_ptr(),
                                             pu.as_mut_ptr().offset(1+KEY_SIZE as isize),
                                             HASH_SIZE);
@@ -1365,37 +1306,36 @@ impl Repository {
                                             HASH_SIZE);
                         copy_nonoverlapping(internal_patch_id.as_ptr(),
                                             pv.as_mut_ptr().offset(1),
-                                            HASH_SIZE)
+                                            HASH_SIZE);
                     };
                     for c in up_context {
-                        let u= if c.len()>LINE_SIZE {
-                            self.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
-                        } else {
-                            internal_patch_id
-                        };
-                        pu[0]= (*flag) ^ PARENT_EDGE;
-                        pv[0]= *flag;
-                        unsafe {
-                            copy_nonoverlapping(u.as_ptr() as *const c_char,
-                                                pu.as_mut_ptr().offset(1) as *mut c_char,
-                                                HASH_SIZE);
-                            copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
-                                                pu.as_mut_ptr().offset((1+HASH_SIZE) as isize),
-                                                LINE_SIZE);
-                            mdb::put(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,0).unwrap();
-                            mdb::put(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,0).unwrap();
+                        {
+                            let u= if c.len()>LINE_SIZE {
+                                self.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
+                            } else {
+                                internal_patch_id
+                            };
+                            pu[0]= (*flag) ^ PARENT_EDGE;
+                            pv[0]= *flag;
+                            unsafe {
+                                copy_nonoverlapping(u.as_ptr() as *const c_char,
+                                                    pu.as_mut_ptr().offset(1) as *mut c_char,
+                                                    HASH_SIZE);
+                                copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
+                                                    pu.as_mut_ptr().offset((1+HASH_SIZE) as isize),
+                                                    LINE_SIZE);
+                            }
                         }
+                        self.mdb_txn.put(&self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
+                        self.mdb_txn.put(&self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
                     }
-                    //////////////
                     unsafe {
                         copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
                                             pu.as_ptr().offset(1) as *mut c_char,
                                             HASH_SIZE);
                     }
                     let mut lnum= *line_num + 1;
-                    unsafe {
-                        mdb::put(self.mdb_txn,self.dbi_contents,&pv[1..(1+KEY_SIZE)], &nodes[0],0).unwrap();
-                    }
+                    self.mdb_txn.put(&self.dbi_contents,&pv[1..(1+KEY_SIZE)], &nodes[0],lmdb::Put::empty()).unwrap();
                     for n in &nodes[1..] {
                         let mut lnum0=lnum-1;
                         for i in 0..LINE_SIZE { pu[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0 >>= 8 }
@@ -1403,33 +1343,33 @@ impl Repository {
                         for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0 >>= 8 }
                         pu[0]= (*flag)^PARENT_EDGE;
                         pv[0]= *flag;
-                        unsafe {
-                            mdb::put(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
-                            mdb::put(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
-                            mdb::put(self.mdb_txn,self.dbi_contents,&pv[1..(1+KEY_SIZE)],&n,0).unwrap();
-                        }
+                        self.mdb_txn.put(&self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
+                        self.mdb_txn.put(&self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
+                        self.mdb_txn.put(&self.dbi_contents,&pv[1..(1+KEY_SIZE)],&n,lmdb::Put::empty()).unwrap();
                         lnum = lnum+1;
                     }
                     // In this last part, u is that target (downcontext), and v is the last new node.
                     pu[0]= *flag;
                     pv[0]= (*flag) ^ PARENT_EDGE;
                     for c in down_context {
-                        let u= if c.len()>LINE_SIZE {
-                            self.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
-                        } else {
-                            internal_patch_id
-                        };
-                        unsafe {
-                            copy_nonoverlapping(u.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE);
-                            copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize) as *const c_char,
-                                                pu.as_ptr().offset((1+HASH_SIZE) as isize) as *mut c_char,
-                                                LINE_SIZE);
-                            mdb::put(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
-                            mdb::put(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
+                        {
+                            let u= if c.len()>LINE_SIZE {
+                                self.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
+                            } else {
+                                internal_patch_id
+                            };
+                            unsafe {
+                                copy_nonoverlapping(u.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE);
+                                copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize) as *const c_char,
+                                                    pu.as_ptr().offset((1+HASH_SIZE) as isize) as *mut c_char,
+                                                    LINE_SIZE);
+                            }
                         }
+                        self.mdb_txn.put(&self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
+                        self.mdb_txn.put(&self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
                     }
                     let time1=time::precise_time_s();
-                    time_newnodes += (time1-time0);
+                    time_newnodes += time1-time0;
                 }
             }
         }
@@ -1437,122 +1377,115 @@ impl Repository {
     }
 
     pub fn has_patch(&self, branch:&[u8], hash:&[u8])->Result<bool,Error>{
-        unsafe {
-            if if hash.len()==HASH_SIZE { memcmp(hash.as_ptr() as *const c_void,
-                                                 ROOT_KEY.as_ptr() as *const c_void,
-                                                 hash.len() as size_t)==0 } else {false} {
-                Ok(true)
-            } else {
-                match self.internal_hash(hash) {
-                    Ok(internal)=>{
-                        let curs=try!(Cursor::new(self.mdb_txn,self.dbi_branches).map_err(Error::IoError));
-                        match mdb::cursor_get(&curs,branch,Some(internal),Op::MDB_GET_BOTH) {
-                            Ok(_)=>Ok(true),
-                            Err(MDB_NOTFOUND)=>Ok(false),
-                            Err(_)=>unimplemented!()
-                        }
-                    },
-                    Err(_)=>{ Ok(false) }
-                }
+        if hash.len()==HASH_SIZE && unsafe {memcmp(hash.as_ptr() as *const c_void,
+                                                   ROOT_KEY.as_ptr() as *const c_void,
+                                                   hash.len() as size_t)==0 } {
+            Ok(true)
+        } else {
+            match self.internal_hash(hash) {
+                Some(internal)=>{
+                    let curs=try!(self.mdb_txn.cursor(&self.dbi_branches).map_err(Error::IoError));
+                    match curs.get(branch,Some(internal),lmdb::Op::MDB_GET_BOTH) {
+                        Ok(_)=>Ok(true),
+                        Err(_)=>Ok(false)
+                    }
+                },
+                None=>Ok(false),
             }
         }
     }
     // requires pu to be KEY_SIZE, pv to be 1+KEY_SIZE+HASH_SIZE
-    fn connected(&mut self,curs:&mut Cursor,pu:&[u8],pv:&mut [u8])->bool{
-        unsafe {
-            let pv_0=pv[0];
-            pv[0]=0;
-            let mut k= MDB_val { mv_data:pu.as_ptr() as *const c_void, mv_size:pu.len() as size_t };
-            let mut v= MDB_val { mv_data:pv.as_ptr() as *const c_void, mv_size:(1+KEY_SIZE) as size_t };
-            let e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_GET_BOTH_RANGE as c_uint);
-            if e==0 {
-                let x=(memcmp(pv.as_ptr() as *const c_void,
-                              v.mv_data,
-                              (1+KEY_SIZE) as size_t));
+    fn connected(&mut self,pu:&[u8],pv:&mut [u8])->bool{
+        let curs=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+        let pv_0=pv[0];
+        pv[0]=0;
+        match curs.get(&pu,Some(pv),lmdb::Op::MDB_GET_BOTH_RANGE) {
+            Ok((_,v))=>{
+                let x=unsafe {memcmp(pv.as_ptr() as *const c_void,
+                                     v.as_ptr() as *const c_void,
+                                     (1+KEY_SIZE) as size_t)};
                 pv[0]=pv_0;
                 x == 0
-            } else {
+            },
+            _=>{
                 pv[0]=PSEUDO_EDGE;
-                k.mv_data=pu.as_ptr() as *const c_void;
-                k.mv_size=pu.len() as size_t;
-                v.mv_data=pv.as_ptr() as *const c_void;
-                v.mv_size=(1+KEY_SIZE) as size_t;
-                let e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_GET_BOTH_RANGE as c_uint);
-                let x=(memcmp(pv.as_ptr() as *const c_void,
-                              v.mv_data,
-                              (1+KEY_SIZE) as size_t) ) == 0;
-                pv[0]=pv_0;
-                x
-            }
-        }
-    }
-    fn add_pseudo_edge(&mut self,curs:&mut Cursor,pu:&[u8],pv:&mut [u8]){
-        unsafe {
-            //copy_nonoverlapping(internal.as_ptr(),u.as_mut_ptr().offset(1+KEY_SIZE as isize),HASH_SIZE);
-            //copy_nonoverlapping(internal.as_ptr(),v.as_mut_ptr().offset(1+KEY_SIZE as isize),HASH_SIZE);
-            if ! self.connected(curs,&pu[1..(1+KEY_SIZE)],pv) {
-                mdb::put(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,MDB_NODUPDATA).unwrap();
-                mdb::put(self.mdb_txn,self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
-            }
-        }
-    }
-    fn kill_obsolete_pseudo_edges(&mut self,cursor:&mut Cursor,pv:&[u8]) {
-        unsafe {
-            let mut a:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-            let mut b:[u8;KEY_SIZE]=[0;KEY_SIZE];
-            copy_nonoverlapping(pv.as_ptr() as *const c_void,
-                                a.as_mut_ptr().offset(1) as *mut c_void,
-                                KEY_SIZE);
-
-            for flag in [PSEUDO_EDGE,PARENT_EDGE|PSEUDO_EDGE,
-                         FOLDER_EDGE|PSEUDO_EDGE,PARENT_EDGE|PSEUDO_EDGE|FOLDER_EDGE].iter() {
-                let f=[*flag];
-                let mut k = MDB_val{ mv_data:pv.as_ptr() as *const c_void,mv_size:pv.len() as size_t };
-                let mut v = MDB_val{ mv_data:f.as_ptr() as *const c_void,mv_size:1 };
-                let mut e = mdb_cursor_get(cursor.cursor, &mut k,&mut v,Op::MDB_GET_BOTH_RANGE as c_uint);
-                while e==0 && (*(v.mv_data as *const u8)) == *flag {
-                    copy_nonoverlapping((v.mv_data as *const u8).offset(1) as *const c_void,
-                                        b.as_mut_ptr() as *mut c_void,
-                                        KEY_SIZE);
-                    a[0]= (*flag) ^ PARENT_EDGE;
-                    mdb_cursor_del(cursor.cursor,0);
-                    mdb::del(self.mdb_txn,self.dbi_nodes,&b[..],Some(&a[..])).unwrap();
-
-                    k.mv_data=pv.as_ptr() as *const c_void;k.mv_size=pv.len() as size_t;
-                    v.mv_data=f.as_ptr() as *const c_void; v.mv_size=1;
-                    e = mdb_cursor_get(cursor.cursor, &mut k,&mut v, Op::MDB_GET_BOTH_RANGE as c_uint);
+                match curs.get(&pu,Some(pv),lmdb::Op::MDB_GET_BOTH_RANGE) {
+                    Ok((_,v))=>{
+                        let x=unsafe {memcmp(pv.as_ptr() as *const c_void,
+                                             v.as_ptr() as *const c_void,
+                                             (1+KEY_SIZE) as size_t) == 0 };
+                        pv[0]=pv_0;
+                        x
+                    },
+                    _=>false
                 }
             }
         }
     }
-    /// Applies a patch to a repository.
-    pub fn apply(&mut self, patch:&Patch, internal:&[u8])->Result<(),Error> {
-        {
-            let current=self.get_current_branch();
-            unsafe {
-                let curs=try!(Cursor::new(self.mdb_txn,self.dbi_branches).map_err(Error::IoError));
-                match mdb::cursor_get(&curs,&current,Some(internal),Op::MDB_GET_BOTH) {
-                    Ok(_)=>return Err(Error::AlreadyApplied),
-                    Err(_)=>()
-                };
-                mdb::put(self.mdb_txn,self.dbi_branches,&current,&internal,MDB_NODUPDATA).unwrap();
+    fn add_pseudo_edge(&mut self,pu:&[u8],pv:&mut [u8]){
+        self.mdb_txn.put(&self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
+        self.mdb_txn.put(&self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
+    }
+
+    fn kill_obsolete_pseudo_edges(&mut self,pv:&[u8]) {
+        let mut a:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+        let mut b:[u8;KEY_SIZE]=[0;KEY_SIZE];
+        unsafe {
+            copy_nonoverlapping(pv.as_ptr() as *const c_void,
+                                a.as_mut_ptr().offset(1) as *mut c_void,
+                                KEY_SIZE);
+        }
+        for flag in [PSEUDO_EDGE,PARENT_EDGE|PSEUDO_EDGE,
+                     FOLDER_EDGE|PSEUDO_EDGE,PARENT_EDGE|PSEUDO_EDGE|FOLDER_EDGE].iter() {
+            loop {
+                {
+                    let mut cursor=self.mdb_txn.cursor_mut(&self.dbi_nodes).unwrap();
+                    let flag=[*flag];
+                    match cursor.get(&pv,Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE) {
+                        Ok((_,v))=>{
+                            unsafe {
+                                copy_nonoverlapping((v.as_ptr().offset(1)) as *const c_void,
+                                                    b.as_mut_ptr() as *mut c_void,
+                                                    KEY_SIZE);
+                            }
+                            a[0]= v[0] ^ PARENT_EDGE;
+                        },
+                        Err(_)=>break
+                    }
+                    cursor.del(0).unwrap();
+                }
+                self.mdb_txn.del(&self.dbi_nodes,&b[..],Some(&a[..])).unwrap();
             }
         }
+    }
+
+    /// Applies a patch to a repository.
+    pub fn apply<'b>(mut self, patch:&Patch, internal:&'b [u8])->Result<Repository<'a>,Error> {
+        let current=self.get_current_branch().to_vec();
+        {
+            let curs=self.mdb_txn.cursor(&self.dbi_branches).unwrap();
+            match curs.get(&current,Some(internal),lmdb::Op::MDB_GET_BOTH) {
+                Ok(_)=>return Err(Error::AlreadyApplied),
+                Err(_)=>{}
+            }
+        }
+        self.mdb_txn.put(&self.dbi_branches,&current,&internal,lmdb::MDB_NODUPDATA).unwrap();
         //println!("unsafe apply");
         let time0=time::precise_time_s();
         self.unsafe_apply(&patch.changes,internal);
         let time1=time::precise_time_s();
         info!(target:"libpijul","unsafe_apply took: {}", time1-time0);
         //println!("/unsafe apply");
+        let mut children=Vec::new();
         for ch in patch.changes.iter() {
             match *ch {
                 Change::Edges{ref edges,ref flag} =>{
                     for e in edges {
-                        let hu=self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
-                        let hv=self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]).unwrap();
                         let mut u:[u8;KEY_SIZE]=[0;KEY_SIZE];
                         let mut v:[u8;KEY_SIZE]=[0;KEY_SIZE];
                         unsafe {
+                            let hu=self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
+                            let hv=self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]).unwrap();
                             copy_nonoverlapping(hu.as_ptr(),u.as_mut_ptr(),HASH_SIZE);
                             copy_nonoverlapping(hv.as_ptr(),v.as_mut_ptr(),HASH_SIZE);
                             copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize),
@@ -1562,30 +1495,38 @@ impl Repository {
                         }
                         if (*flag)&DELETED_EDGE!=0 {
                             let (pu,pv)= if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
-                            let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
                             if (*flag)&FOLDER_EDGE!=0 {
                                 self.connect_down_folders(pu,pv,&internal)
                             } else {
                                 // Now, kill obsolete pseudo edges
-                                if !is_alive(&mut cursor,pv) {
-                                    self.kill_obsolete_pseudo_edges(&mut cursor,pv)
+                                let alive={
+                                    let mut cursor=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+                                    is_alive(&mut cursor,pv)
+                                };
+                                if !alive {
+                                    self.kill_obsolete_pseudo_edges(pv)
                                 }
                             }
                         } else {
                             let (pu,pv) = if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
-                            let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                            if !is_alive(&mut cursor,&pu[..]) {
+                            let alive={
+                                let mut cursor=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+                                is_alive(&mut cursor,&pu[..])
+                            };
+                            if !alive {
                                 //panic!("should not be called here");
                                 self.connect_up(pu,pv,&internal);
                             }
                             if (*flag)&FOLDER_EDGE == 0 {
                                 // Now connect v to alive descendants of v (following deleted edges from v).
-                                let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                                let mut children=Vec::new();
-                                let mut cursor_=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-                                for w in CursIter::new(&mut cursor,pu,DELETED_EDGE,false) {
-                                    if is_alive(&mut cursor_,&w[1..(1+KEY_SIZE)]) {
-                                        children.extend(&w[1..(1+KEY_SIZE)]);
+                                children.clear();
+                                {
+                                    let mut cursor=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+                                    let mut cursor_=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+                                    for w in CursIter::new(&mut cursor,pu,DELETED_EDGE,false) {
+                                        if is_alive(&mut cursor_,&w[1..(1+KEY_SIZE)]) {
+                                            children.extend(&w[1..(1+KEY_SIZE)]);
+                                        }
                                     }
                                 }
                                 let mut i=0;
@@ -1607,7 +1548,7 @@ impl Repository {
                                             pv.as_mut_ptr(),
                                             HASH_SIZE)
                     };
-                    let mut cursor=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
+                    let mut cursor=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
                     for c in up_context {
                         unsafe {
                             let u= if c.len()>LINE_SIZE {
@@ -1652,32 +1593,23 @@ impl Repository {
         let time2=time::precise_time_s();
         info!(target:"libpijul","apply took: {}", time2-time1);
         for ref dep in patch.dependencies.iter() {
-            let dep_internal=self.internal_hash(&dep).unwrap();
-            unsafe {
-                mdb::put(self.mdb_txn,self.dbi_revdep,dep_internal,internal,0).unwrap();
-            }
+            let dep_internal=self.internal_hash(&dep).unwrap().to_vec();
+            self.mdb_txn.put(&self.dbi_revdep,&dep_internal,internal,lmdb::Put::empty()).unwrap();
         }
         let time3=time::precise_time_s();
         info!(target:"libpijul","deps took: {}", time3-time2);
-        Ok(())
+        Ok(self)
     }
 
 
     pub fn write_changes_file(&self,changes_file:&Path)->Result<(),Error> {
         let mut patches=Vec::new();
-        unsafe {
-            let branch=self.get_current_branch();
-            let curs=Cursor::new(self.mdb_txn,self.dbi_branches).unwrap();
-            let mut k=MDB_val{mv_data:branch.as_ptr() as *const c_void, mv_size:branch.len() as size_t};
-            let mut v:MDB_val=std::mem::zeroed();
-            let mut e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_FIRST as c_uint);
-            while e==0 {
-                if branch.len() as size_t==k.mv_size &&
-                    memcmp(branch.as_ptr() as *const c_void, k.mv_data as *const c_void, k.mv_size)==0 {
-                        patches.push(self.external_key(slice::from_raw_parts(v.mv_data as *const u8,v.mv_size as usize)));
-                        e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint);
-                    }
-            }
+        let branch=self.get_current_branch();
+        let curs=self.mdb_txn.cursor(&self.dbi_branches).unwrap();
+        let mut op=lmdb::Op::MDB_SET;
+        while let Ok((_,v))=curs.get(&branch,None,op) {
+            patches.push(self.external_key(v));
+            op=lmdb::Op::MDB_NEXT_DUP
         }
         try!(patch::write_changes(&patches,changes_file));
         Ok(())
@@ -1689,14 +1621,21 @@ impl Repository {
     fn connect_up(&mut self, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
         //println!("connect_up: {} {}",to_hex(a),to_hex(b));
         //panic!("connect up was called");
-        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, a:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>, folder_buf:&mut Vec<u8>,is_first:bool) {
+        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&'a Repository, a:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>, folder_buf:&mut Vec<u8>,is_first:bool) {
             //println!("connect: {}",to_hex(a));
             if !visited.contains(a) {
                 visited.insert(a);
                 // Follow parent edges.
-                let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-                for a1 in CursIter::new(&mut cursor,&a,PARENT_EDGE|DELETED_EDGE,false) {
-                    connect(visited,repo,&a1[1..(1+KEY_SIZE)],internal_patch_id,buf,folder_buf,false);
+                let mut cursor=repo.mdb_txn.cursor(&repo.dbi_nodes).unwrap();
+                let flag=[PARENT_EDGE|DELETED_EDGE];
+                let mut op=lmdb::Op::MDB_SET;
+                while let Ok((_,a1))=cursor.get(&a,Some(&flag[..]),op) {
+                    if a1[0] != flag[0] {
+                        break
+                    } else {
+                        connect(visited,repo,&a1[1..(1+KEY_SIZE)],internal_patch_id,buf,folder_buf,false);
+                        op=lmdb::Op::MDB_NEXT_DUP;
+                    }
                 }
                 if !is_first {
                     // Test for life of the current node
@@ -1708,21 +1647,30 @@ impl Repository {
                     }
 
                     // Look at all deleted folder parents, and add them.
-                    for a1 in CursIter::new(&mut cursor,&a,PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE,false) {
-                        folder_buf.push(PSEUDO_EDGE|PARENT_EDGE|FOLDER_EDGE);
-                        folder_buf.extend(a);
-                        folder_buf.extend(internal_patch_id);
-                        folder_buf.push(PSEUDO_EDGE|FOLDER_EDGE);
-                        folder_buf.extend(a1);
-                        folder_buf.extend(internal_patch_id);
+                    let flag=[PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE];
+                    op=lmdb::Op::MDB_SET;
+                    while let Ok((_,a1))=cursor.get(&a,Some(&flag[..]),op) {
+                        if a1[0] != flag[0] {
+                            break
+                        } else {
+                            folder_buf.push(PSEUDO_EDGE|PARENT_EDGE|FOLDER_EDGE);
+                            folder_buf.extend(a);
+                            folder_buf.extend(internal_patch_id);
+                            folder_buf.push(PSEUDO_EDGE|FOLDER_EDGE);
+                            folder_buf.extend(a1);
+                            folder_buf.extend(internal_patch_id);
+                            op=lmdb::Op::MDB_NEXT_DUP;
+                        }
                     }
                 }
             }
         }
-        let mut visited=HashSet::new();
         let mut buf=Vec::new();
         let mut folder_buf=Vec::new();
-        connect(&mut visited, self,a,internal_patch_id,&mut buf,&mut folder_buf,true);
+        {
+            let mut visited=HashSet::new();
+            connect(&mut visited, self,a,internal_patch_id,&mut buf,&mut folder_buf,true);
+        }
         let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         unsafe {
             copy_nonoverlapping(b.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
@@ -1731,22 +1679,20 @@ impl Repository {
         let mut i=0;
         while i<buf.len(){
             pu[0]=buf[i] ^ PARENT_EDGE;
-            unsafe {
-                mdb::put(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&buf[i..(i+1+KEY_SIZE+HASH_SIZE)],MDB_NODUPDATA).unwrap();
-                mdb::put(self.mdb_txn,self.dbi_nodes,&buf[(i+1)..(i+1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
-            }
+            self.mdb_txn.put(&self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&buf[i..(i+1+KEY_SIZE+HASH_SIZE)],lmdb::MDB_NODUPDATA).unwrap();
+            self.mdb_txn.put(&self.dbi_nodes,&buf[(i+1)..(i+1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
             i+=1+KEY_SIZE+HASH_SIZE
         }
         i=0;
         while i<folder_buf.len(){
-            unsafe {
-                mdb::put(self.mdb_txn,self.dbi_nodes,
-                         &folder_buf[(i+1)..(i+1+KEY_SIZE)],
-                         &folder_buf[(i+1+KEY_SIZE+HASH_SIZE)..(i+2*(1+KEY_SIZE+HASH_SIZE))],0).unwrap();
-                mdb::put(self.mdb_txn,self.dbi_nodes,
-                         &folder_buf[(i+1+KEY_SIZE+HASH_SIZE+1)..(i+1+KEY_SIZE+HASH_SIZE+KEY_SIZE)],
-                         &folder_buf[i..(i+1+KEY_SIZE+HASH_SIZE)],0).unwrap();
-            }
+            self.mdb_txn.put(&self.dbi_nodes,
+                             &folder_buf[(i+1)..(i+1+KEY_SIZE)],
+                             &folder_buf[(i+1+KEY_SIZE+HASH_SIZE)..(i+2*(1+KEY_SIZE+HASH_SIZE))],
+                             lmdb::Put::empty()).unwrap();
+            self.mdb_txn.put(&self.dbi_nodes,
+                             &folder_buf[(i+1+KEY_SIZE+HASH_SIZE+1)..(i+1+KEY_SIZE+HASH_SIZE+KEY_SIZE)],
+                             &folder_buf[i..(i+1+KEY_SIZE+HASH_SIZE)],
+                             lmdb::Put::empty()).unwrap();
             i+=2*(1+KEY_SIZE+HASH_SIZE)
         }
     }
@@ -1754,13 +1700,21 @@ impl Repository {
     /// Connect a to the alive descendants of b (not including folder descendants).
     fn connect_down(&mut self, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
         //println!("connect down: {}",to_hex(b));
-        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>, is_first:bool) {
+        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&'a Repository, b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>, is_first:bool) {
             if !visited.contains(b) {
                 visited.insert(b);
-                let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-                for b1 in CursIter::new(&mut cursor,&b,DELETED_EDGE,false) {
-                    connect(visited,repo,&b1[1..(1+KEY_SIZE)],internal_patch_id,buf,false);
+                let mut cursor=repo.mdb_txn.cursor(&repo.dbi_nodes).unwrap();
+                let flag=[DELETED_EDGE];
+                let mut op=lmdb::Op::MDB_SET;
+                while let Ok((_,b1))=cursor.get(&b,Some(&flag[..]),op) {
+                    if b1[0] != flag[0] {
+                        break
+                    } else {
+                        connect(visited,repo,&b1[1..(1+KEY_SIZE)],internal_patch_id,buf,false);
+                        op=lmdb::Op::MDB_NEXT_DUP;
+                    }
                 }
+
                 // for all alive descendants (including pseudo-descendants)
                 for b1 in CursIter::new(&mut cursor,&b,0,true) {
                     //println!("down->{}",to_hex(b1));
@@ -1776,9 +1730,11 @@ impl Repository {
                 }
             }
         }
-        let mut visited=HashSet::new();
         let mut buf=Vec::new();
-        connect(&mut visited, self,b,internal_patch_id,&mut buf,true);
+        {
+            let mut visited=HashSet::new();
+            connect(&mut visited, self,b,internal_patch_id,&mut buf,true);
+        }
         let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         unsafe {
             copy_nonoverlapping(a.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
@@ -1787,10 +1743,9 @@ impl Repository {
         let mut i=0;
         while i<buf.len(){
             pu[0]=buf[i] ^ PARENT_EDGE;
-            unsafe {
-                mdb::put(self.mdb_txn,self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&buf[i..(i+1+KEY_SIZE+HASH_SIZE)],MDB_NODUPDATA).unwrap();
-                mdb::put(self.mdb_txn,self.dbi_nodes,&buf[(i+1)..(i+1+KEY_SIZE)],&pu,MDB_NODUPDATA).unwrap();
-            }
+            self.mdb_txn.put(&self.dbi_nodes,&pu[1..(1+KEY_SIZE)],
+                             &buf[i..(i+1+KEY_SIZE+HASH_SIZE)],lmdb::MDB_NODUPDATA).unwrap();
+            self.mdb_txn.put(&self.dbi_nodes,&buf[(i+1)..(i+1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
             i+=1+KEY_SIZE+HASH_SIZE
         }
     }
@@ -1799,19 +1754,27 @@ impl Repository {
 
     /// Connect a to the alive descendants of b (not including folder descendants).
     fn connect_down_folders(&mut self, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
-        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&Repository, a:&'a[u8],b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>)->bool {
+        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&'a Repository, a:&'a[u8],b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>)->bool {
             if !visited.contains(b) {
                 visited.insert(b);
-                let mut cursor=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-                let flag=DELETED_EDGE|FOLDER_EDGE;
+                let cursor=repo.mdb_txn.cursor(&repo.dbi_nodes).unwrap();
                 let mut has_alive_descendants=false;
-                for b1 in CursIter::new(&mut cursor,&b,flag,true) {
-                    has_alive_descendants = has_alive_descendants ||
-                        connect(visited,repo,b,b1,internal_patch_id,buf);
+
+                let flag=[DELETED_EDGE|FOLDER_EDGE];
+                let mut op=lmdb::Op::MDB_SET;
+                while let Ok((_,b1))=cursor.get(&b,Some(&flag[..]),op) {
+                    if b1[0] != flag[0] && b1[0] != flag[0]|PSEUDO_EDGE{
+                        break
+                    } else {
+                        has_alive_descendants = has_alive_descendants ||
+                            connect(visited,repo,b,b1,internal_patch_id,buf);
+                        op=lmdb::Op::MDB_NEXT_DUP;
+                    }
                 }
+
                 // test for life.
                 let flag=[PARENT_EDGE|FOLDER_EDGE];
-                let v= unsafe { mdb::cursor_get(&cursor,&b,Some(&flag[..]),Op::MDB_GET_BOTH_RANGE).unwrap() };
+                let (_,v)= cursor.get(&b,Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE).unwrap();
                 let is_alive= if v.len()<1 { false } else { v[0]==flag[0] };
                 if is_alive {
                     true
@@ -1835,25 +1798,23 @@ impl Repository {
                 unreachable!()
             }
         }
-        let mut visited=HashSet::new();
         let mut buf=Vec::new();
-        connect(&mut visited, self,a,b,internal_patch_id,&mut buf);
+        {
+            let mut visited=HashSet::new();
+            connect(&mut visited, self,a,b,internal_patch_id,&mut buf);
+        }
         let mut i=0;
         while i<buf.len(){
             let sz=1+KEY_SIZE+HASH_SIZE;
-            unsafe {
-                mdb::put(self.mdb_txn,self.dbi_nodes,
-                         &buf[(i+1)..(i+1+KEY_SIZE)],
-                         &buf[(i+sz)..(i+2*sz)],MDB_NODUPDATA).unwrap();
-                mdb::put(self.mdb_txn,self.dbi_nodes,
-                         &buf[(i+sz+1)..(i+sz+1+KEY_SIZE)],
-                         &buf[i..(i+sz)],MDB_NODUPDATA).unwrap();
-            }
+            self.mdb_txn.put(&self.dbi_nodes,
+                             &buf[(i+1)..(i+1+KEY_SIZE)],
+                             &buf[(i+sz)..(i+2*sz)],lmdb::MDB_NODUPDATA).unwrap();
+            self.mdb_txn.put(&self.dbi_nodes,
+                             &buf[(i+sz+1)..(i+sz+1+KEY_SIZE)],
+                             &buf[i..(i+sz)],lmdb::MDB_NODUPDATA).unwrap();
             i+=2*sz
         }
     }
-
-
 
 
 
@@ -1879,12 +1840,10 @@ impl Repository {
                                 &inode[..]
                         };
                         //println!("adding inode: {:?} for node {:?}",inode,node);
-                        unsafe {
-                            node[1]=(nodes[0][0] & 0xff) as u8;
-                            node[2]=(nodes[0][1] & 0xff) as u8;
-                            mdb::put(self.mdb_txn,self.dbi_inodes,&inode_l2,&node,0).unwrap();
-                            mdb::put(self.mdb_txn,self.dbi_revinodes,&node[3..],&inode_l2,0).unwrap();
-                        }
+                        node[1]=(nodes[0][0] & 0xff) as u8;
+                        node[2]=(nodes[0][1] & 0xff) as u8;
+                        self.mdb_txn.put(&self.dbi_inodes,&inode_l2,&node,lmdb::Put::empty()).unwrap();
+                        self.mdb_txn.put(&self.dbi_revinodes,&node[3..],&inode_l2,lmdb::Put::empty()).unwrap();
                     }
                 },
                 Change::Edges{..} => {}
@@ -1893,22 +1852,25 @@ impl Repository {
     }
 
 
+    // Climp up the tree (using revtree).
     fn filename_of_inode(&self,inode:&[u8],working_copy:&mut PathBuf)->bool {
-        let mut v_inode=MDB_val{mv_data:inode.as_ptr() as *const c_void, mv_size:inode.len() as size_t};
-        let mut v_next:MDB_val = unsafe {std::mem::zeroed()};
+        //let mut v_inode=MDB_val{mv_data:inode.as_ptr() as *const c_void, mv_size:inode.len() as size_t};
+        //let mut v_next:MDB_val = unsafe {std::mem::zeroed()};
         let mut components=Vec::new();
+        let mut current=inode;
         loop {
-            let e = unsafe {mdb_get(self.mdb_txn,self.dbi_revtree,&mut v_inode, &mut v_next)};
-            if e==0 {
-                components.push(unsafe { slice::from_raw_parts((v_next.mv_data as *const u8).offset(INODE_SIZE as isize),
-                                                               (v_next.mv_size as usize-INODE_SIZE)) });
-                v_inode.mv_data=v_next.mv_data;
-                v_inode.mv_size=v_next.mv_size;
-                if unsafe { memcmp(v_next.mv_data, ROOT_INODE.as_ptr() as *const c_void, INODE_SIZE as size_t) } == 0 {
-                    break
-                }
-            } else {
-                return false
+            match self.mdb_txn.get(&self.dbi_revtree,current) {
+                Ok(Some(v))=>{
+                    components.push(&v[INODE_SIZE..]);
+                    current=&v[0..INODE_SIZE];
+                    if unsafe { memcmp(current.as_ptr() as *const c_void,
+                                       ROOT_INODE.as_ptr() as *const c_void,
+                                       INODE_SIZE as size_t) } == 0 {
+                        break
+                    }
+                },
+                Ok(None)=> return false,
+                Err(_)=>panic!("filename_of_inode")
             }
         }
         for c in components.iter().rev() {
@@ -1925,67 +1887,66 @@ impl Repository {
                                key:&'a [u8],path:&mut PathBuf,parent_inode:&'a [u8],
                                paths:&mut HashMap<PathBuf,Vec<(Vec<u8>,Vec<u8>,Vec<u8>,Option<PathBuf>,usize)>>,
                                cache:&mut HashSet<&'a [u8]>,
-                               nfiles:&mut usize) {
+                               nfiles:&mut usize)-> Result<(),Error> {
             if !cache.contains(key) {
                 cache.insert(key);
-                let mut curs_b=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
+                let mut curs_b=repo.mdb_txn.cursor(&repo.dbi_nodes).unwrap();
                 for b in CursIter::new(&mut curs_b,key,FOLDER_EDGE,true) {
                     let cont_b=
-                        match unsafe { mdb::get(repo.mdb_txn,repo.dbi_contents,&b[1..(1+KEY_SIZE)]) } {
-                            Ok(cont_b)=>cont_b,
-                            Err(_)=>&[][..]
+                        match try!(repo.mdb_txn.get(&repo.dbi_contents,&b[1..(1+KEY_SIZE)])) {
+                            Some(cont_b)=>cont_b,
+                            None=>&[][..]
                         };
                     if cont_b.len()<2 { panic!("node (b) too short") } else {
                         let filename=&cont_b[2..];
                         let perms= (((cont_b[0] as usize) << 8) | (cont_b[1] as usize)) & 0x1ff;
-                        let mut curs_c=Cursor::new(repo.mdb_txn,repo.dbi_nodes).unwrap();
-                        for c in CursIter::new(&mut curs_c,&b[1..(1+KEY_SIZE)],FOLDER_EDGE,true) {
-
-                            let mut cv=unsafe {MDB_val { mv_data:(c.as_ptr() as *const u8).offset(1) as *const c_void,
-                                                         mv_size:KEY_SIZE as size_t }};
-                            let mut cont_c:MDB_val=unsafe { std::mem::zeroed() };
-                            let e=unsafe {mdb_get(repo.mdb_txn,repo.dbi_contents,&mut cv,&mut cont_c) };
-                            if e!=0 {
-                                panic!("c contents not found")
-                            } else {
-                                let mut inode:MDB_val = unsafe { std::mem::zeroed() };
-                                let e=unsafe {mdb_get(repo.mdb_txn,repo.dbi_revinodes,&mut cv,&mut inode) };
-                                let inode=
-                                    if e==0 {
-                                        unsafe { slice::from_raw_parts(inode.mv_data as *const u8,
-                                                                       inode.mv_size as usize) }
-                                    } else {
+                        let curs_c=repo.mdb_txn.cursor(&repo.dbi_nodes).unwrap();
+                        let flag=[FOLDER_EDGE];
+                        let mut op=lmdb::Op::MDB_GET_BOTH_RANGE;
+                        while let Ok((_,c))=curs_c.get(&b[1..(1+KEY_SIZE)],Some(&flag[..]),op) {
+                            if c[0]==flag[0] || c[0]==flag[0]|PSEUDO_EDGE {
+                                op=lmdb::Op::MDB_NEXT_DUP;
+                                let cv=&c[1..(1+KEY_SIZE)];
+                                match try!(repo.mdb_txn.get(&repo.dbi_revinodes,cv)) {
+                                    Some(inode)=>{
+                                        path.push(std::str::from_utf8(filename).unwrap());
+                                        {
+                                            let vec=paths.entry(path.clone()).or_insert(Vec::new());
+                                            let mut buf=PathBuf::from(working_copy);
+                                            *nfiles+=1;
+                                            vec.push((c[1..(1+KEY_SIZE)].to_vec(),parent_inode.to_vec(),inode.to_vec(),
+                                                      if repo.filename_of_inode(inode,&mut buf) {Some(buf)} else { None },
+                                                      perms))
+                                        }
+                                        if perms & DIRECTORY_FLAG != 0 { // is_directory
+                                            try!(retrieve_paths(repo,working_copy,&c[1..(1+KEY_SIZE)],path,inode,paths,cache,nfiles));
+                                        }
+                                        path.pop();
+                                    },
+                                    None =>{
                                         panic!("inodes not synchronized")
-                                    };
-                                path.push(std::str::from_utf8(filename).unwrap());
-                                {
-                                    let vec=paths.entry(path.clone()).or_insert(Vec::new());
-                                    let mut buf=PathBuf::from(working_copy);
-                                    *nfiles+=1;
-                                    vec.push((c[1..(1+KEY_SIZE)].to_vec(),parent_inode.to_vec(),inode.to_vec(),
-                                              if repo.filename_of_inode(inode,&mut buf) {Some(buf)} else { None },
-                                              perms))
+                                    }
                                 }
-                                if perms & DIRECTORY_FLAG != 0 { // is_directory
-                                    retrieve_paths(repo,working_copy,&c[1..(1+KEY_SIZE)],path,inode,paths,cache,nfiles);
-                                }
-                                path.pop();
+                            } else {
+                                break
                             }
                         }
                     }
                 }
             }
+            Ok(())
         }
         let mut paths=HashMap::new();
-        let mut cache=HashSet::new();
-        let mut buf=PathBuf::from(working_copy);
         let mut nfiles=0;
-        retrieve_paths(self,working_copy,&ROOT_KEY,&mut buf,ROOT_INODE,&mut paths,&mut cache,&mut nfiles);
-
+        {
+            let mut cache=HashSet::new();
+            let mut buf=PathBuf::from(working_copy);
+            try!(retrieve_paths(self,working_copy,&ROOT_KEY,&mut buf,ROOT_INODE,&mut paths,&mut cache,&mut nfiles));
+        }
         //println!("dropping tree");
-        unsafe {
-            mdb_drop(self.mdb_txn,self.dbi_tree,0);
-            mdb_drop(self.mdb_txn,self.dbi_revtree,0);
+        {
+            try!(self.mdb_txn.drop(&self.dbi_tree,false));
+            try!(self.mdb_txn.drop(&self.dbi_revtree,false));
         };
         let mut updates=Vec::with_capacity(nfiles);
         for (k,a) in paths {
@@ -2021,32 +1982,31 @@ impl Repository {
 
     fn update_tree(&mut self,updates:Vec<(Vec<u8>,Vec<u8>)>){
         for (par,inode) in updates {
-            unsafe {
-                mdb::put(self.mdb_txn,self.dbi_tree,&par,&inode,0).unwrap();
-                mdb::put(self.mdb_txn,self.dbi_revtree,&inode,&par,0).unwrap();
-            }
+            self.mdb_txn.put(&self.dbi_tree,&par,&inode,lmdb::Put::empty()).unwrap();
+            self.mdb_txn.put(&self.dbi_revtree,&inode,&par,lmdb::Put::empty()).unwrap();
         }
     }
 
 
-    pub fn output_repository(&mut self, working_copy:&Path, pending:&Patch) -> Result<(),Error>{
+    pub fn output_repository(mut self, working_copy:&Path, pending:&Patch) -> Result<Repository<'a>,Error>{
         unsafe {
-            let parent_txn=self.mdb_txn;
+            let mut internal=[0;HASH_SIZE];
+            let parent_txn=self.mdb_txn.txn;
             let txn=ptr::null_mut();
-            let e=mdb_txn_begin(self.mdb_env,self.mdb_txn,0,std::mem::transmute(&txn));
-            if e==0 {
-                self.mdb_txn=txn;
-                let mut internal=[0;HASH_SIZE];
-                self.new_internal(&mut internal[..]);
-                try!(self.apply(pending,&internal[..]));
-                let updates=try!(self.unsafe_output_repository(working_copy));
-                mdb_txn_abort(txn);
-                self.mdb_txn=parent_txn;
-                self.update_tree(updates);
-                Ok(())
-            } else {
-                Err(Error::IoError(std::io::Error::from_raw_os_error(e)))
+
+            let e=lmdb::mdb_txn_begin(self.mdb_env.env,self.mdb_txn.txn,0,std::mem::transmute(&txn));
+            if e!=0 {
+                return Err(Error::IoError(std::io::Error::from_raw_os_error(e)))
             }
+            self.mdb_txn.txn=txn;
+            self.new_internal(&mut internal[..]);
+
+            let mut repository=self.apply(pending,&internal[..]).unwrap();
+            let updates=try!(repository.unsafe_output_repository(working_copy));
+            lmdb::mdb_txn_abort(txn);
+            repository.mdb_txn.txn=parent_txn;
+            repository.update_tree(updates);
+            Ok(repository)
         }
     }
 
@@ -2060,29 +2020,25 @@ impl Repository {
                         +if (i as u8)&PSEUDO_EDGE!=0 { ", style=dotted"} else {""})
         }
         w.write(b"digraph{\n").unwrap();
-        let curs=Cursor::new(self.mdb_txn,self.dbi_nodes).unwrap();
-        unsafe {
-            let mut k:MDB_val=std::mem::zeroed();
-            let mut v:MDB_val=std::mem::zeroed();
-            let mut e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_FIRST as c_uint);
-            let cur=&[];
-            while e==0 {
-                let kk=slice::from_raw_parts(k.mv_data as *const u8,k.mv_size as usize);
-                let vv=slice::from_raw_parts(v.mv_data.offset(1) as *const u8,KEY_SIZE as usize);
-                if kk!=cur {
-                    let mut ww:MDB_val=std::mem::zeroed();
-                    let f=mdb_get(self.mdb_txn,self.dbi_contents, &mut k, &mut ww);
-                    let cont:&[u8]=
-                        if f==0 { slice::from_raw_parts(ww.mv_data as *const u8,ww.mv_size as usize) } else { &[] };
-                    write!(w,"n_{}[label=\"{}: {}\"];\n", to_hex(&kk), to_hex(&kk),
-                           //&""
-                           match str::from_utf8(&cont) { Ok(x)=>x.to_string(), Err(_)=> to_hex(&cont) }
-                           ).unwrap();
-                }
-                let flag:u8= * (v.mv_data as *const u8);
-                write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", to_hex(&kk), to_hex(&vv), styles[(flag&0xff) as usize], flag).unwrap();
-                e=mdb_cursor_get(curs.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint);
+        let curs=self.mdb_txn.cursor(&self.dbi_nodes).unwrap();
+        let mut op=lmdb::Op::MDB_FIRST;
+        let mut cur=&[][..];
+        while let Ok((k,v))=curs.get(cur,None,op) {
+            op=lmdb::Op::MDB_NEXT;
+            if k!=cur {
+                let f=self.mdb_txn.get(&self.dbi_contents, k);
+                let cont:&[u8]=
+                    match f {
+                        Ok(Some(ww))=>ww,
+                        _=>&[]
+                    };
+                write!(w,"n_{}[label=\"{}: {}\"];\n", to_hex(&k), to_hex(&k),
+                       match str::from_utf8(&cont) { Ok(x)=>x.to_string(), Err(_)=> to_hex(&cont) }
+                       ).unwrap();
+                cur=k;
             }
+            let flag=v[0];
+            write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", to_hex(&k), to_hex(&v[1..(1+KEY_SIZE)]), styles[(flag&0xff) as usize], flag).unwrap();
         }
         w.write(b"}\n").unwrap();
     }

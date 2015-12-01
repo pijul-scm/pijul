@@ -52,31 +52,31 @@ pub enum Op {
 }
 
 extern "C" {
-    fn mdb_env_create(env: *mut *mut MdbEnv) -> c_int;
-    fn mdb_env_open(env: *mut MdbEnv, path: *const c_char, flags: c_uint, mode: mode_t) -> c_int;
-    fn mdb_env_close(env: *mut MdbEnv);
-    fn mdb_env_set_maxdbs(env: *mut MdbEnv,maxdbs:c_uint)->c_int;
-    fn mdb_env_set_mapsize(env: *mut MdbEnv,mapsize:size_t)->c_int;
-    fn mdb_reader_check(env:*mut MdbEnv,dead:*mut c_int)->c_int;
-    fn mdb_txn_begin(env: *mut MdbEnv,parent: *mut MdbTxn, flags:c_uint, txn: *mut *mut MdbTxn)->c_int;
-    fn mdb_txn_commit(txn: *mut MdbTxn)->c_int;
-    fn mdb_txn_abort(txn: *mut MdbTxn);
-    fn mdb_dbi_open(txn: *mut MdbTxn, name: *const c_char, flags:c_uint, dbi:*mut MdbDbi)->c_int;
-    fn mdb_get(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
-    fn mdb_put(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
-    fn mdb_del(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
-    fn mdb_cursor_get(cursor: *mut MdbCursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
-    fn mdb_cursor_put(cursor: *mut MdbCursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
-    fn mdb_cursor_del(cursor: *mut MdbCursor, flags:c_uint)->c_int;
-    fn mdb_cursor_open(txn: *mut MdbTxn, dbi:MdbDbi, cursor:*mut *mut MdbCursor)->c_int;
-    fn mdb_cursor_close(cursor: *mut MdbCursor);
-    fn mdb_drop(txn:*mut MdbTxn,dbi:MdbDbi,del:c_int)->c_int;
+    pub fn mdb_env_create(env: *mut *mut MdbEnv) -> c_int;
+    pub fn mdb_env_open(env: *mut MdbEnv, path: *const c_char, flags: c_uint, mode: mode_t) -> c_int;
+    pub fn mdb_env_close(env: *mut MdbEnv);
+    pub fn mdb_env_set_maxdbs(env: *mut MdbEnv,maxdbs:c_uint)->c_int;
+    pub fn mdb_env_set_mapsize(env: *mut MdbEnv,mapsize:size_t)->c_int;
+    pub fn mdb_reader_check(env:*mut MdbEnv,dead:*mut c_int)->c_int;
+    pub fn mdb_txn_begin(env: *mut MdbEnv,parent: *mut MdbTxn, flags:c_uint, txn: *mut *mut MdbTxn)->c_int;
+    pub fn mdb_txn_commit(txn: *mut MdbTxn)->c_int;
+    pub fn mdb_txn_abort(txn: *mut MdbTxn);
+    pub fn mdb_dbi_open(txn: *mut MdbTxn, name: *const c_char, flags:c_uint, dbi:*mut MdbDbi)->c_int;
+    pub fn mdb_get(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
+    pub fn mdb_put(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    pub fn mdb_del(txn: *mut MdbTxn, dbi:MdbDbi, key: *mut MDB_val, val:*mut MDB_val)->c_int;
+    pub fn mdb_cursor_get(cursor: *mut MdbCursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    pub fn mdb_cursor_put(cursor: *mut MdbCursor, key: *mut MDB_val, val:*mut MDB_val,flags:c_uint)->c_int;
+    pub fn mdb_cursor_del(cursor: *mut MdbCursor, flags:c_uint)->c_int;
+    pub fn mdb_cursor_open(txn: *mut MdbTxn, dbi:MdbDbi, cursor:*mut *mut MdbCursor)->c_int;
+    pub fn mdb_cursor_close(cursor: *mut MdbCursor);
+    pub fn mdb_drop(txn:*mut MdbTxn,dbi:MdbDbi,del:c_int)->c_int;
 }
 
 
-pub struct Env { env:*mut MdbEnv }
+pub struct Env { pub env:*mut MdbEnv }
 
-pub struct Txn<'a> { txn:*mut MdbTxn,env:PhantomData<&'a Env> }
+pub struct Txn<'a> { pub txn:*mut MdbTxn,env:PhantomData<&'a Env> }
 
 unsafe fn txn<'a,'b>(env:&'a Env,parent:*mut MdbTxn,flags:usize)->Result<Txn<'b>,Error> {
     let txn=ptr::null_mut();
@@ -148,19 +148,25 @@ impl Env {
 pub struct Dbi { dbi:MdbDbi }
 
 impl <'a>Txn<'a> {
-    pub unsafe fn unsafe_commit(&self) -> Result<(),Error> {
+    pub unsafe fn unsafe_commit(&mut self) -> Result<(),Error> {
         let e=mdb_txn_commit(self.txn);
+        self.txn=std::ptr::null_mut();
         if e==0 { Ok(()) } else { Err(Error::from_raw_os_error(e)) }
     }
     pub fn commit(self)->Result<(),Error> {
-        let e=unsafe {mdb_txn_commit(self.txn)};
+        let mut txn=self;
+        let e=unsafe {mdb_txn_commit(txn.txn) };
+        txn.txn=std::ptr::null_mut();
         if e==0 { Ok(()) } else { Err(Error::from_raw_os_error(e)) }
     }
-    pub unsafe fn unsafe_abort(&self) {
-        mdb_txn_abort(self.txn)
+    pub unsafe fn unsafe_abort(&mut self) {
+        mdb_txn_abort(self.txn);
+        self.txn=std::ptr::null_mut();
     }
     pub fn abort(self) {
-        unsafe {mdb_txn_abort(self.txn)}
+        let mut txn=self;
+        unsafe {mdb_txn_abort(txn.txn)};
+        txn.txn=std::ptr::null_mut()
     }
 
     pub fn dbi_open(&self,name:&[u8],flag:DbiOpen)->Result<Dbi,Error> {
@@ -253,7 +259,9 @@ impl <'a> Drop for Cursor<'a> {
 
 impl <'a> Drop for Txn<'a> {
     fn drop(&mut self){
-        unsafe { mdb_txn_abort(self.txn) }
+        if !self.txn.is_null() {
+            unsafe { mdb_txn_abort(self.txn) }
+        }
     }
 }
 
@@ -263,8 +271,12 @@ impl Drop for Env {
     }
 }
 
-impl <'a>Cursor<'a> {
-    pub fn get<'b>(&'b self,key:&[u8],val:Option<&[u8]>,op:Op)->Result<(&'a[u8],&'a[u8]),c_int> {
+pub trait CursorGet<'a> {
+    fn get<'b>(&'b self,key:&[u8],val:Option<&[u8]>,op:Op)->Result<(&'a[u8],&'a[u8]),c_int>;
+}
+
+impl <'a>CursorGet<'a> for Cursor<'a> {
+    fn get<'b>(&'b self,key:&[u8],val:Option<&[u8]>,op:Op)->Result<(&'a[u8],&'a[u8]),c_int> {
         unsafe {
             let mut k= MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             match val {
@@ -285,10 +297,6 @@ impl <'a>Cursor<'a> {
     }
 }
 impl <'a>MutCursor<'a> {
-    pub fn get(&self,key:&[u8],val:Option<&[u8]>,op:Op)->Result<(&'a[u8],&'a[u8]),c_int> {
-        let curs = Cursor { cursor:self.cursor,txn:self.txn };
-        curs.get(key,val,op)
-    }
     pub fn put(&mut self,key:&[u8],val:&[u8],flags:c_uint)->Result<(),c_int> {
         unsafe {
             let mut k= MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
@@ -302,6 +310,13 @@ impl <'a>MutCursor<'a> {
             let e=mdb_cursor_del(self.cursor,flags);
             if e==0 { Ok(()) } else {Err(e)}
         }
+    }
+}
+
+impl <'a>CursorGet<'a> for MutCursor<'a>{
+    fn get(&self,key:&[u8],val:Option<&[u8]>,op:Op)->Result<(&'a[u8],&'a[u8]),c_int> {
+        let curs = Cursor { cursor:self.cursor,txn:self.txn };
+        curs.get(key,val,op)
     }
 }
 
