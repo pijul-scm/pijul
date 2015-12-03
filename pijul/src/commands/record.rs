@@ -96,17 +96,19 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let mut internal=[0;HASH_SIZE];
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 repo.new_internal(&mut internal);
-                //println!("applying");
-                repo.apply(&patch_arc, &internal).unwrap();
+                debug!(target:"pijul","applying patch");
+                let mut repo=repo.apply(&patch_arc, &internal).unwrap();
                 //println!("sync");
                 //let t1=time::precise_time_s();
                 //info!("applied patch in {}s", t1-t0);
+                debug!(target:"pijul","synchronizing tree");
                 repo.sync_file_additions(&patch_arc.changes[..],&syncs, &internal);
-
-                if true || cfg!(debug_assertions){
+                /*
+                if cfg!(debug_assertions){
                     let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
                     repo.debug(&mut buffer);
                 }
+                 */
                 let t2=time::precise_time_s();
                 info!("applied patch in {}s", t2-t0);
 

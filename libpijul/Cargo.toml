@@ -10,7 +10,7 @@ libc = "*"
 rustc-serialize="0.3"
 rand = "*"
 rust-crypto="*"
-lmdb = {path="../lmdb"}
+
 time="*"
 log="0.3"
 serde="*"

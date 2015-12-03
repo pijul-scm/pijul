@@ -162,26 +162,27 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 }
             }
             // Then download the patches, and apply.
-            fn apply_patches(repo:&mut Repository, branch:&[u8], remote:&Remote, local_patches:&Path, patch_hash:&[u8], patches_were_applied:&mut bool)->Result<(),Error>{
+            fn apply_patches<'a>(repo:Repository<'a>, branch:&[u8], remote:&Remote, local_patches:&Path, patch_hash:&[u8], patches_were_applied:&mut bool)->Result<Repository<'a>,Error>{
                 // download this patch
                 //println!("has patch : {:?}",patch_hash);
+                let mut repo=repo;
                 if !try!(repo.has_patch(branch,patch_hash)) {
                     let local_patch=try!(download_patch(remote,local_patches,patch_hash));
                     let mut buffer = BufReader::new(try!(File::open(local_patch)));
                     let patch=try!(Patch::from_reader(&mut buffer));
                     for dep in patch.dependencies.iter() {
-                        try!(apply_patches(repo,branch,remote,local_patches,&dep,patches_were_applied))
+                        repo= try!(apply_patches(repo,branch,remote,local_patches,&dep,patches_were_applied))
                     }
                     let mut internal=[0;HASH_SIZE];
                     repo.new_internal(&mut internal);
                     //println!("pulling and applying patch {}",to_hex(patch_hash));
-                    try!(repo.apply(&patch, &internal));
+                    let mut repo=try!(repo.apply(&patch, &internal));
                     *patches_were_applied=true;
                     repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);
                     repo.register_hash(&internal[..],patch_hash);
-                    Ok(())
+                    Ok(repo)
                 } else {
-                    Ok(())
+                    Ok(repo)
                 }
             }
             let repo_dir=pristine_dir(r);
@@ -198,12 +199,12 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             };
             let mut patches_were_applied=false;
             for p in pullable {
-                try!(apply_patches(&mut repo,&current_branch,&args.remote,&local_patches,p,&mut patches_were_applied))
+                repo=try!(apply_patches(repo,&current_branch,&args.remote,&local_patches,p,&mut patches_were_applied))
             }
-            if patches_were_applied {
+            let mut repo = if patches_were_applied {
                 try!(repo.write_changes_file(&branch_changes_file(r,&current_branch)));
-                try!(repo.output_repository(&r,&pending));
-            }
+                try!(repo.output_repository(&r,&pending))
+            } else { repo };
             if cfg!(debug_assertions){
                 let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
                 repo.debug(&mut buffer);
