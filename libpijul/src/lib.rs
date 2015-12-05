@@ -1520,7 +1520,10 @@ impl <'a> Repository<'a> {
         info!(target:"libpijul::apply","unsafe_apply took: {}", time1-time0);
         let mut children=Vec::new();
         let zero:[u8;HASH_SIZE]=[0;HASH_SIZE];
-
+        let mut max_parents=0;
+        let mut max_children=0;
+        let mut max_parents_single=0;
+        let mut max_children_single=0;
         let cursor= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let cursor_= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
 
@@ -1549,24 +1552,31 @@ impl <'a> Repository<'a> {
                         }
                         let (pu,pv)= if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
                         info!(target:"libpijul_deleting","{} {}", to_hex(pu),to_hex(pv));
+                        let mut parents_count=0;
                         if is_alive(cursor_,pu) {
                             //alive_parents.insert(pu);
                             parents.push(PSEUDO_EDGE|PARENT_EDGE);
                             parents.extend(pu);
                             parents.extend(&zero);
+                            parents_count+=1;
                         }
                         for parent in CursIter::new(cursor,pv,PARENT_EDGE,true) {
                             if is_alive(cursor_,&parent[1..(1+KEY_SIZE)]) {
                                 alive_parents.insert(&parent[1..(1+KEY_SIZE)]);
+                                parents_count+=1;
                             }
                         }
+                        max_parents_single=std::cmp::max(max_parents_single,parents_count);
+                        let mut children_count=0;
                         // pv is being deleted. Look at its alive children.
                         for child in CursIter::new(cursor,pv,0,true) {
                             if is_alive(cursor_,&child[1..(1+KEY_SIZE)]) {
                                 info!(target:"libpijul_deleting","child alive: {}", to_hex(&child[1..(1+KEY_SIZE)]));
                                 alive_children.insert(&child[1..(1+KEY_SIZE)]);
+                                children_count+=1
                             }
                         }
+                        max_children_single=std::cmp::max(max_children_single,children_count);
                     }
                     let mut children:Vec<u8>=Vec::with_capacity(KEY_SIZE*alive_children.len());
                     for child in alive_children {
@@ -1604,6 +1614,8 @@ impl <'a> Repository<'a> {
                         }
                         self.kill_obsolete_pseudo_edges(cursor,&v);
                     }
+                    max_parents=std::cmp::max(max_parents,parents.len()/(1+KEY_SIZE+HASH_SIZE));
+                    max_children=std::cmp::max(max_children,children.len()/(1+KEY_SIZE+HASH_SIZE));
                 },
                 Change::Edges{ref edges,ref flag}=>{
                     for e in edges {
@@ -1703,7 +1715,7 @@ impl <'a> Repository<'a> {
             lmdb::mdb_cursor_close(cursor_);
         }
         let time2=time::precise_time_s();
-        info!(target:"libpijul","apply took: {}", time2-time1);
+        info!(target:"libpijul_apply","apply took: {}, max_parents:{} (single {}), max_children:{} (single {})", time2-time1,max_parents,max_parents_single,max_children,max_children_single);
         for ref dep in patch.dependencies.iter() {
             let dep_internal=self.internal_hash(&dep).unwrap().to_vec();
             self.mdb_txn.put(self.dbi_revdep,&dep_internal,internal,0).unwrap();
@@ -2122,7 +2134,9 @@ impl <'a> Repository<'a> {
                 cur=k;
             }
             let flag=v[0];
-            write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", to_hex(&k), to_hex(&v[1..(1+KEY_SIZE)]), styles[(flag&0xff) as usize], flag).unwrap();
+            //if flag & PARENT_EDGE == 0 {
+                write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", to_hex(&k), to_hex(&v[1..(1+KEY_SIZE)]), styles[(flag&0xff) as usize], flag).unwrap();
+            //}
         }
         w.write(b"}\n").unwrap();
     }
