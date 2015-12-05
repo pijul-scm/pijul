@@ -785,13 +785,38 @@ impl <'a> Repository<'a> {
     /// Create a new internal patch id, register it in the "external" and
     /// "internal" bases, and write the result in its second argument
     /// ("result").
+    ///
+    /// When compiled in debug mode, this function is deterministic
+    /// and returns the last registered patch number, plus one (in big
+    /// endian binary on HASH_SIZE bytes). Otherwise, it returns a
+    /// random patch number not yet registered.
     pub fn new_internal(&mut self,result:&mut[u8]) {
-        for i in 0..result.len() { result[i]=rand::random() }
-        loop {
-            match self.mdb_txn.get(self.dbi_external,&result) {
-                Ok(None)=>break,
-                Ok(_)=>{for i in 0..result.len() { result[i]=rand::random() }},
-                Err(_)=>panic!("")
+
+        if cfg!(debug_assertions){
+            let curs=self.mdb_txn.cursor(self.dbi_external).unwrap();
+            if let Ok((k,_))=curs.get(b"",None,lmdb::Op::MDB_LAST) {
+                unsafe { copy_nonoverlapping(k.as_ptr() as *const c_void,result.as_mut_ptr() as *mut c_void, HASH_SIZE) }
+            } else {
+                for i in 0..HASH_SIZE { result[i]=0 }
+            };
+            let mut i=HASH_SIZE-1;
+            while i>0 && result[i]==0xff {
+                result[i]=0;
+                i-=1
+            }
+            if result[i] != 0xff {
+                result[i]+=1
+            } else {
+                panic!("the last patch in the universe has arrived")
+            }
+        } else {
+            for i in 0..result.len() { result[i]=rand::random() }
+            loop {
+                match self.mdb_txn.get(self.dbi_external,&result) {
+                    Ok(None)=>break,
+                    Ok(_)=>{for i in 0..result.len() { result[i]=rand::random() }},
+                    Err(_)=>panic!("")
+                }
             }
         }
     }
@@ -1217,13 +1242,10 @@ impl <'a> Repository<'a> {
     }
 
     fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:&[u8]){
-        let zero:[u8;HASH_SIZE]=[0;HASH_SIZE];
         let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let mut time_newnodes=0f64;
         let mut time_edges=0f64;
-        let mut time_reconnect0=0f64;
-        let mut time_reconnect1=0f64;
         let alive= unsafe { self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let cursor= unsafe { self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         for ch in changes {
@@ -1357,7 +1379,7 @@ impl <'a> Repository<'a> {
             lmdb::mdb_cursor_close(alive);
             lmdb::mdb_cursor_close(cursor)
         };
-        info!(target:"libpijul","edges: {} (reconnect {} {}), newnodes: {}", time_edges,time_reconnect0,time_reconnect1,time_newnodes);
+        info!(target:"libpijul","edges: {} newnodes: {}", time_edges,time_newnodes);
     }
 
     pub fn has_patch(&self, branch:&[u8], hash:&[u8])->Result<bool,Error>{
@@ -1456,20 +1478,98 @@ impl <'a> Repository<'a> {
             }
         }
         self.mdb_txn.put(self.dbi_branches,&current,&internal,lmdb::MDB_NODUPDATA).unwrap();
-        //println!("unsafe apply");
         let time0=time::precise_time_s();
         self.unsafe_apply(&patch.changes,internal);
         let time1=time::precise_time_s();
-        info!(target:"libpijul","unsafe_apply took: {}", time1-time0);
-        //println!("/unsafe apply");
+        info!(target:"libpijul::apply","unsafe_apply took: {}", time1-time0);
         let mut children=Vec::new();
+        let zero:[u8;HASH_SIZE]=[0;HASH_SIZE];
 
         let cursor= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let cursor_= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
 
         for ch in patch.changes.iter() {
             match *ch {
-                Change::Edges{ref edges,ref flag} =>{
+                Change::Edges{ref edges,ref flag} if flag & DELETED_EDGE!=0=>{
+                    /*if (*flag)&FOLDER_EDGE!=0 {
+                    self.connect_down_folders(pu,pv,&internal)
+                } else {*/
+                    let mut u:[u8;KEY_SIZE]=[0;KEY_SIZE];
+                    let mut v:[u8;KEY_SIZE]=[0;KEY_SIZE];
+                    let mut alive_children=HashSet::new();
+                    let mut alive_parents=HashSet::new();
+                    let mut parents:Vec<u8>=Vec::with_capacity(edges.len()*2);
+                    for e in edges {
+                        info!(target:"libpijul::apply","edge={:?}", e);
+                        unsafe {
+                            let hu=self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
+                            let hv=self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]).unwrap();
+                            copy_nonoverlapping(hu.as_ptr(),u.as_mut_ptr(),HASH_SIZE);
+                            copy_nonoverlapping(hv.as_ptr(),v.as_mut_ptr(),HASH_SIZE);
+                            copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize),
+                                                u.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
+                            copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize),
+                                                v.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
+                        }
+                        let (pu,pv)= if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
+                        info!(target:"libpijul_deleting","{} {}", to_hex(pu),to_hex(pv));
+                        if is_alive(cursor_,pu) {
+                            //alive_parents.insert(pu);
+                            parents.push(PSEUDO_EDGE|PARENT_EDGE);
+                            parents.extend(pu);
+                            parents.extend(&zero);
+                        }
+                        for parent in CursIter::new(cursor,pv,PARENT_EDGE,true) {
+                            if is_alive(cursor_,&parent[1..(1+KEY_SIZE)]) {
+                                alive_parents.insert(&parent[1..(1+KEY_SIZE)]);
+                            }
+                        }
+                        // pv is being deleted. Look at its alive children.
+                        for child in CursIter::new(cursor,pv,0,true) {
+                            if is_alive(cursor_,&child[1..(1+KEY_SIZE)]) {
+                                info!(target:"libpijul_deleting","child alive: {}", to_hex(&child[1..(1+KEY_SIZE)]));
+                                alive_children.insert(&child[1..(1+KEY_SIZE)]);
+                            }
+                        }
+                    }
+                    let mut children:Vec<u8>=Vec::with_capacity(KEY_SIZE*alive_children.len());
+                    for child in alive_children {
+                        children.push(PSEUDO_EDGE);
+                        children.extend(child);
+                        children.extend(&zero);
+                    }
+                    for parent in alive_parents {
+                        parents.push(PSEUDO_EDGE|PARENT_EDGE);
+                        parents.extend(parent);
+                        parents.extend(&zero);
+                    }
+                    let mut i=0;
+                    while i<children.len() {
+                        let mut j=0;
+                        while j<parents.len() {
+                            info!(target:"libpijul::apply","now adding pseudo-edge {}/{} {}/{}", i,children.len(),j,parents.len());
+                            if !self.connected(cursor,
+                                               &parents[j+1 .. j+1+KEY_SIZE],
+                                               &mut children[i .. i+1+KEY_SIZE+HASH_SIZE]) {
+                                self.add_pseudo_edge(&parents[j..(j+1+KEY_SIZE+HASH_SIZE)],
+                                                     &mut children[i..(i+1+KEY_SIZE+HASH_SIZE)]);
+                            }
+                            j+=1+KEY_SIZE+HASH_SIZE;
+                        }
+                        i+=1+KEY_SIZE+HASH_SIZE;
+                    }
+                    for e in edges {
+                        let to= if (*flag)&PARENT_EDGE!=0 { &e.from } else { &e.to };
+                        unsafe {
+                            let hv=self.internal_hash(&to[0..(e.to.len()-LINE_SIZE)]).unwrap();
+                            copy_nonoverlapping(hv.as_ptr(),v.as_mut_ptr(),HASH_SIZE);
+                            copy_nonoverlapping(to.as_ptr().offset((to.len()-LINE_SIZE) as isize),
+                                                v.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
+                        }
+                        self.kill_obsolete_pseudo_edges(cursor,&v);
+                    }
+                },
+                Change::Edges{ref edges,ref flag}=>{
                     for e in edges {
                         let mut u:[u8;KEY_SIZE]=[0;KEY_SIZE];
                         let mut v:[u8;KEY_SIZE]=[0;KEY_SIZE];
@@ -1483,38 +1583,27 @@ impl <'a> Repository<'a> {
                             copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize),
                                                 v.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
                         }
-                        if (*flag)&DELETED_EDGE!=0 {
-                            let (pu,pv)= if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
-                            if (*flag)&FOLDER_EDGE!=0 {
-                                self.connect_down_folders(pu,pv,&internal)
-                            } else {
-                                if !is_alive(cursor,pv) {
-                                    self.kill_obsolete_pseudo_edges(cursor,pv)
-                                }
+                        let (pu,pv) = if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
+                        {
+                            if !is_alive(cursor,&pu[..]) {
+                                //panic!("should not be called here");
+                                self.connect_up(pu,pv,&internal);
                             }
-                        } else {
-                            let (pu,pv) = if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
+                        }
+                        if (*flag)&FOLDER_EDGE == 0 {
+                            // Now connect v to alive descendants of v (following deleted edges from v).
+                            children.clear();
                             {
-                                if !is_alive(cursor,&pu[..]) {
-                                    //panic!("should not be called here");
-                                    self.connect_up(pu,pv,&internal);
-                                }
-                            }
-                            if (*flag)&FOLDER_EDGE == 0 {
-                                // Now connect v to alive descendants of v (following deleted edges from v).
-                                children.clear();
-                                {
-                                    for w in CursIter::new(cursor,pu,DELETED_EDGE,false) {
-                                        if is_alive(cursor_,&w[1..(1+KEY_SIZE)]) {
-                                            children.extend(&w[1..(1+KEY_SIZE)]);
-                                        }
+                                for w in CursIter::new(cursor,pu,DELETED_EDGE,false) {
+                                    if is_alive(cursor_,&w[1..(1+KEY_SIZE)]) {
+                                        children.extend(&w[1..(1+KEY_SIZE)]);
                                     }
                                 }
-                                let mut i=0;
-                                while i<children.len() {
-                                    self.connect_down(&children[i..(i+KEY_SIZE)],pv,&internal);
-                                    i+=KEY_SIZE
-                                }
+                            }
+                            let mut i=0;
+                            while i<children.len() {
+                                self.connect_down(&children[i..(i+KEY_SIZE)],pv,&internal);
+                                i+=KEY_SIZE
                             }
                         }
                     }
