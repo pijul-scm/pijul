@@ -26,9 +26,10 @@ use std::fs::File;
 use std::str::{from_utf8};
 
 use std;
-extern crate serde_cbor;
-use self::serde_cbor::{to_writer};
-
+//extern crate serde_cbor;
+extern crate bincode;
+//use self::serde_cbor::{to_writer};
+use self::bincode::{SizeLimit};
 extern crate crypto;
 use self::crypto::digest::Digest;
 use self::crypto::sha2::Sha512;
@@ -86,12 +87,12 @@ impl Patch {
         Patch { changes:vec!(), dependencies:vec!() }
     }
     pub fn from_reader<R>(r:&mut R)->Result<Patch,Error> where R:Read {
-        let p=try!(serde_cbor::de::from_reader(r).map_err(Error::PatchDecoding));
+        let p=try!(bincode::serde::deserialize_from(r,SizeLimit::Infinite).map_err(Error::PatchDecoding));
         Ok(p)
     }
 
     pub fn to_writer<W>(&self,w:&mut W)->Result<(),Error> where W:Write {
-        try!(serde_cbor::ser::to_writer(w,self).map_err(Error::PatchEncoding));
+        try!(bincode::serde::serialize_into(w,self,SizeLimit::Infinite).map_err(Error::PatchEncoding));
         Ok(())
     }
     pub fn save(&self,dir:&Path)->Result<Vec<u8>,Error>{
@@ -132,7 +133,7 @@ impl Patch {
 pub fn write_changes(patches:&Vec<Vec<u8>>,changes_file:&Path)->Result<(),Error>{
     let file=try!(File::create(changes_file).map_err(Error::IoError));
     let mut buffer = BufWriter::new(file);
-    try!(serde_cbor::ser::to_writer(&mut buffer,&patches).map_err(Error::PatchEncoding));
+    try!(bincode::serde::serialize_into(&mut buffer,&patches,SizeLimit::Infinite).map_err(Error::PatchEncoding));
     //let encoded=try!(encode(&patches).map_err(Error::Encoder));
     //try!(buffer.write(encoded.as_bytes()).map_err(Error::IO));
     Ok(())
@@ -141,7 +142,7 @@ pub fn write_changes(patches:&Vec<Vec<u8>>,changes_file:&Path)->Result<(),Error>
 pub fn read_changes(changes_file:&Path)->Result<Vec<Vec<u8>>,Error> {
     let file=try!(File::open(changes_file).map_err(Error::IoError));
     let mut r = BufReader::new(file);
-    let dec=try!(serde_cbor::de::from_reader(&mut r).map_err(Error::PatchDecoding));
+    let dec=try!(bincode::serde::deserialize_from(&mut r,SizeLimit::Infinite).map_err(Error::PatchDecoding));
     /*let mut s=Vec::new();
     try!(r.read_to_end(&mut s).map_err(Error::IO));
     let ss=from_utf8(&s).unwrap();

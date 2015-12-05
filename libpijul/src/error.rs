@@ -21,7 +21,8 @@ use std::io;
 use std;
 use std::fmt;
 use std::path::{PathBuf};
-extern crate serde_cbor;
+//extern crate serde_cbor;
+extern crate bincode;
 
 #[derive(Debug)]
 pub enum Error{
@@ -29,8 +30,10 @@ pub enum Error{
     AlreadyApplied,
     AlreadyAdded,
     FileNotInRepo(PathBuf),
-    PatchDecoding(serde_cbor::error::Error),
-    PatchEncoding(serde_cbor::error::Error)
+    //PatchDecoding(serde_cbor::error::Error),
+    //PatchEncoding(serde_cbor::error::Error)
+    PatchDecoding(bincode::serde::DeserializeError),
+    PatchEncoding(bincode::serde::SerializeError)
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
