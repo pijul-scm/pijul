@@ -1296,6 +1296,7 @@ impl <'a> Repository<'a> {
                     let time0=time::precise_time_s();
                     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+                    let mut pw:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut lnum0= *line_num;
                     for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
                     unsafe {
@@ -1354,12 +1355,12 @@ impl <'a> Repository<'a> {
                     pv[0]= (*flag) ^ PARENT_EDGE;
                     for c in down_context {
                         {
-                            let u= if c.len()>LINE_SIZE {
-                                self.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
-                            } else {
-                                internal_patch_id
-                            };
                             unsafe {
+                                let u=if c.len()>LINE_SIZE {
+                                    self.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
+                                } else {
+                                    internal_patch_id
+                                };
                                 copy_nonoverlapping(u.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE);
                                 copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize) as *const c_char,
                                                     pu.as_ptr().offset((1+HASH_SIZE) as isize) as *mut c_char,
@@ -1368,6 +1369,41 @@ impl <'a> Repository<'a> {
                         }
                         self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
                         self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
+                        for up in up_context {
+                            {
+                                unsafe {
+                                    let w= if up.len()>LINE_SIZE {
+                                        self.internal_hash(&up[0..(up.len()-LINE_SIZE)]).unwrap()
+                                    } else {
+                                        internal_patch_id
+                                    };
+                                    copy_nonoverlapping(w.as_ptr() as *const c_char,
+                                                        pw.as_mut_ptr().offset(1) as *mut c_char,
+                                                        HASH_SIZE);
+                                    copy_nonoverlapping(up.as_ptr().offset((c.len()-LINE_SIZE) as isize),
+                                                        pw.as_mut_ptr().offset((1+HASH_SIZE) as isize),
+                                                        LINE_SIZE);
+                                }
+                                pw[0]=pu[0]^PARENT_EDGE;
+                                info!(target:"libpijul_newnodes","newnodes {} {}",to_hex(&pw[1..(1+KEY_SIZE)]),to_hex(&pu[..]));
+                                unsafe {
+                                    match lmdb::cursor_get(cursor,&pw[1..(1+KEY_SIZE)],Some(&pu[0..(1+KEY_SIZE)]),lmdb::Op::MDB_GET_BOTH_RANGE) {
+                                        Ok((a,b)) if b[0]|PSEUDO_EDGE == pu[0]|PSEUDO_EDGE
+                                            && memcmp(b.as_ptr().offset(1) as *const c_void,
+                                                      pu.as_ptr().offset(1) as *const c_void,
+                                                      KEY_SIZE as size_t) == 0 => {
+                                                //info!(target:"libpijul_newnodes","cursor gave {} {}",to_hex(a),to_hex(b));
+                                                copy_nonoverlapping(b.as_ptr().offset(1+KEY_SIZE as isize) as *const c_void,
+                                                                    pw.as_mut_ptr().offset(1+KEY_SIZE as isize) as *mut c_void,
+                                                                    HASH_SIZE);
+                                                lmdb::mdb_cursor_del(cursor,0);
+                                                self.mdb_txn.del(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],Some(&pw));
+                                            },
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
                     }
                     let time1=time::precise_time_s();
                     time_newnodes += time1-time0;
