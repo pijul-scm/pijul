@@ -234,32 +234,34 @@ impl <'a> Repository<'a> {
         try!(env.set_maxdbs(10));
         try!(env.set_mapsize( (1 << 30) ));
         let env=try!(env.open(path,0,0o755));
-        let txn=try!(unsafe { env.unsafe_txn(0) });
-        let dbi_nodes=try!(txn.dbi_open(b"nodes\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT|lmdb::MDB_DUPFIXED));
-        let dbi_revdep=try!(txn.dbi_open(b"revdep\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT));
-        let dbi_contents=try!(txn.dbi_open(b"contents\0",lmdb::MDB_CREATE));
-        let dbi_internal=try!(txn.dbi_open(b"internal\0",lmdb::MDB_CREATE));
-        let dbi_external=try!(txn.dbi_open(b"external\0",lmdb::MDB_CREATE));
-        let dbi_branches=try!(txn.dbi_open(b"branches\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT));
-        let dbi_tree=try!(txn.dbi_open(b"tree\0",lmdb::MDB_CREATE));
-        let dbi_revtree=try!(txn.dbi_open(b"revtree\0",lmdb::MDB_CREATE));
-        let dbi_inodes=try!(txn.dbi_open(b"inodes\0",lmdb::MDB_CREATE));
-        let dbi_revinodes=try!(txn.dbi_open(b"revinodes\0",lmdb::MDB_CREATE));
-        let repo=Repository{
-            mdb_env:env,
-            mdb_txn:txn,
-            dbi_nodes:dbi_nodes,
-            dbi_revdep:dbi_revdep,
-            dbi_contents:dbi_contents,
-            dbi_internal:dbi_internal,
-            dbi_external:dbi_external,
-            dbi_branches:dbi_branches,
-            dbi_tree:dbi_tree,
-            dbi_revtree:dbi_revtree,
-            dbi_inodes:dbi_inodes,
-            dbi_revinodes:dbi_revinodes
-        };
-        Ok(repo)
+        unsafe {
+            let txn=try!(env.unsafe_txn(0));
+            let dbi_nodes=try!(txn.unsafe_dbi_open(b"nodes\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT|lmdb::MDB_DUPFIXED));
+            let dbi_revdep=try!(txn.unsafe_dbi_open(b"revdep\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT));
+            let dbi_contents=try!(txn.unsafe_dbi_open(b"contents\0",lmdb::MDB_CREATE));
+            let dbi_internal=try!(txn.unsafe_dbi_open(b"internal\0",lmdb::MDB_CREATE));
+            let dbi_external=try!(txn.unsafe_dbi_open(b"external\0",lmdb::MDB_CREATE));
+            let dbi_branches=try!(txn.unsafe_dbi_open(b"branches\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT));
+            let dbi_tree=try!(txn.unsafe_dbi_open(b"tree\0",lmdb::MDB_CREATE));
+            let dbi_revtree=try!(txn.unsafe_dbi_open(b"revtree\0",lmdb::MDB_CREATE));
+            let dbi_inodes=try!(txn.unsafe_dbi_open(b"inodes\0",lmdb::MDB_CREATE));
+            let dbi_revinodes=try!(txn.unsafe_dbi_open(b"revinodes\0",lmdb::MDB_CREATE));
+            let repo=Repository{
+                mdb_env:env,
+                mdb_txn:txn,
+                dbi_nodes:dbi_nodes,
+                dbi_revdep:dbi_revdep,
+                dbi_contents:dbi_contents,
+                dbi_internal:dbi_internal,
+                dbi_external:dbi_external,
+                dbi_branches:dbi_branches,
+                dbi_tree:dbi_tree,
+                dbi_revtree:dbi_revtree,
+                dbi_inodes:dbi_inodes,
+                dbi_revinodes:dbi_revinodes
+            };
+            Ok(repo)
+        }
     }
 
 
