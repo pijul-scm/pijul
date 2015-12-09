@@ -638,7 +638,7 @@ impl <'a> Repository<'a> {
         let mut last_visit=vec![0;scc.len()];
         let mut first_visit=vec![0;scc.len()];
         let mut step=1;
-        fn dfs<'a>(g:&Graph<'a>,
+        fn dfs<'a>(g:&mut Graph<'a>,
                    first_visit:&mut[usize],
                    last_visit:&mut[usize],
                    forward:&mut Vec<u8>,
@@ -676,48 +676,52 @@ impl <'a> Repository<'a> {
                 for i in 0 .. n {
                     let n_child = g.children[g.lines[*cousin].children + i];
                     let child_component=g.lines[n_child >> 1].scc;
-                    if (n_child & 1 != 0) && forward_scc.contains(&child_component) {
-                        forward.push(PSEUDO_EDGE|PARENT_EDGE);
-                        forward.extend(g.lines[*cousin].key);
-                        forward.extend(zero);
-                        forward.push(PSEUDO_EDGE);
-                        forward.extend(g.lines[n_child >> 1].key);
+                    let is_forward=forward_scc.contains(&child_component);
+                    if is_forward {
+                        if n_child & 1 != 0 {
+                            forward.push(PSEUDO_EDGE|PARENT_EDGE);
+                            forward.extend(g.lines[*cousin].key);
+                            forward.extend(zero);
+                            forward.push(PSEUDO_EDGE);
+                            forward.extend(g.lines[n_child >> 1].key);
+                        } else {
+                            // set the flag to 1, we'll never look at it again in this DFS anyway.
+                            g.children[g.lines[*cousin].children + i] |= 1;
+                        }
+                    } else {
+                        g.children[g.lines[*cousin].children + i] |= 1;
+                        g.children[g.lines[*cousin].children + i] ^= 1;
                     }
                 }
             }
             last_visit[n_scc] = *step;
         }
         let zero=[0;HASH_SIZE];
-        dfs(&g,&mut first_visit,&mut last_visit,forward,&zero[..],&mut step,&scc,scc.len()-1);
+        dfs(&mut g,&mut first_visit,&mut last_visit,forward,&zero[..],&mut step,&scc,scc.len()-1);
         // assumes no conflict for now.
-        for c in scc.iter().rev() {
-            let key=g.lines[c[0]].key;
-            //unsafe {println!("key={} contents={}",to_hex(key),std::str::from_utf8_unchecked(self.contents(key))) }
-            buf.output_line(&key,self.contents(key));
-        }
-
-        /*
         let mut i=scc.len()-1;
-        let mut nodes=Vec::new();
+        let mut nodes=vec!();
         loop {
-        if nonconflicting(i) {
+            // test for conflict
+            if scc[i].len() <= 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] {
                 let key=g.lines[scc[i][0]].key;
-                //unsafe {print!("i={}, contents={}",i,std::str::from_utf8_unchecked(self.contents(key))) }
+                //unsafe {println!("key={} contents={}",to_hex(key),std::str::from_utf8_unchecked(self.contents(key))) }
                 buf.output_line(&key,self.contents(key));
                 if i==0 { break } else { i-=1 }
             } else {
-                fn get_conflict<'a,B:LineBuffer<'a>,F:Fn(usize)->bool>(
+                fn get_conflict<'a,B:LineBuffer<'a>>(
                     repo:&'a Repository,
-                    graph:&Graph<'a>,
-                    l:usize,
+                    scc:&Vec<Vec<usize>>,
+                    first_visit:&[usize],
+                    last_visit:&[usize],
+                    g:&Graph<'a>,
+                    i:usize,
                     b:&mut B,
                     nodes:&mut Vec<&'a[u8]>,
                     is_first:&mut bool,
-                    next:&mut usize,
-                    nonconflicting:&F) {
+                    next:&mut usize) {
 
-                    let mut graph=graph;
-                    if nonconflicting(l) {
+                    if scc[i].len() <= 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] {
                         if ! *is_first {b.output_line(&[],b"================================\n");}
                         else{
                             *is_first=false
@@ -725,52 +729,33 @@ impl <'a> Repository<'a> {
                         for key in nodes {
                             b.output_line(key,repo.contents(key))
                         }
-                        *next=l
+                        *next=i
                     } else {
-                        // FIXME: this is probably wrong.
-                        let mut min_order=None;
-                        for c in 0..graph.lines[l].n_children {
-                            let n_child=graph.children[graph.lines[l].children + c] >> 1;
-                            let ll=graph.lines[n_child].scc;
-                            min_order=Some(match min_order { None=>ll, Some(m)=>std::cmp::max(m,ll) })
-                        }
-                        match min_order {
-                            None=>(),
-                            Some(m)=>{
-                                if graph.lines[l].flags & LINE_HALF_DELETED != 0 {
-                                    for c in 0..graph.lines[l].n_children {
-                                        let n_child=graph.children[graph.lines[l].children + c] >> 1;
-                                        if graph.lines[n_child].scc==m {
-                                            get_conflict(repo,graph,n_child,b,nodes,is_first,next,nonconflicting)
-                                        }
-                                    }
+                        for cousin in scc[i].iter() {
+                            nodes.push(g.lines[*cousin].key);
+                            let n=g.lines[*cousin].n_children;
+                            for i in 0 .. n {
+                                let n_child = g.children[g.lines[*cousin].children + i];
+                                if n_child & 1 == 0 { // don't follow forward edges
+                                    let child_component=g.lines[n_child >> 1].scc;
+                                    get_conflict(repo,scc,first_visit,last_visit,g,
+                                                 child_component,
+                                                 b,nodes,is_first,next)
                                 }
-                                nodes.push(graph.lines[l].key);
-                                for c in 0..graph.lines[l].n_children {
-                                    let n_child=graph.children[graph.lines[l].children + c] >> 1;
-                                    if graph.lines[n_child].scc==m {
-                                        get_conflict(repo,graph,n_child,b,nodes,is_first,next,nonconflicting)
-                                    }
-                                }
-                                let _=nodes.pop();
                             }
+                            nodes.pop();
                         }
-                        // /FIXME
                     }
                 }
-                let mut next=0;
-                println!("conflit ! {} belligérants, level {}",scc[i].len(),i);
-                let mut is_first=true;
                 buf.output_line(&[],b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
-                for charlie in &scc[i] {
-                    nodes.clear();
-                    get_conflict(self,&g,*charlie, buf, &mut nodes, &mut is_first, &mut next,&nonconflicting)
-                }
+                nodes.clear();
+                let mut is_first=true;
+                let mut next=0;
+                get_conflict(self,&scc,&first_visit,&last_visit,&g,i,buf,&mut nodes,&mut is_first,&mut next);
                 buf.output_line(&[],b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n");
-                if i==0 { break } else { i=std::cmp::min(next,i-1) }
+                if i==0 { break } else { i=std::cmp::min(i-1,next) }
             }
         }
-*/
     }
     fn remove_redundant_edges(&mut self,forward:&mut Vec<u8>) {
         let mut i=0;
