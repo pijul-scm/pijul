@@ -309,6 +309,11 @@ pub unsafe fn cursor_get<'a>(curs:*const MdbCursor,key:&[u8],val:Option<&[u8]>,o
     }
 }
 
+pub unsafe fn cursor_del<'a>(curs:*mut MdbCursor,flag:c_uint)->Result<(),c_int> {
+    let e=mdb_cursor_del(curs,flag as c_uint);
+    if e==0 { Ok(()) } else {Err(e)}
+}
+
 impl <'a>Cursor<'a> {
 
     pub fn as_ptr(&self)->*mut MdbCursor {

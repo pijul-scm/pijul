@@ -103,7 +103,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 //info!("applied patch in {}s", t1-t0);
                 debug!(target:"pijul","synchronizing tree");
                 repo.sync_file_additions(&patch_arc.changes[..],&syncs, &internal);
-                if cfg!(debug_assertions){
+                if true || cfg!(debug_assertions){
                     let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
                     repo.debug(&mut buffer);
                 }

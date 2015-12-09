@@ -46,7 +46,7 @@ use self::patch::*;
 pub mod error;
 use self::error::Error;
 
-
+use std::collections::BTreeSet;
 #[cfg(not(windows))]
 use std::os::unix::fs::PermissionsExt;
 
@@ -529,7 +529,7 @@ impl <'a> Repository<'a> {
                         l.children=children.len();
                         for child in CursIter::new(curs,key,0,true) {
                             unsafe {
-                                children.push(std::mem::transmute(child.as_ptr().offset(1)))
+                                children.push(std::mem::transmute(child.as_ptr()))
                             }
                             l.n_children+=1
                         }
@@ -542,9 +542,12 @@ impl <'a> Repository<'a> {
             let n_children=lines[idx].n_children;
             for i in 0..n_children {
                 let child_key = unsafe {
-                    std::slice::from_raw_parts(std::mem::transmute(children[l_children+i]),KEY_SIZE)
+                    std::slice::from_raw_parts(std::mem::transmute(children[l_children+i]),1+KEY_SIZE)
                 };
-                children[l_children+i] = retr(cache,curs,lines,children,child_key)
+                let pseudo= child_key[0] & PSEUDO_EDGE; // PSEUDO_EDGE=1
+                children[l_children+i] =
+                    ( retr(cache,curs,lines,children,&child_key[1..]) << 1 )
+                    | ((child_key[0] & PSEUDO_EDGE) as usize)
             }
             idx
         }
@@ -567,8 +570,11 @@ impl <'a> Repository<'a> {
 
 
 
-    fn tarjan(&self,line:&mut Graph)->usize{
-        fn dfs<'a>(repo:&Repository,stack:&mut Vec<usize>,index:&mut usize, scc:&mut usize, g:&mut Graph<'a>, n_l:usize){
+    fn tarjan(&self,line:&mut Graph)->Vec<Vec<usize>> {
+        fn dfs<'a>(repo:&Repository,
+                   scc:&mut Vec<Vec<usize>>,
+                   stack:&mut Vec<usize>,
+                   index:&mut usize, g:&mut Graph<'a>, n_l:usize){
             {
                 let mut l=&mut (g.lines[n_l]);
                 (*l).index = *index;
@@ -582,11 +588,11 @@ impl <'a> Repository<'a> {
             for i in 0..g.lines[n_l].n_children {
                 //let mut l=&mut (g.lines[n_l]);
 
-                let n_child = g.children[g.lines[n_l].children + i];
+                let n_child = (g.children[g.lines[n_l].children + i]) >> 1;
                 //println!("children: {}",to_hex(g.lines[n_child].key));
 
                 if g.lines[n_child].flags & LINE_VISITED == 0 {
-                    dfs(repo,stack,index,scc,g,n_child);
+                    dfs(repo,scc,stack,index,g,n_child);
                     g.lines[n_l].lowlink=std::cmp::min(g.lines[n_l].lowlink, g.lines[n_child].lowlink);
                 } else {
                     if g.lines[n_child].flags & LINE_ONSTACK != 0 {
@@ -597,151 +603,202 @@ impl <'a> Repository<'a> {
 
             if g.lines[n_l].index == g.lines[n_l].lowlink {
                 //println!("SCC: {:?}",slice::from_raw_parts((*l).key,KEY_SIZE));
+                let mut v=Vec::new();
                 loop {
                     match stack.pop() {
                         None=>break,
                         Some(n_p)=>{
-                            g.lines[n_p].scc=*scc;
+                            g.lines[n_p].scc= scc.len();
                             g.lines[n_p].flags = g.lines[n_p].flags ^ LINE_ONSTACK;
+                            v.push(n_p);
                             if n_p == n_l { break }
                         }
                     }
                 }
-                *scc+=1
+                scc.push(v);
+                //*scc+=1
             }
         }
         let mut stack=vec!();
         let mut index=0;
-        let mut scc=0;
-        dfs(self,&mut stack, &mut index, &mut scc, line, 0);
-        (scc-1) as usize
+        let mut scc=Vec::with_capacity(line.lines.len());
+        //let mut scc=0;
+        dfs(self,&mut scc, &mut stack, &mut index, line, 0);
+        scc
     }
 
 
 
 
 
-
-    fn output_file<B:LineBuffer<'a>>(&'a self,buf:&mut B,graph:Graph<'a>) {
-        let mut graph=graph;
-        let max_level=self.tarjan(&mut graph);
-        let mut counts=vec![0;max_level+1];
-        let mut lines=vec![vec!();max_level+1];
-        for i in 0..lines.len() { lines[i]=Vec::new() }
-        fn fill_lines<'a>(graph:Graph<'a>,
-                          counts:&mut Vec<usize>,
-                          lines:&mut Vec<Vec<usize>>,
-                          cl:usize)->Graph<'a> {
-            let mut graph=graph;
-            if graph.lines[cl].flags & LINE_SPIT != 0 {
-                return graph
-            } else {
-                graph.lines[cl].flags |= LINE_SPIT;
-                counts[graph.lines[cl].scc as usize] += 1;
-                lines[graph.lines[cl].scc as usize].push(cl);
-                let n_children=graph.lines[cl].n_children;
-                for i in 0..n_children {
-                    let child=graph.children[graph.lines[cl].children + i];
-                    graph=fill_lines(graph,counts,lines,child)
-                }
-                graph
-            }
-        }
-        let mut graph=fill_lines(graph, &mut counts, &mut lines, 0);
-
-        // Then add undetected conflicts.
-        for i in 0..counts.len() {
-            if counts[i] > 1 {
-                for line in &lines[i] {
-                    for c in 0..graph.lines[*line].n_children {
-                        let n_child=graph.children[graph.lines[*line].children + c];
-                        for j in (graph.lines[n_child].scc)+1 .. (graph.lines[*line].scc) {
-                            counts[j as usize] += 1
-                        }
+    fn output_file<B:LineBuffer<'a>>(&'a self,buf:&mut B,g:Graph<'a>,forward:&mut Vec<u8>) {
+        let mut g=g;
+        let scc = self.tarjan(&mut g); // in reverse order.
+        //let mut levels=vec![0;scc];
+        let mut last_visit=vec![0;scc.len()];
+        let mut first_visit=vec![0;scc.len()];
+        let mut step=1;
+        fn dfs<'a>(g:&Graph<'a>,
+                   first_visit:&mut[usize],
+                   last_visit:&mut[usize],
+                   forward:&mut Vec<u8>,
+                   zero:&[u8],
+                   step:&mut usize,
+                   scc:&[Vec<usize>],
+                   n_scc:usize) {
+            first_visit[n_scc] = *step;
+            debug!(target:"output_file","step={} scc={}",*step,n_scc);
+            *step += 1;
+            let mut child_components=BTreeSet::new();
+            for cousin in scc[n_scc].iter() {
+                debug!(target:"output_file","cousin: {}",*cousin);
+                let n=g.lines[*cousin].n_children;
+                for i in 0 .. n {
+                    let n_child = g.children[g.lines[*cousin].children + i];
+                    let child_component=g.lines[n_child >> 1].scc;
+                    if child_component < n_scc { // if this is a child and not a sibling.
+                        child_components.insert(child_component);
                     }
                 }
             }
+            let mut forward_scc=HashSet::new();
+            for component in child_components.iter().rev() {
+                if first_visit[*component] > first_visit[n_scc] { // forward edge
+                    debug!(target:"output_file","forward ! {} {}",n_scc,*component);
+                    forward_scc.insert(*component);
+                } else {
+                    debug!(target:"output_file","visiting scc {} {}",*component,to_hex(g.lines[scc[*component][0]].key));
+                    dfs(g,first_visit,last_visit,forward,zero,step,scc,*component)
+                }
+            }
+            for cousin in scc[n_scc].iter() {
+                let n=g.lines[*cousin].n_children;
+                for i in 0 .. n {
+                    let n_child = g.children[g.lines[*cousin].children + i];
+                    let child_component=g.lines[n_child >> 1].scc;
+                    if (n_child & 1 != 0) && forward_scc.contains(&child_component) {
+                        forward.push(PSEUDO_EDGE|PARENT_EDGE);
+                        forward.extend(g.lines[*cousin].key);
+                        forward.extend(zero);
+                        forward.push(PSEUDO_EDGE);
+                        forward.extend(g.lines[n_child >> 1].key);
+                    }
+                }
+            }
+            last_visit[n_scc] = *step;
         }
-        // Finally, output everybody.
-        let mut i:usize=max_level;
+        let zero=[0;HASH_SIZE];
+        dfs(&g,&mut first_visit,&mut last_visit,forward,&zero[..],&mut step,&scc,scc.len()-1);
+        // assumes no conflict for now.
+        for c in scc.iter().rev() {
+            let key=g.lines[c[0]].key;
+            //unsafe {println!("key={} contents={}",to_hex(key),std::str::from_utf8_unchecked(self.contents(key))) }
+            buf.output_line(&key,self.contents(key));
+        }
+
+        /*
+        let mut i=scc.len()-1;
         let mut nodes=Vec::new();
         loop {
-            //assert!(counts[i]>=1);
-            if counts[i]==0 { break }
-            else if counts[i] == 1 {
-                let key=graph.lines[lines[i][0]].key;
+        if nonconflicting(i) {
+                let key=g.lines[scc[i][0]].key;
                 //unsafe {print!("i={}, contents={}",i,std::str::from_utf8_unchecked(self.contents(key))) }
                 buf.output_line(&key,self.contents(key));
                 if i==0 { break } else { i-=1 }
             } else {
+                fn get_conflict<'a,B:LineBuffer<'a>,F:Fn(usize)->bool>(
+                    repo:&'a Repository,
+                    graph:&Graph<'a>,
+                    l:usize,
+                    b:&mut B,
+                    nodes:&mut Vec<&'a[u8]>,
+                    is_first:&mut bool,
+                    next:&mut usize,
+                    nonconflicting:&F) {
 
-                fn get_conflict<'a,B>(repo:&'a Repository, counts:&Vec<usize>,
-                                      graph:Graph<'a>,
-                                      l:usize, b:&mut B,
-                                      nodes:&mut Vec<&'a[u8]>,
-                                      is_first:&mut bool,
-                                      next:&mut usize) -> Graph<'a>
-                    where B:LineBuffer<'a> {
-                        let mut graph=graph;
-                        if counts[graph.lines[l].scc as usize] <= 1 {
-                            if ! *is_first {b.output_line(&[],b"================================\n");}
-                            else{
-                                *is_first=false
-                            }
-                            for key in nodes {
-                                b.output_line(key,repo.contents(key))
-                            }
-                            *next=graph.lines[l].scc as usize
-                        } else {
-                            if graph.lines[l].flags & LINE_OUTPUT == 0 {
-                                graph.lines[l].flags |= LINE_OUTPUT;
-                                let mut min_order=None;
-
-                                for c in 0..graph.lines[l].n_children {
-                                    let n_child=graph.children[graph.lines[l].children + c];
-                                    let ll=graph.lines[n_child].scc;
-                                    min_order=Some(match min_order { None=>ll, Some(m)=>std::cmp::max(m,ll) })
-                                }
-
-                                match min_order {
-                                    None=>(),
-                                    Some(m)=>{
-                                        if graph.lines[l].flags & LINE_HALF_DELETED != 0 {
-                                            for c in 0..graph.lines[l].n_children {
-                                                let n_child=graph.children[graph.lines[l].children + c];
-                                                if graph.lines[n_child].scc==m {
-                                                    graph=get_conflict(repo,counts,graph,n_child,b,nodes,is_first,next)
-                                                }
-                                            }
+                    let mut graph=graph;
+                    if nonconflicting(l) {
+                        if ! *is_first {b.output_line(&[],b"================================\n");}
+                        else{
+                            *is_first=false
+                        }
+                        for key in nodes {
+                            b.output_line(key,repo.contents(key))
+                        }
+                        *next=l
+                    } else {
+                        // FIXME: this is probably wrong.
+                        let mut min_order=None;
+                        for c in 0..graph.lines[l].n_children {
+                            let n_child=graph.children[graph.lines[l].children + c] >> 1;
+                            let ll=graph.lines[n_child].scc;
+                            min_order=Some(match min_order { None=>ll, Some(m)=>std::cmp::max(m,ll) })
+                        }
+                        match min_order {
+                            None=>(),
+                            Some(m)=>{
+                                if graph.lines[l].flags & LINE_HALF_DELETED != 0 {
+                                    for c in 0..graph.lines[l].n_children {
+                                        let n_child=graph.children[graph.lines[l].children + c] >> 1;
+                                        if graph.lines[n_child].scc==m {
+                                            get_conflict(repo,graph,n_child,b,nodes,is_first,next,nonconflicting)
                                         }
-                                        nodes.push(graph.lines[l].key);
-                                        for c in 0..graph.lines[l].n_children {
-                                            let n_child=graph.children[graph.lines[l].children + c];
-                                            if graph.lines[n_child].scc==m {
-                                                graph=get_conflict(repo,counts,graph,n_child,b,nodes,is_first,next)
-                                            }
-                                        }
-                                        let _=nodes.pop();
                                     }
                                 }
-                                graph.lines[l].flags ^= LINE_OUTPUT;
+                                nodes.push(graph.lines[l].key);
+                                for c in 0..graph.lines[l].n_children {
+                                    let n_child=graph.children[graph.lines[l].children + c] >> 1;
+                                    if graph.lines[n_child].scc==m {
+                                        get_conflict(repo,graph,n_child,b,nodes,is_first,next,nonconflicting)
+                                    }
+                                }
+                                let _=nodes.pop();
                             }
                         }
-                        graph
+                        // /FIXME
                     }
+                }
                 let mut next=0;
-                println!("conflit ! {} belligérants, level {}",lines[i].len(),i);
+                println!("conflit ! {} belligérants, level {}",scc[i].len(),i);
                 let mut is_first=true;
                 buf.output_line(&[],b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
-                for j in 0..(lines[i].len()) {
+                for charlie in &scc[i] {
                     nodes.clear();
-                    graph=get_conflict(self, &counts,graph,lines[i][j], buf, &mut nodes, &mut is_first, &mut next)
+                    get_conflict(self,&g,*charlie, buf, &mut nodes, &mut is_first, &mut next,&nonconflicting)
                 }
                 buf.output_line(&[],b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n");
                 if i==0 { break } else { i=std::cmp::min(next,i-1) }
-
             }
         }
+*/
+    }
+    fn remove_redundant_edges(&mut self,forward:&mut Vec<u8>) {
+        let mut i=0;
+        let cursor=unsafe { self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
+        while i<forward.len() {
+            unsafe {
+                let (u,v)=lmdb::cursor_get(cursor,
+                                           &forward[(i+1)..(i+1+KEY_SIZE)],
+                                           Some(&forward[(i+1+KEY_SIZE+HASH_SIZE)..
+                                                         (i+1+KEY_SIZE+HASH_SIZE+1+KEY_SIZE)]),
+                                           lmdb::Op::MDB_GET_BOTH_RANGE).unwrap();
+                // vérifier que c'est le bon résultat.
+                if memcmp(v.as_ptr() as *const c_void,
+                          forward.as_ptr().offset((i+1+KEY_SIZE+HASH_SIZE) as isize) as *const c_void,
+                          (1+KEY_SIZE) as size_t) == 0 {
+
+                    copy_nonoverlapping(v.as_ptr().offset((1+KEY_SIZE) as isize),
+                                        forward.as_mut_ptr().offset((i+1+KEY_SIZE) as isize),
+                                        HASH_SIZE);
+                }
+                lmdb::cursor_del(cursor,0).unwrap();
+                self.mdb_txn.del(self.dbi_nodes,
+                                 &forward[(i+1+KEY_SIZE+HASH_SIZE+1)..(i+1+KEY_SIZE+HASH_SIZE+1+KEY_SIZE)],
+                                 Some(&forward[i..(i+1+KEY_SIZE+HASH_SIZE)]));
+            }
+            i+=(1+HASH_SIZE+KEY_SIZE) + (1+KEY_SIZE)
+        }
+        unsafe { lmdb::mdb_cursor_close(cursor) };
     }
 
     /// Gets the external key corresponding to the given key, returning an
@@ -836,7 +893,8 @@ impl <'a> Repository<'a> {
         }
     }
 
-    fn diff(&self,line_num:&mut usize, actions:&mut Vec<Change>, a:Graph, b:&Path)->Result<(),std::io::Error> {
+    fn diff(&self,line_num:&mut usize, actions:&mut Vec<Change>, redundant:&mut Vec<u8>,
+            a:Graph, b:&Path)->Result<(),std::io::Error> {
         fn memeq(a:&[u8],b:&[u8])->bool {
             if a.len() == b.len() {
                 unsafe { memcmp(a.as_ptr() as *const c_void,b.as_ptr() as *const c_void,
@@ -999,7 +1057,7 @@ impl <'a> Repository<'a> {
             Ok(_)=>{
                 let t0=time::precise_time_s();
                 let mut d = Diff { lines_a:Vec::new(), contents_a:Vec::new() };
-                self.output_file(&mut d,a);
+                self.output_file(&mut d,a,redundant);
                 //println!("output, now calling local_diff");
                 let cursor= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()};
                 local_diff(self,cursor,actions, line_num,
@@ -1007,6 +1065,9 @@ impl <'a> Repository<'a> {
                            &d.contents_a,
                            &lines_b);
                 //println!("/local_diff");
+                unsafe {
+                    lmdb::mdb_cursor_close(cursor);
+                }
                 let t1=time::precise_time_s();
                 info!("diff took {}s",t1-t0);
                 Ok(())
@@ -1020,6 +1081,7 @@ impl <'a> Repository<'a> {
     fn record_all(&self,
                   actions:&mut Vec<Change>,
                   line_num:&mut usize,
+                  redundant:&mut Vec<u8>,
                   updatables:&mut HashMap<Vec<u8>,Vec<u8>>,
                   parent_inode:Option<&[u8]>,
                   parent_node:Option<&[u8]>,
@@ -1085,9 +1147,14 @@ impl <'a> Repository<'a> {
                                                    flag:FOLDER_EDGE }
                                 );
                             *line_num += 1;
-
+                            info!("retrieving");
+                            let time0=time::precise_time_s();
                             let ret=self.retrieve(&current_node[3..]);
-                            self.diff(line_num,actions, ret.unwrap(), realpath.as_path()).unwrap()
+                            let time1=time::precise_time_s();
+                            info!("retrieve took {}s, now calling diff", time1-time0);
+                            self.diff(line_num,actions, redundant,ret.unwrap(), realpath.as_path()).unwrap();
+                            let time2=time::precise_time_s();
+                            info!("diff took {}s", time2-time1);
 
 
                         } else if current_node[0]==2 {
@@ -1121,11 +1188,13 @@ impl <'a> Repository<'a> {
                             actions.push(Change::Edges{edges:edges,flag:FOLDER_EDGE|PARENT_EDGE|DELETED_EDGE});
                             unimplemented!() // Remove all known vertices from this file, for else "missing context" conflicts will not be detected.
                         } else if current_node[0]==0 {
-                            //println!("retrieving");
+                            let time0=time::precise_time_s();
                             let ret=self.retrieve(&current_node[3..]);
-                            //println!("case=0, retrieved");
-                            self.diff(line_num,actions, ret.unwrap(), realpath.as_path()).unwrap();
-                            //println!("case=0, diff done");
+                            let time1=time::precise_time_s();
+                            info!("record: retrieve took {}s, now calling diff", time1-time0);
+                            self.diff(line_num,actions, redundant,ret.unwrap(), realpath.as_path()).unwrap();
+                            let time2=time::precise_time_s();
+                            info!("diff took {}s", time2-time1);
                         } else {
                             panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
                         };
@@ -1214,7 +1283,7 @@ impl <'a> Repository<'a> {
                                      INODE_SIZE as size_t) } != 0 {
                         break
                     } else {
-                        self.record_all(actions, line_num,updatables,
+                        self.record_all(actions, line_num,redundant,updatables,
                                         Some(current_inode), // parent_inode
                                         Some(current_node), // parent_node
                                         v,// current_inode
@@ -1234,10 +1303,12 @@ impl <'a> Repository<'a> {
         let mut line_num=1;
         let mut updatables:HashMap<Vec<u8>,Vec<u8>>=HashMap::new();
         let mut realpath=PathBuf::from(working_copy);
-        self.record_all(&mut actions, &mut line_num,&mut updatables,
+        let mut redundant=vec!();
+        self.record_all(&mut actions, &mut line_num,&mut redundant,&mut updatables,
             None,None,ROOT_INODE,&mut realpath,
             &[]);
         //println!("record done");
+        self.remove_redundant_edges(&mut redundant);
         Ok((actions,updatables))
     }
 
@@ -1369,6 +1440,9 @@ impl <'a> Repository<'a> {
                         }
                         self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
                         self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
+                        /*
+                        // remove edges between up context and down context.
+                        // commented because it could break unrecord.
                         for up in up_context {
                             {
                                 unsafe {
@@ -1388,7 +1462,7 @@ impl <'a> Repository<'a> {
                                 info!(target:"libpijul_newnodes","newnodes {} {}",to_hex(&pw[1..(1+KEY_SIZE)]),to_hex(&pu[..]));
                                 unsafe {
                                     match lmdb::cursor_get(cursor,&pw[1..(1+KEY_SIZE)],Some(&pu[0..(1+KEY_SIZE)]),lmdb::Op::MDB_GET_BOTH_RANGE) {
-                                        Ok((a,b)) if b[0]|PSEUDO_EDGE == pu[0]|PSEUDO_EDGE
+                                        Ok((_,b)) if b[0]|PSEUDO_EDGE == pu[0]|PSEUDO_EDGE
                                             && memcmp(b.as_ptr().offset(1) as *const c_void,
                                                       pu.as_ptr().offset(1) as *const c_void,
                                                       KEY_SIZE as size_t) == 0 => {
@@ -1404,6 +1478,7 @@ impl <'a> Repository<'a> {
                                 }
                             }
                         }
+                         */
                     }
                     let time1=time::precise_time_s();
                     time_newnodes += time1-time0;
@@ -1517,7 +1592,7 @@ impl <'a> Repository<'a> {
         let time0=time::precise_time_s();
         self.unsafe_apply(&patch.changes,internal);
         let time1=time::precise_time_s();
-        info!(target:"libpijul::apply","unsafe_apply took: {}", time1-time0);
+        info!(target:"libpijul_apply","unsafe_apply took: {}", time1-time0);
         let mut children=Vec::new();
         let zero:[u8;HASH_SIZE]=[0;HASH_SIZE];
         let mut max_parents=0;
@@ -1539,7 +1614,7 @@ impl <'a> Repository<'a> {
                     let mut alive_parents=HashSet::new();
                     let mut parents:Vec<u8>=Vec::with_capacity(edges.len()*2);
                     for e in edges {
-                        info!(target:"libpijul::apply","edge={:?}", e);
+                        //info!(target:"libpijul_apply","edge={:?}", e);
                         unsafe {
                             let hu=self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
                             let hv=self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]).unwrap();
@@ -1551,7 +1626,7 @@ impl <'a> Repository<'a> {
                                                 v.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
                         }
                         let (pu,pv)= if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
-                        info!(target:"libpijul_deleting","{} {}", to_hex(pu),to_hex(pv));
+                        debug!(target:"libpijul_deleting","{} {}", to_hex(pu),to_hex(pv));
                         let mut parents_count=0;
                         if is_alive(cursor_,pu) {
                             //alive_parents.insert(pu);
@@ -1571,7 +1646,7 @@ impl <'a> Repository<'a> {
                         // pv is being deleted. Look at its alive children.
                         for child in CursIter::new(cursor,pv,0,true) {
                             if is_alive(cursor_,&child[1..(1+KEY_SIZE)]) {
-                                info!(target:"libpijul_deleting","child alive: {}", to_hex(&child[1..(1+KEY_SIZE)]));
+                                debug!(target:"libpijul_deleting","child alive: {}", to_hex(&child[1..(1+KEY_SIZE)]));
                                 alive_children.insert(&child[1..(1+KEY_SIZE)]);
                                 children_count+=1
                             }
@@ -1593,7 +1668,6 @@ impl <'a> Repository<'a> {
                     while i<children.len() {
                         let mut j=0;
                         while j<parents.len() {
-                            info!(target:"libpijul::apply","now adding pseudo-edge {}/{} {}/{}", i,children.len(),j,parents.len());
                             if !self.connected(cursor,
                                                &parents[j+1 .. j+1+KEY_SIZE],
                                                &mut children[i .. i+1+KEY_SIZE+HASH_SIZE]) {
@@ -2062,9 +2136,18 @@ impl <'a> Repository<'a> {
                 updates.push((par,inode.to_vec()));
                 // Then (if file) output file
                 if perms & DIRECTORY_FLAG == 0 { // this is a real file, not a directory
-                    let l=self.retrieve(&node).unwrap();
-                    let mut f=std::fs::File::create(&kk).unwrap();
-                    self.output_file(&mut f,l);
+                    let mut redundant_edges=vec!();
+                    {
+                        let time0=time::precise_time_s();
+                        let l=self.retrieve(&node).unwrap();
+                        let time1=time::precise_time_s();
+                        info!("unsafe_output_repository: retrieve took {}s", time1-time0);
+                        let mut f=std::fs::File::create(&kk).unwrap();
+                        self.output_file(&mut f,l,&mut redundant_edges);
+                        let time2=time::precise_time_s();
+                        info!("unsafe_output_repository: output_file took {}s", time2-time1);
+                    }
+                    self.remove_redundant_edges(&mut redundant_edges);
                 } else {
                     try!(std::fs::create_dir_all(&kk).map_err(Error::IoError));
                 }
@@ -2134,9 +2217,9 @@ impl <'a> Repository<'a> {
                 cur=k;
             }
             let flag=v[0];
-            //if flag & PARENT_EDGE == 0 {
+            if flag & PARENT_EDGE == 0 {
                 write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", to_hex(&k), to_hex(&v[1..(1+KEY_SIZE)]), styles[(flag&0xff) as usize], flag).unwrap();
-            //}
+            }
         }
         w.write(b"}\n").unwrap();
     }
