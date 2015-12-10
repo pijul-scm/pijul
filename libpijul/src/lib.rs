@@ -98,11 +98,9 @@ const DELETED_EDGE:u8=8;
 pub type Inode=Vec<u8>;
 const DIRECTORY_FLAG:usize = 0x200;
 
-const LINE_HALF_DELETED:c_uchar=16;
-const LINE_VISITED:c_uchar=8;
-const LINE_ONSTACK:c_uchar=4;
-const LINE_SPIT:c_uchar=2;
-const LINE_OUTPUT:c_uchar=16;
+const LINE_HALF_DELETED:c_uchar=4;
+const LINE_VISITED:c_uchar=2;
+const LINE_ONSTACK:c_uchar=1;
 
 struct Line<'a> {
     key:&'a[u8],
@@ -522,10 +520,27 @@ impl <'a> Repository<'a> {
                     Entry::Vacant(e) => {
                         let idx=lines.len();
                         e.insert(idx);
-                        let mut l=Line {
-                            key:key,flags:0,children:children.len(),n_children:0,index:0,lowlink:0,scc:0
+                        debug!(target:"retrieve","{}",to_hex(key));
+                        // Test: is this a zombie line?
+                        let is_zombie={
+                            let mut tag=PARENT_EDGE|DELETED_EDGE;
+                            unsafe {
+                                (match lmdb::cursor_get(curs,key,Some(&[tag][..]),lmdb::Op::MDB_GET_BOTH_RANGE) {
+                                    Ok((_,v)) if v[0]==tag => true,
+                                    _=>false
+                                }) ||
+                                    ({tag=PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE;
+                                      match lmdb::cursor_get(curs,key,Some(&[tag][..]),lmdb::Op::MDB_GET_BOTH_RANGE) {
+                                          Ok((_,v)) if v[0]==tag => true,
+                                          _=>false
+                                      }})
+                            }
                         };
-                        //println!("retrieve {}",to_hex(key));
+                        //
+                        let mut l=Line {
+                            key:key,flags:if is_zombie {LINE_HALF_DELETED} else {0},
+                            children:children.len(),n_children:0,index:0,lowlink:0,scc:0
+                        };
                         l.children=children.len();
                         for child in CursIter::new(curs,key,0,true) {
                             unsafe {
@@ -544,7 +559,6 @@ impl <'a> Repository<'a> {
                 let child_key = unsafe {
                     std::slice::from_raw_parts(std::mem::transmute(children[l_children+i]),1+KEY_SIZE)
                 };
-                let pseudo= child_key[0] & PSEUDO_EDGE; // PSEUDO_EDGE=1
                 children[l_children+i] =
                     ( retr(cache,curs,lines,children,&child_key[1..]) << 1 )
                     | ((child_key[0] & PSEUDO_EDGE) as usize)
@@ -633,7 +647,11 @@ impl <'a> Repository<'a> {
 
     fn output_file<B:LineBuffer<'a>>(&'a self,buf:&mut B,g:Graph<'a>,forward:&mut Vec<u8>) {
         let mut g=g;
+        let t0=time::precise_time_s();
         let scc = self.tarjan(&mut g); // in reverse order.
+        let t1=time::precise_time_s();
+        info!("tarjan took {}s",t1-t0);
+        info!("There are {} SCC",scc.len());
         //let mut levels=vec![0;scc];
         let mut last_visit=vec![0;scc.len()];
         let mut first_visit=vec![0;scc.len()];
@@ -646,19 +664,30 @@ impl <'a> Repository<'a> {
                    step:&mut usize,
                    scc:&[Vec<usize>],
                    n_scc:usize) {
-            first_visit[n_scc] = *step;
-            debug!(target:"output_file","step={} scc={}",*step,n_scc);
-            *step += 1;
+            let mut n_scc=n_scc;
             let mut child_components=BTreeSet::new();
-            for cousin in scc[n_scc].iter() {
-                debug!(target:"output_file","cousin: {}",*cousin);
-                let n=g.lines[*cousin].n_children;
-                for i in 0 .. n {
-                    let n_child = g.children[g.lines[*cousin].children + i];
-                    let child_component=g.lines[n_child >> 1].scc;
-                    if child_component < n_scc { // if this is a child and not a sibling.
-                        child_components.insert(child_component);
+            let mut skipped=vec!(n_scc);
+            loop {
+                first_visit[n_scc] = *step;
+                debug!(target:"output_file","step={} scc={}",*step,n_scc);
+                *step += 1;
+                child_components.clear();
+                let mut next_scc=0;
+                for cousin in scc[n_scc].iter() {
+                    debug!(target:"output_file","cousin: {}",*cousin);
+                    let n=g.lines[*cousin].n_children;
+                    for i in 0 .. n {
+                        let n_child = g.children[g.lines[*cousin].children + i];
+                        let child_component=g.lines[n_child >> 1].scc;
+                        if child_component < n_scc { // if this is a child and not a sibling.
+                            child_components.insert(child_component);
+                            next_scc=child_component
+                        }
                     }
+                }
+                if child_components.len() != 1 { break } else {
+                    n_scc=next_scc;
+                    skipped.push(next_scc);
                 }
             }
             let mut forward_scc=HashSet::new();
@@ -694,7 +723,10 @@ impl <'a> Repository<'a> {
                     }
                 }
             }
-            last_visit[n_scc] = *step;
+            for i in skipped.iter().rev() {
+                last_visit[*i] = *step;
+                *step+=1;
+            }
         }
         let zero=[0;HASH_SIZE];
         dfs(&mut g,&mut first_visit,&mut last_visit,forward,&zero[..],&mut step,&scc,scc.len()-1);
@@ -732,18 +764,29 @@ impl <'a> Repository<'a> {
                         *next=i
                     } else {
                         for cousin in scc[i].iter() {
-                            nodes.push(g.lines[*cousin].key);
-                            let n=g.lines[*cousin].n_children;
-                            for i in 0 .. n {
-                                let n_child = g.children[g.lines[*cousin].children + i];
-                                if n_child & 1 == 0 { // don't follow forward edges
-                                    let child_component=g.lines[n_child >> 1].scc;
-                                    get_conflict(repo,scc,first_visit,last_visit,g,
-                                                 child_component,
-                                                 b,nodes,is_first,next)
+                            let mut not_zombie=g.lines[*cousin].flags & LINE_HALF_DELETED == 0;
+                            // This loop runs twice if not_zombie=false, once else.
+                            loop {
+                                if not_zombie {
+                                    nodes.push(g.lines[*cousin].key);
+                                }
+                                let n=g.lines[*cousin].n_children;
+                                for i in 0 .. n {
+                                    let n_child = g.children[g.lines[*cousin].children + i];
+                                    if n_child & 1 == 0 { // don't follow forward edges
+                                        let child_component=g.lines[n_child >> 1].scc;
+                                        get_conflict(repo,scc,first_visit,last_visit,g,
+                                                     child_component,
+                                                     b,nodes,is_first,next)
+                                    }
+                                }
+                                if not_zombie {
+                                    nodes.pop();
+                                    break;
+                                } else {
+                                    not_zombie = true
                                 }
                             }
-                            nodes.pop();
                         }
                     }
                 }
@@ -762,7 +805,7 @@ impl <'a> Repository<'a> {
         let cursor=unsafe { self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         while i<forward.len() {
             unsafe {
-                let (u,v)=lmdb::cursor_get(cursor,
+                let (_,v)=lmdb::cursor_get(cursor,
                                            &forward[(i+1)..(i+1+KEY_SIZE)],
                                            Some(&forward[(i+1+KEY_SIZE+HASH_SIZE)..
                                                          (i+1+KEY_SIZE+HASH_SIZE+1+KEY_SIZE)]),
@@ -779,7 +822,7 @@ impl <'a> Repository<'a> {
                 lmdb::cursor_del(cursor,0).unwrap();
                 self.mdb_txn.del(self.dbi_nodes,
                                  &forward[(i+1+KEY_SIZE+HASH_SIZE+1)..(i+1+KEY_SIZE+HASH_SIZE+1+KEY_SIZE)],
-                                 Some(&forward[i..(i+1+KEY_SIZE+HASH_SIZE)]));
+                                 Some(&forward[i..(i+1+KEY_SIZE+HASH_SIZE)])).unwrap();
             }
             i+=(1+HASH_SIZE+KEY_SIZE) + (1+KEY_SIZE)
         }
@@ -1043,6 +1086,8 @@ impl <'a> Repository<'a> {
                 let t0=time::precise_time_s();
                 let mut d = Diff { lines_a:Vec::new(), contents_a:Vec::new() };
                 self.output_file(&mut d,a,redundant);
+                let t1=time::precise_time_s();
+                info!("output_file took {}s",t1-t0);
                 //println!("output, now calling local_diff");
                 let cursor= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()};
                 local_diff(self,cursor,actions, line_num,
@@ -1053,8 +1098,8 @@ impl <'a> Repository<'a> {
                 unsafe {
                     lmdb::mdb_cursor_close(cursor);
                 }
-                let t1=time::precise_time_s();
-                info!("diff took {}s",t1-t0);
+                let t2=time::precise_time_s();
+                info!("diff took {}s",t2-t1);
                 Ok(())
             },
             Err(e)=>Err(e)
@@ -1139,7 +1184,7 @@ impl <'a> Repository<'a> {
                             info!("retrieve took {}s, now calling diff", time1-time0);
                             self.diff(line_num,actions, redundant,ret.unwrap(), realpath.as_path()).unwrap();
                             let time2=time::precise_time_s();
-                            info!("diff took {}s", time2-time1);
+                            info!("total diff took {}s", time2-time1);
 
 
                         } else if current_node[0]==2 {
@@ -1179,7 +1224,7 @@ impl <'a> Repository<'a> {
                             info!("record: retrieve took {}s, now calling diff", time1-time0);
                             self.diff(line_num,actions, redundant,ret.unwrap(), realpath.as_path()).unwrap();
                             let time2=time::precise_time_s();
-                            info!("diff took {}s", time2-time1);
+                            info!("total diff took {}s", time2-time1);
                         } else {
                             panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
                         };
@@ -1352,7 +1397,6 @@ impl <'a> Repository<'a> {
                     let time0=time::precise_time_s();
                     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-                    let mut pw:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut lnum0= *line_num;
                     for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
                     unsafe {
