@@ -114,7 +114,7 @@ struct Line<'a> {
 
 struct Graph<'a> {
     lines:Vec<Line<'a>>,
-    children:Vec<usize>
+    children:Vec<(*const u8,usize)>
 }
 
 
@@ -187,9 +187,6 @@ fn permissions(attr:&std::fs::Metadata)->usize{
 fn permissions(attr:&std::fs::Metadata)->usize{
     0
 }
-
-
-
 
 
 
@@ -512,7 +509,7 @@ impl <'a> Repository<'a> {
         fn retr<'a,'b,'c>(cache:&mut HashMap<&'a [u8],usize>,
                           curs:&'b mut lmdb::MdbCursor,
                           lines:&mut Vec<Line<'a>>,
-                          children:&mut Vec<usize>,
+                          children:&mut Vec<(*const u8,usize)>,
                           key:&'a[u8])->usize {
             {
                 match cache.entry(key) {
@@ -541,11 +538,13 @@ impl <'a> Repository<'a> {
                             key:key,flags:if is_zombie {LINE_HALF_DELETED} else {0},
                             children:children.len(),n_children:0,index:0,lowlink:0,scc:0
                         };
-                        l.children=children.len();
                         for child in CursIter::new(curs,key,0,true) {
+                            children.push((child.as_ptr(),0));
+                            /*
                             unsafe {
                                 children.push(std::mem::transmute(child.as_ptr()))
                             }
+                            */
                             l.n_children+=1
                         }
                         lines.push(l)
@@ -555,33 +554,46 @@ impl <'a> Repository<'a> {
             let idx=lines.len()-1;
             let l_children=lines[idx].children;
             let n_children=lines[idx].n_children;
+            debug!(target:"retrieve", "n_children: {}",n_children);
             for i in 0..n_children {
+                let (a,_)=children[l_children+i];
                 let child_key = unsafe {
-                    std::slice::from_raw_parts(std::mem::transmute(children[l_children+i]),1+KEY_SIZE)
+                    std::slice::from_raw_parts(a.offset(1),KEY_SIZE)
                 };
-                children[l_children+i] =
-                    ( retr(cache,curs,lines,children,&child_key[1..]) << 1 )
-                    | ((child_key[0] & PSEUDO_EDGE) as usize)
+                let flag = unsafe { *a };
+                children[l_children+i] = (a, retr(cache,curs,lines,children,child_key))
+            }
+            if n_children==0 {
+                children.push((std::ptr::null(),0));
+                lines[idx].n_children=1;
             }
             idx
         }
         let mut cache=HashMap::new();
         let mut cursor= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let mut lines=Vec::new();
-        let mut children:Vec<usize>=Vec::new();
+        // Insert last line (so that all lines have a common descendant).
+        lines.push(Line {
+            key:&b""[..],flags:0,children:0,n_children:0,index:0,lowlink:0,scc:0
+        });
+        cache.insert(&b""[..],0);
+        let mut children=Vec::new();
         retr(&mut cache,cursor,&mut lines,&mut children,key);
         unsafe { lmdb::mdb_cursor_close(cursor) };
         Ok(Graph { lines:lines, children:children })
     }
 
     fn contents<'b>(&'a self,key:&'b[u8]) -> &'a[u8] {
+        debug_assert!(key.len() == KEY_SIZE);
         match self.mdb_txn.get(self.dbi_contents,key) {
             Ok(Some(v))=>v,
             Ok(None)=>&[],
-            Err(_) =>panic!("contents")
+            Err(e) =>{
+                debug!("contents error for key {}",to_hex(key));
+                panic!("contents error: {:?}", e)
+            }
         }
     }
-
 
 
     fn tarjan(&self,line:&mut Graph)->Vec<Vec<usize>> {
@@ -594,7 +606,7 @@ impl <'a> Repository<'a> {
                 (*l).index = *index;
                 (*l).lowlink = *index;
                 (*l).flags |= LINE_ONSTACK | LINE_VISITED;
-                //println!("{}, {} chi",to_hex((*l).key),(*l).n_children);
+                debug!(target:"tarjan", "{} {} chi",to_hex((*l).key),(*l).n_children);
                 //unsafe {println!("contents: {}",std::str::from_utf8_unchecked(repo.contents((*l).key))); }
             }
             stack.push(n_l);
@@ -602,7 +614,7 @@ impl <'a> Repository<'a> {
             for i in 0..g.lines[n_l].n_children {
                 //let mut l=&mut (g.lines[n_l]);
 
-                let n_child = (g.children[g.lines[n_l].children + i]) >> 1;
+                let (_,n_child) = g.children[g.lines[n_l].children + i];
                 //println!("children: {}",to_hex(g.lines[n_child].key));
 
                 if g.lines[n_child].flags & LINE_VISITED == 0 {
@@ -637,7 +649,7 @@ impl <'a> Repository<'a> {
         let mut index=0;
         let mut scc=Vec::with_capacity(line.lines.len());
         //let mut scc=0;
-        dfs(self,&mut scc, &mut stack, &mut index, line, 0);
+        dfs(self,&mut scc, &mut stack, &mut index, line, 1);
         scc
     }
 
@@ -645,7 +657,7 @@ impl <'a> Repository<'a> {
 
 
 
-    fn output_file<B:LineBuffer<'a>>(&'a self,buf:&mut B,g:Graph<'a>,forward:&mut Vec<u8>) {
+    fn output_file<'b,'c:'b,B:LineBuffer<'c>>(&'c self,buf:&'b mut B,g:Graph<'a>,forward:&mut Vec<u8>) {
         let mut g=g;
         let t0=time::precise_time_s();
         let scc = self.tarjan(&mut g); // in reverse order.
@@ -663,8 +675,7 @@ impl <'a> Repository<'a> {
                    zero:&[u8],
                    step:&mut usize,
                    scc:&[Vec<usize>],
-                   n_scc:usize) {
-            let mut n_scc=n_scc;
+                   mut n_scc:usize) {
             let mut child_components=BTreeSet::new();
             let mut skipped=vec!(n_scc);
             loop {
@@ -677,8 +688,8 @@ impl <'a> Repository<'a> {
                     debug!(target:"output_file","cousin: {}",*cousin);
                     let n=g.lines[*cousin].n_children;
                     for i in 0 .. n {
-                        let n_child = g.children[g.lines[*cousin].children + i];
-                        let child_component=g.lines[n_child >> 1].scc;
+                        let (_,n_child) = g.children[g.lines[*cousin].children + i];
+                        let child_component=g.lines[n_child].scc;
                         if child_component < n_scc { // if this is a child and not a sibling.
                             child_components.insert(child_component);
                             next_scc=child_component
@@ -703,8 +714,8 @@ impl <'a> Repository<'a> {
             for cousin in scc[n_scc].iter() {
                 let n=g.lines[*cousin].n_children;
                 for i in 0 .. n {
-                    let n_child = g.children[g.lines[*cousin].children + i];
-                    let child_component=g.lines[n_child >> 1].scc;
+                    let (_,n_child) = g.children[g.lines[*cousin].children + i];
+                    let child_component=g.lines[n_child].scc;
                     let is_forward=forward_scc.contains(&child_component);
                     if is_forward {
                         if n_child & 1 != 0 {
@@ -712,14 +723,11 @@ impl <'a> Repository<'a> {
                             forward.extend(g.lines[*cousin].key);
                             forward.extend(zero);
                             forward.push(PSEUDO_EDGE);
-                            forward.extend(g.lines[n_child >> 1].key);
-                        } else {
-                            // set the flag to 1, we'll never look at it again in this DFS anyway.
-                            g.children[g.lines[*cousin].children + i] |= 1;
+                            forward.extend(g.lines[n_child].key);
                         }
-                    } else {
-                        g.children[g.lines[*cousin].children + i] |= 1;
-                        g.children[g.lines[*cousin].children + i] ^= 1;
+                        // Indicate here that we do not want to follow this edge (it is forward).
+                        let (a,_)=g.children[g.lines[*cousin].children+i];
+                        g.children[g.lines[*cousin].children + i] = (a,0);
                     }
                 }
             }
@@ -733,68 +741,114 @@ impl <'a> Repository<'a> {
         // assumes no conflict for now.
         let mut i=scc.len()-1;
         let mut nodes=vec!();
+        let mut selected_zombies=HashMap::new();
         loop {
             // test for conflict
-            if scc[i].len() <= 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] {
+            if scc[i].len() <= 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] && g.lines[scc[i][0]].flags & LINE_HALF_DELETED == 0 {
                 let key=g.lines[scc[i][0]].key;
                 //unsafe {println!("key={} contents={}",to_hex(key),std::str::from_utf8_unchecked(self.contents(key))) }
-                buf.output_line(&key,self.contents(key));
+                if key.len()>0 {
+                    buf.output_line(&key,self.contents(key));
+                }
                 if i==0 { break } else { i-=1 }
             } else {
-                fn get_conflict<'a,B:LineBuffer<'a>>(
-                    repo:&'a Repository,
-                    scc:&Vec<Vec<usize>>,
-                    first_visit:&[usize],
-                    last_visit:&[usize],
-                    g:&Graph<'a>,
+                struct A<'b,'a:'b,'c,B:LineBuffer<'a>> where 'a:'c, B:'b {
+                    repo:&'a Repository<'a>,
+                    scc:&'c Vec<Vec<usize>>,
+                    first_visit:&'c[usize],
+                    last_visit:&'c[usize],
+                    selected_zombies:&'c mut HashMap<&'a [u8],bool>,
+                    forced_zombie:bool,
+                    g:&'b Graph<'a>,
+                    b:&'b mut B,
+                    nodes:&'c mut Vec<&'a[u8]>,
                     i:usize,
-                    b:&mut B,
-                    nodes:&mut Vec<&'a[u8]>,
-                    is_first:&mut bool,
-                    next:&mut usize) {
+                    next:usize,
+                    is_first:bool
+                }
+                fn get_conflict<'b,'a:'b,'c,B:LineBuffer<'a>>(x:&mut A<'b,'a,'c,B>) {
 
-                    if scc[i].len() <= 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] {
-                        if ! *is_first {b.output_line(&[],b"================================\n");}
+                    if x.scc[x.i].len() <= 1 && x.first_visit[x.i] <= x.first_visit[0] && x.last_visit[x.i] >= x.last_visit[0] {
+                        if ! x.is_first {x.b.output_line(&[],b"================================\n");}
                         else{
-                            *is_first=false
+                            x.is_first=false
                         }
-                        for key in nodes {
-                            b.output_line(key,repo.contents(key))
+                        for key in x.nodes.iter() {
+                            x.b.output_line(key,x.repo.contents(key))
                         }
-                        *next=i
+                        x.next=x.i
                     } else {
-                        for cousin in scc[i].iter() {
-                            let mut not_zombie=g.lines[*cousin].flags & LINE_HALF_DELETED == 0;
-                            // This loop runs twice if not_zombie=false, once else.
-                            loop {
-                                if not_zombie {
-                                    nodes.push(g.lines[*cousin].key);
-                                }
-                                let n=g.lines[*cousin].n_children;
-                                for i in 0 .. n {
-                                    let n_child = g.children[g.lines[*cousin].children + i];
-                                    if n_child & 1 == 0 { // don't follow forward edges
-                                        let child_component=g.lines[n_child >> 1].scc;
+                        // Pour chaque permutation de la SCC, ajouter tous les sommets sur la pile, et appel recursif de chaque arete non-forward.
+                        /*
+                        for cousin in x.scc[i].iter() {
+                            let not_zombie=
+                                g.lines[*cousin].flags & LINE_HALF_DELETED == 0
+                                || forced_zombie;
+                            if not_zombie { nodes.push(g.lines[*cousin].key) }
+                            let n=g.lines[*cousin].n_children;
+                            for i in 0 .. n {
+                                let (edge_child,n_child) = g.children[g.lines[*cousin].children + i];
+                                if n_child != 0 || edge_child.is_null() {
+                                    // This is not a forward edges (forward edges are of the form (!=NULL,0))
+                                    let child_component=g.lines[n_child].scc;
+                                    let edge_child= if edge_child.is_null() { &ROOT_KEY[0..HASH_SIZE] } else {
+                                        unsafe {
+                                            std::slice::from_raw_parts(edge_child.offset(1+KEY_SIZE as isize), HASH_SIZE)
+                                        }
+                                    };
+                                    let (forced_zombie,newly_forced)=
+                                        match selected_zombies.entry(edge_child) {
+                                            Entry::Occupied(v)=>(*v.get(),false),
+                                            Entry::Vacant(v)=>{
+                                                let child_is_zombie=
+                                                    g.lines[n_child].flags & LINE_HALF_DELETED != 0;
+                                                v.insert(child_is_zombie);
+                                                (child_is_zombie,true)
+                                            }
+                                        };
+                                    get_conflict(repo,scc,first_visit,last_visit,g,
+                                                 selected_zombies,
+                                                 forced_zombie,
+                                                 child_component,
+                                                 b,nodes,is_first,next);
+                                    if forced_zombie && newly_forced {
+                                        // Dans ce cas, aussi essayer avec l'autre.
+                                        selected_zombies.insert(edge_child,false);
                                         get_conflict(repo,scc,first_visit,last_visit,g,
+                                                     selected_zombies,
+                                                     false,
                                                      child_component,
                                                      b,nodes,is_first,next)
                                     }
-                                }
-                                if not_zombie {
-                                    nodes.pop();
-                                    break;
-                                } else {
-                                    not_zombie = true
+                                    if newly_forced {
+                                        selected_zombies.remove(edge_child);
+                                    }
                                 }
                             }
-                        }
+                        }*/
                     }
                 }
+                // TODO: custom conflict outputters (part of the "writer" typeclass?)
                 buf.output_line(&[],b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
                 nodes.clear();
-                let mut is_first=true;
-                let mut next=0;
-                get_conflict(self,&scc,&first_visit,&last_visit,&g,i,buf,&mut nodes,&mut is_first,&mut next);
+                let next={
+                    let mut conflict= A {
+                        repo:self,
+                        scc:&scc,
+                        first_visit:&first_visit,
+                        last_visit:&last_visit,
+                        g:&g,
+                        b:buf,
+                        next:0,
+                        i:i,
+                        nodes:&mut nodes,
+                        is_first:true,
+                        selected_zombies:&mut selected_zombies,
+                        forced_zombie:false
+                    };
+                    get_conflict(&mut conflict);
+                    conflict.next
+                };
                 buf.output_line(&[],b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n");
                 if i==0 { break } else { i=std::cmp::min(i-1,next) }
             }
@@ -833,18 +887,21 @@ impl <'a> Repository<'a> {
     /// owned vector. If the key is just a patch id, it returns the
     /// corresponding external hash.
     fn external_key(&self,key:&[u8])->ExternalKey {
+        let mut result= self.external_hash(&key[0..HASH_SIZE]).to_vec();
+        if key.len()==KEY_SIZE { result.extend(&key[HASH_SIZE..KEY_SIZE]) };
+        result
+    }
+
+    fn external_hash(&self,key:&[u8])->&[u8] {
         //println!("internal key:{:?}",&key[0..HASH_SIZE]);
         if key.len()>=HASH_SIZE
             && unsafe {memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t)}==0 {
                 //println!("is root key");
-                ROOT_KEY.to_vec()
+                &ROOT_KEY[0..HASH_SIZE]
             } else {
                 match self.mdb_txn.get(self.dbi_external,&key[0..HASH_SIZE]) {
                     Ok(Some(pv))=> {
-                        let mut result:Vec<u8>=Vec::with_capacity(pv.len()+LINE_SIZE);
-                        result.extend(pv);
-                        if key.len()==KEY_SIZE { result.extend(&key[HASH_SIZE..KEY_SIZE]) }
-                        result
+                        pv
                     },
                     Ok(None)=>{
                         println!("internal key:{:?}",key);
@@ -860,6 +917,7 @@ impl <'a> Repository<'a> {
 
 
     fn internal_hash(&'a self,key:&[u8])->Option<&'a [u8]> {
+        debug!("internal_hash: {}, {}",to_hex(key), key.len());
         if key.len()==HASH_SIZE
             && unsafe { memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t) }==0 {
                 Some(ROOT_KEY)
@@ -913,11 +971,13 @@ impl <'a> Repository<'a> {
 
 
     fn delete_edges(&self, cursor:&mut lmdb::MdbCursor,edges:&mut Vec<Edge>, key:&'a[u8],flag:u8){
-        let ext_key=self.external_key(key);
-        for v in CursIter::new(cursor,key,flag,false) {
-            edges.push(Edge { from:ext_key.clone(),
-                              to:self.external_key(&v[1..(1+KEY_SIZE)]),
-                              introduced_by:self.external_key(&v[(1+KEY_SIZE)..]) });
+        if key.len() > 0 {
+            let ext_key=self.external_key(key);
+            for v in CursIter::new(cursor,key,flag,false) {
+                edges.push(Edge { from:ext_key.clone(),
+                                  to:self.external_key(&v[1..(1+KEY_SIZE)]),
+                                  introduced_by:self.external_key(&v[(1+KEY_SIZE)..]) });
+            }
         }
     }
 
@@ -930,17 +990,26 @@ impl <'a> Repository<'a> {
             } else { false }
         }
         fn local_diff(repo:&Repository,cursor:&mut lmdb::MdbCursor,actions:&mut Vec<Change>,line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[&[u8]], b:&[&[u8]]) {
-            let mut opt=vec![vec!();contents_a.len()+1];
-            for i in 0..opt.len() { opt[i]=vec![0;b.len()+1] }
-            // opt
-            for i in (0..contents_a.len()).rev() {
-                for j in (0..b.len()).rev() {
-                    opt[i][j]=
-                        if memeq(contents_a[i],b[j]) {
-                            opt[i+1][j+1]+1
-                        } else {
-                            std::cmp::max(opt[i+1][j], opt[i][j+1])
+            debug!("local_diff {} {}",contents_a.len(),b.len());
+            let mut opt=vec![vec![0;b.len()+1];contents_a.len()+1];
+            if contents_a.len()>0 {
+                let mut i=contents_a.len() - 1;
+                loop {
+                    opt[i]=vec![0;b.len()+1];
+                    if b.len()>0 {
+                        let mut j=b.len()-1;
+                        loop {
+                            opt[i][j]=
+                                if memeq(contents_a[i],b[j]) {
+                                    opt[i+1][j+1]+1
+                                } else {
+                                    std::cmp::max(opt[i+1][j], opt[i][j+1])
+                                };
+                            debug!(target:"diff","opt[{}][{}] = {}",i,j,opt[i][j]);
+                            if j>0 { j-=1 } else { break }
                         }
+                    }
+                    if i>0 { i-=1 } else { break }
                 }
             }
             let mut i=1;
@@ -952,7 +1021,7 @@ impl <'a> Repository<'a> {
                     for i in lines {
                         println!("+ {}",std::str::from_utf8_unchecked(i));
                     }
-                    if down_context.len()>0 {
+                if down_context.len()>0 {
                         println!("d {}",std::str::from_utf8_unchecked(repo.contents(down_context[0])));
                     }
                 }*/
@@ -978,12 +1047,10 @@ impl <'a> Repository<'a> {
             let mut oj=None;
             let mut last_alive_context=0;
             while i<contents_a.len() && j<b.len() {
-                //println!("i={}, j={}",i,j);
+                debug!(target:"diff","i={}, j={}",i,j);
                 if memeq(contents_a[i],b[j]) {
-                    //unsafe { println!("== {:?} {:?}",oi,oj,std::str::from_utf8_unchecked(contents_a[i]),std::str::from_utf8_unchecked(b[j])) }
-                    //println!("== {:?} {:?}",oi,oj);
                     if let Some(i0)=oi {
-                        //println!("deleting from {} to {} / {}",i0,i,lines_a.len());
+                        debug!(target:"diff","deleting from {} to {} / {}",i0,i,lines_a.len());
                         //println!("delete starting from line: \"{}\"",to_hex(lines_a[i0]));
                         //unsafe { println!("contents: \"{}\"",std::str::from_utf8_unchecked(contents_a[i0])); }
                         delete_lines(repo,cursor,actions, &lines_a[i0..i]);
@@ -1412,6 +1479,8 @@ impl <'a> Repository<'a> {
                     };
                     for c in up_context {
                         {
+                            debug!("newnodes: up_context {:?}",to_hex(&c));
+
                             let u= if c.len()>LINE_SIZE {
                                 self.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
                             } else {
@@ -1436,6 +1505,7 @@ impl <'a> Repository<'a> {
                                             pu.as_ptr().offset(1) as *mut c_char,
                                             HASH_SIZE);
                     }
+                    debug!("newnodes: inserting");
                     let mut lnum= *line_num + 1;
                     self.mdb_txn.put(self.dbi_contents,&pv[1..(1+KEY_SIZE)], &nodes[0],0).unwrap();
                     for n in &nodes[1..] {
@@ -1622,7 +1692,7 @@ impl <'a> Repository<'a> {
         self.unsafe_apply(&patch.changes,internal);
         let time1=time::precise_time_s();
         info!(target:"libpijul_apply","unsafe_apply took: {}", time1-time0);
-        let mut children=Vec::new();
+        //let mut children=Vec::new();
         let zero:[u8;HASH_SIZE]=[0;HASH_SIZE];
         let mut max_parents=0;
         let mut max_children=0;
@@ -1721,46 +1791,9 @@ impl <'a> Repository<'a> {
                     max_children=std::cmp::max(max_children,children.len()/(1+KEY_SIZE+HASH_SIZE));
                 },
                 Change::Edges{ref edges,ref flag}=>{
-                    for e in edges {
-                        let mut u:[u8;KEY_SIZE]=[0;KEY_SIZE];
-                        let mut v:[u8;KEY_SIZE]=[0;KEY_SIZE];
-                        unsafe {
-                            let hu=self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
-                            let hv=self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]).unwrap();
-                            copy_nonoverlapping(hu.as_ptr(),u.as_mut_ptr(),HASH_SIZE);
-                            copy_nonoverlapping(hv.as_ptr(),v.as_mut_ptr(),HASH_SIZE);
-                            copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize),
-                                                u.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
-                            copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize),
-                                                v.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
-                        }
-                        let (pu,pv) = if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
-                        {
-                            if !is_alive(cursor,&pu[..]) {
-                                //panic!("should not be called here");
-                                self.connect_up(pu,pv,&internal);
-                            }
-                        }
-                        if (*flag)&FOLDER_EDGE == 0 {
-                            // Now connect v to alive descendants of v (following deleted edges from v).
-                            children.clear();
-                            {
-                                for w in CursIter::new(cursor,pu,DELETED_EDGE,false) {
-                                    if is_alive(cursor_,&w[1..(1+KEY_SIZE)]) {
-                                        children.extend(&w[1..(1+KEY_SIZE)]);
-                                    }
-                                }
-                            }
-                            let mut i=0;
-                            while i<children.len() {
-                                self.connect_down(&children[i..(i+KEY_SIZE)],pv,&internal);
-                                i+=KEY_SIZE
-                            }
-                        }
-                    }
-                    debug!(target:"libpijul","apply: edges, done");
+                    unimplemented!()
                 },
-                Change::NewNodes { ref up_context,ref down_context,ref line_num,flag:_,ref nodes } => {
+                Change::NewNodes { ref up_context,ref down_context,ref line_num, ref flag, ref nodes } => {
                     debug!(target:"libpijul","apply: newnodes");
                     let mut pu:[u8;KEY_SIZE]=[0;KEY_SIZE];
                     let mut pv:[u8;KEY_SIZE]=[0;KEY_SIZE];
@@ -1782,11 +1815,11 @@ impl <'a> Repository<'a> {
                             copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
                                                 pu.as_mut_ptr().offset(HASH_SIZE as isize),
                                                 LINE_SIZE);
-                            if ! is_alive(cursor,&pu[..]) {
-                                //println!("not alive: {}",to_hex(&pu));
-                                panic!("up context dead");
-                                self.connect_up(&pu,&pv,&internal)
-                            }
+                        }
+                        if ! is_alive(cursor,&pu[..]) {
+                            self.reconnect(&pu[..],*flag ^ PARENT_EDGE,
+                                           internal,
+                                           &HashSet::new())
                         }
                     }
                     lnum0= (*line_num)+nodes.len()-1;
@@ -1804,8 +1837,7 @@ impl <'a> Repository<'a> {
                                                 pv.as_mut_ptr().offset(HASH_SIZE as isize),
                                                 LINE_SIZE);
                             if ! is_alive(cursor,&pv[..]) {
-                                panic!("down context dead");
-                                self.connect_down(&pu,&pv,&internal);
+                                unimplemented!() // down context missing
                             }
                         }
                     }
@@ -1828,196 +1860,68 @@ impl <'a> Repository<'a> {
         Ok(self)
     }
 
+    // new_patches is the set of patches that are not in the
+    // repository/branch from which the current patch comes.
+    fn reconnect(&mut self, a:&[u8], direction:u8, patch_id:&[u8], new_patches:&HashSet<&[u8]>) {
+        let cursor= unsafe { &mut * self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
+        fn connect(repo:&mut Repository,
+                   cursor:&mut lmdb::MdbCursor,
+                   a:&[u8],
+                   direction:u8,
+                   buffer:&mut Vec<u8>,
+                   patch_id:&[u8],
+                   new_patches:&HashSet<&[u8]>) {
+
+            if !is_alive(cursor,a) {
+                let mut i=buffer.len();
+                for neighbor in CursIter::new(cursor,a,direction,false) {
+                    if new_patches.contains(&neighbor[(1+KEY_SIZE)..]) {
+                        buffer.extend(&neighbor[0..(1+KEY_SIZE)]);
+                        buffer.extend(patch_id);
+                    }
+                }
+                let j=buffer.len();
+                let mut aa=[0;1+HASH_SIZE+KEY_SIZE];
+                aa[0]=PSEUDO_EDGE | direction ^ PARENT_EDGE;
+                unsafe {
+                    copy_nonoverlapping(a.as_ptr(),
+                                        aa.as_mut_ptr().offset(1),
+                                        KEY_SIZE);
+                    copy_nonoverlapping(patch_id.as_ptr(),
+                                        aa.as_mut_ptr().offset(1+KEY_SIZE as isize),
+                                        HASH_SIZE);
+                }
+                let mut buf_copy=[0;KEY_SIZE];
+                while i < j {
+                    buffer[i] ^= PSEUDO_EDGE;
+                    repo.mdb_txn.put(repo.dbi_nodes, a, &buffer[i..(i+1+KEY_SIZE+HASH_SIZE)],0);
+                    repo.mdb_txn.put(repo.dbi_nodes, &buffer[(i+1)..(i+1+KEY_SIZE)], &aa[..], 0);
+                    unsafe { copy_nonoverlapping(buffer.as_ptr().offset((i+1) as isize),
+                                                 buf_copy.as_mut_ptr(),
+                                                 KEY_SIZE) };
+                    connect(repo,cursor, &buf_copy[..], direction,buffer,patch_id,new_patches);
+                    i+= 1+HASH_SIZE+KEY_SIZE
+                }
+            }
+        }
+        let mut buf=Vec::with_capacity(4*(1+HASH_SIZE+KEY_SIZE));
+        connect(self,cursor,a,direction,&mut buf,patch_id,new_patches);
+        unsafe { lmdb::mdb_cursor_close(cursor); }
+    }
+
+
 
     pub fn write_changes_file(&self,changes_file:&Path)->Result<(),Error> {
-        let mut patches=Vec::new();
+        let mut patches=HashSet::new();
         let branch=self.get_current_branch();
         let curs=self.mdb_txn.cursor(self.dbi_branches).unwrap();
         let mut op=lmdb::Op::MDB_SET;
         while let Ok((_,v))=curs.get(&branch,None,op) {
-            patches.push(self.external_key(v));
+            patches.insert(self.external_hash(v));
             op=lmdb::Op::MDB_NEXT_DUP
         }
         try!(patch::write_changes(&patches,changes_file));
         Ok(())
-    }
-
-
-
-    /// Connect b to the alive ancestors of a (adding pseudo-folder edges if necessary).
-    fn connect_up(&mut self, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
-        //println!("connect_up: {} {}",to_hex(a),to_hex(b));
-        //panic!("connect up was called");
-        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&'a Repository, a:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>, folder_buf:&mut Vec<u8>,is_first:bool) {
-            //println!("connect: {}",to_hex(a));
-            if !visited.contains(a) {
-                visited.insert(a);
-                // Follow parent edges.
-                let mut cursor= unsafe { &mut *repo.mdb_txn.unsafe_cursor(repo.dbi_nodes).unwrap()};
-                {
-                    for a1 in CursIter::new(cursor,a,PARENT_EDGE|DELETED_EDGE,false) {
-                        connect(visited,repo,&a1[1..(1+KEY_SIZE)],internal_patch_id,buf,folder_buf,false);
-                    }
-                }
-                if !is_first {
-                    // Test for life of the current node
-                    if is_alive(cursor,a) {
-                        //println!("key is alive");
-                        buf.push(PSEUDO_EDGE|PARENT_EDGE);
-                        buf.extend(a);
-                        buf.extend(internal_patch_id)
-                    }
-
-                    // Look at all deleted folder parents, and add them.
-                    for a1 in CursIter::new(cursor,a,PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE,false) {
-                        folder_buf.push(PSEUDO_EDGE|PARENT_EDGE|FOLDER_EDGE);
-                        folder_buf.extend(a);
-                        folder_buf.extend(internal_patch_id);
-                        folder_buf.push(PSEUDO_EDGE|FOLDER_EDGE);
-                        folder_buf.extend(a1);
-                        folder_buf.extend(internal_patch_id);
-                    }
-                }
-                unsafe { lmdb::mdb_cursor_close(cursor) }
-            }
-        }
-        let mut buf=Vec::new();
-        let mut folder_buf=Vec::new();
-        {
-            let mut visited=HashSet::new();
-            connect(&mut visited, self,a,internal_patch_id,&mut buf,&mut folder_buf,true);
-        }
-        let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-        unsafe {
-            copy_nonoverlapping(b.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
-            copy_nonoverlapping(internal_patch_id.as_ptr(), pu.as_mut_ptr().offset((1+KEY_SIZE) as isize), HASH_SIZE)
-        }
-        let mut i=0;
-        while i<buf.len(){
-            pu[0]=buf[i] ^ PARENT_EDGE;
-            self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&buf[i..(i+1+KEY_SIZE+HASH_SIZE)],lmdb::MDB_NODUPDATA).unwrap();
-            self.mdb_txn.put(self.dbi_nodes,&buf[(i+1)..(i+1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
-            i+=1+KEY_SIZE+HASH_SIZE
-        }
-        i=0;
-        while i<folder_buf.len(){
-            self.mdb_txn.put(self.dbi_nodes,
-                             &folder_buf[(i+1)..(i+1+KEY_SIZE)],
-                             &folder_buf[(i+1+KEY_SIZE+HASH_SIZE)..(i+2*(1+KEY_SIZE+HASH_SIZE))],
-                             0).unwrap();
-            self.mdb_txn.put(self.dbi_nodes,
-                             &folder_buf[(i+1+KEY_SIZE+HASH_SIZE+1)..(i+1+KEY_SIZE+HASH_SIZE+KEY_SIZE)],
-                             &folder_buf[i..(i+1+KEY_SIZE+HASH_SIZE)],
-                             0).unwrap();
-            i+=2*(1+KEY_SIZE+HASH_SIZE)
-        }
-    }
-
-    /// Connect a to the alive descendants of b (not including folder descendants).
-    fn connect_down(&mut self, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
-        //println!("connect down: {}",to_hex(b));
-        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&'a Repository, b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>, is_first:bool) {
-            if !visited.contains(b) {
-                visited.insert(b);
-                let mut cursor= unsafe { &mut *repo.mdb_txn.unsafe_cursor(repo.dbi_nodes).unwrap()};
-                for b1 in CursIter::new(cursor,b,DELETED_EDGE,false) {
-                    connect(visited,repo,&b1[1..(1+KEY_SIZE)],internal_patch_id,buf,false);
-                }
-
-                // for all alive descendants (including pseudo-descendants)
-                for b1 in CursIter::new(cursor,&b,0,true) {
-                    //println!("down->{}",to_hex(b1));
-                    buf.push(PSEUDO_EDGE);
-                    buf.extend(&b1[1..(1+KEY_SIZE)]);
-                    buf.extend(internal_patch_id)
-                }
-                // if b is a zombie (we got to b through a deleted edge but it also has alive edges)
-                if !is_first && is_alive(cursor,b) {
-                    buf.push(PSEUDO_EDGE);
-                    buf.extend(b);
-                    buf.extend(internal_patch_id)
-                }
-                unsafe { lmdb::mdb_cursor_close(cursor) }
-            }
-        }
-        let mut buf=Vec::new();
-        {
-            let mut visited=HashSet::new();
-            connect(&mut visited, self,b,internal_patch_id,&mut buf,true);
-        }
-        let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-        unsafe {
-            copy_nonoverlapping(a.as_ptr(), pu.as_mut_ptr().offset(1), KEY_SIZE);
-            copy_nonoverlapping(internal_patch_id.as_ptr(), pu.as_mut_ptr().offset((1+KEY_SIZE) as isize), HASH_SIZE)
-        }
-        let mut i=0;
-        while i<buf.len(){
-            pu[0]=buf[i] ^ PARENT_EDGE;
-            self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],
-                             &buf[i..(i+1+KEY_SIZE+HASH_SIZE)],lmdb::MDB_NODUPDATA).unwrap();
-            self.mdb_txn.put(self.dbi_nodes,&buf[(i+1)..(i+1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
-            i+=1+KEY_SIZE+HASH_SIZE
-        }
-    }
-
-
-
-    /// Connect a to the alive descendants of b (not including folder descendants).
-    fn connect_down_folders(&mut self, a:&[u8], b:&[u8],internal_patch_id:&[u8]) {
-        fn connect<'a>(visited:&mut HashSet<&'a[u8]>, repo:&'a Repository, a:&'a[u8],b:&'a[u8], internal_patch_id:&'a[u8], buf:&mut Vec<u8>)->bool {
-            if !visited.contains(b) {
-                visited.insert(b);
-                let mut cursor= unsafe { &mut *repo.mdb_txn.unsafe_cursor(repo.dbi_nodes).unwrap()};
-                let mut has_alive_descendants=false;
-
-                for b1 in CursIter::new(cursor,b,DELETED_EDGE|FOLDER_EDGE,true) {
-                    has_alive_descendants = has_alive_descendants ||
-                        connect(visited,repo,b,b1,internal_patch_id,buf);
-                }
-
-                // test for life.
-                let flag=[PARENT_EDGE|FOLDER_EDGE];
-                let (_,v)= unsafe { lmdb::cursor_get(cursor,&b,Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE).unwrap() };
-                let is_alive= if v.len()<1 { false } else { v[0]==flag[0] };
-                unsafe { lmdb::mdb_cursor_close(cursor) }
-                if is_alive {
-                    true
-                } else {
-                    if has_alive_descendants {
-                        // dead, but with alive descendants: conflict!
-                        buf.push(PARENT_EDGE|FOLDER_EDGE|PSEUDO_EDGE);
-                        buf.extend(a);
-                        buf.extend(internal_patch_id);
-                        buf.push(FOLDER_EDGE|PSEUDO_EDGE);
-                        buf.extend(b);
-                        buf.extend(internal_patch_id);
-                        true
-                    } else {
-                        false
-                    }
-                }
-            } else {
-                // This should never happen, since the "folder part" of the graph is a tree.
-                // Maybe remove the "visited" hash set altogether after debugging.
-                unreachable!()
-            }
-        }
-        let mut buf=Vec::new();
-        {
-            let mut visited=HashSet::new();
-            connect(&mut visited, self,a,b,internal_patch_id,&mut buf);
-        }
-        let mut i=0;
-        while i<buf.len(){
-            let sz=1+KEY_SIZE+HASH_SIZE;
-            self.mdb_txn.put(self.dbi_nodes,
-                             &buf[(i+1)..(i+1+KEY_SIZE)],
-                             &buf[(i+sz)..(i+2*sz)],lmdb::MDB_NODUPDATA).unwrap();
-            self.mdb_txn.put(self.dbi_nodes,
-                             &buf[(i+sz+1)..(i+sz+1+KEY_SIZE)],
-                             &buf[i..(i+sz)],lmdb::MDB_NODUPDATA).unwrap();
-            i+=2*sz
-        }
     }
 
 

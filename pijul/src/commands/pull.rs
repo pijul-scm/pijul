@@ -105,11 +105,11 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
         Some(r) =>
         {
             // get remote changes file
-            let remote_patches:Vec<Vec<u8>>=
+            let remote_patches:HashSet<Vec<u8>>=
                 match args.remote {
                     Remote::Local{path}=>{
                         let changes_file=branch_changes_file(path,DEFAULT_BRANCH.as_bytes());
-                        read_changes(&changes_file).unwrap_or(vec!())
+                        read_changes(&changes_file).unwrap_or(HashSet::new())
                     },
                     Remote::Ssh{..}=>{
                         /*
@@ -130,21 +130,15 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                         unimplemented!()
                     }
                 };
-            let local_patches:Vec<Vec<u8>>={
+            let local_patches:HashSet<Vec<u8>>={
                 let changes_file=branch_changes_file(r,DEFAULT_BRANCH.as_bytes());
-                read_changes(&changes_file).unwrap_or(vec!())
+                read_changes(&changes_file).unwrap_or(HashSet::new())
             };
-            let mut pullable:HashSet<&[u8]>=HashSet::with_capacity(remote_patches.len());
-            let mut j=0;
-            for i in 0..remote_patches.len() {
-                if if j<local_patches.len() {remote_patches[i]==local_patches[j]} else {false} {
-                    j+=1
-                } else {
-                    pullable.insert(&remote_patches[i]);
-                }
-            }
+            let pullable=remote_patches.difference(&local_patches);
 
-            // The filter in some way.
+            // Then filter the patches in some way.
+
+            // Then download the patches, and apply.
             fn download_patch(remote:&Remote, local_patches:&Path, patch_hash:&[u8])->Result<PathBuf,Error>{
                 match *remote {
                     Remote::Local{path}=>{
@@ -161,11 +155,9 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                     }
                 }
             }
-            // Then download the patches, and apply.
-            fn apply_patches<'a>(repo:Repository<'a>, branch:&[u8], remote:&Remote, local_patches:&Path, patch_hash:&[u8], patches_were_applied:&mut bool)->Result<Repository<'a>,Error>{
+            fn apply_patches<'a>(mut repo:Repository<'a>, branch:&[u8], remote:&Remote, local_patches:&Path, patch_hash:&[u8], patches_were_applied:&mut bool)->Result<Repository<'a>,Error>{
                 // download this patch
                 //println!("has patch : {:?}",patch_hash);
-                let mut repo=repo;
                 if !try!(repo.has_patch(branch,patch_hash)) {
                     let local_patch=try!(download_patch(remote,local_patches,patch_hash));
                     let mut buffer = BufReader::new(try!(File::open(local_patch)));

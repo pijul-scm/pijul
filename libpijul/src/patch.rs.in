@@ -33,7 +33,7 @@ use self::bincode::{SizeLimit};
 extern crate crypto;
 use self::crypto::digest::Digest;
 use self::crypto::sha2::Sha512;
-
+use std::collections::HashSet;
 extern crate rand;
 extern crate libc;
 use self::libc::{memcmp,c_void,size_t};
@@ -130,7 +130,7 @@ impl Patch {
 }
 
 
-pub fn write_changes(patches:&Vec<Vec<u8>>,changes_file:&Path)->Result<(),Error>{
+pub fn write_changes(patches:&HashSet<&[u8]>,changes_file:&Path)->Result<(),Error>{
     let file=try!(File::create(changes_file).map_err(Error::IoError));
     let mut buffer = BufWriter::new(file);
     try!(bincode::serde::serialize_into(&mut buffer,&patches,SizeLimit::Infinite).map_err(Error::PatchEncoding));
@@ -139,7 +139,7 @@ pub fn write_changes(patches:&Vec<Vec<u8>>,changes_file:&Path)->Result<(),Error>
     Ok(())
 }
 
-pub fn read_changes(changes_file:&Path)->Result<Vec<Vec<u8>>,Error> {
+pub fn read_changes(changes_file:&Path)->Result<HashSet<Vec<u8>>,Error> {
     let file=try!(File::open(changes_file).map_err(Error::IoError));
     let mut r = BufReader::new(file);
     let dec=try!(bincode::serde::deserialize_from(&mut r,SizeLimit::Infinite).map_err(Error::PatchDecoding));

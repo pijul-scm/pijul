@@ -28,16 +28,16 @@ fn main() {
         let windows = target.contains("windows");
         if windows {
             gcc::Config::new()
-                .file("src/repository/midl.c")
-                .file("src/repository/mdb.c")
+                .file("src/midl.c")
+                .file("src/mdb.c")
                 .define("_WIN32",None)
-                .include("src/repository")
+                .include("src")
                 .compile("liblmdb.a");
         } else {
             gcc::Config::new()
-                .file("src/repository/midl.c")
-                .file("src/repository/mdb.c")
-                .include("src/repository")
+                .file("src/midl.c")
+                .file("src/mdb.c")
+                .include("src")
                 .compile("liblmdb.a");
         }
     }

@@ -6,9 +6,6 @@ extern crate log;
 extern crate libpijul;
 mod commands;
 
-use std::path::Path;
-
-use log::*;
 extern crate time;
 
 extern crate env_logger;
