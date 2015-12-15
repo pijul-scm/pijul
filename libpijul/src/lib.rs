@@ -188,11 +188,39 @@ fn permissions(attr:&std::fs::Metadata)->usize{
     0
 }
 
+fn has_edge(cursor:&mut lmdb::MdbCursor,key:&[u8],flag0:u8,include_folder:bool,include_pseudo:bool)->bool {
+    let mut flag=[flag0];
+    debug!(target:"has_edge", "{:?}",flag[0]);
+    while flag[0] <= flag0|PSEUDO_EDGE|FOLDER_EDGE {
+        if (flag[0] & PSEUDO_EDGE != 0 && include_pseudo)
+            || (flag[0] & FOLDER_EDGE !=0 && include_folder)
+            || (flag[0] == flag0)
+        {
+            match unsafe {lmdb::cursor_get(cursor,&key,Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE)} {
+                Ok((_,v))=>{
+                    debug_assert!(v.len()>=1);
+                    debug!(target:"has_edge", "{:?} == {:?} ?",flag[0],v[0]);
+                    if v[0]==flag[0] { return true }
+                },
+                _=>{}
+            }
+        }
+        flag[0]+=1
+    }
+    false
+}
 
 
-// A node is alive if it has a PARENT_EDGE or a PARENT_EDGE|FOLDER_EDGE to another node (or if it is the root node, but we will never call this function on the root node).
-fn nonroot_is_alive(cursor:&mut lmdb::MdbCursor,key:&[u8])->bool {
-    let mut flag=[PARENT_EDGE];
+fn is_alive(cursor:&mut lmdb::MdbCursor,key:&[u8])->bool {
+    (unsafe { memcmp(key.as_ptr() as *const c_void,
+                     ROOT_KEY.as_ptr() as *const c_void,
+                     ROOT_KEY.len() as size_t) == 0 })
+        || has_edge(cursor,key,PARENT_EDGE,true,true)
+}
+
+
+fn has_nondeleted_children(cursor:&mut lmdb::MdbCursor,key:&[u8])->bool {
+    let mut flag=[0];
     let alive= {
         match unsafe {lmdb::cursor_get(cursor,&key,Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE)} {
             Ok((_,v))=>{
@@ -203,7 +231,7 @@ fn nonroot_is_alive(cursor:&mut lmdb::MdbCursor,key:&[u8])->bool {
         }
     };
     alive || {
-        flag[0]=PARENT_EDGE|FOLDER_EDGE;
+        flag[0]=FOLDER_EDGE;
         match unsafe { lmdb::cursor_get(cursor,&key,Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE) } {
             Ok((_,v))=>{
                 debug_assert!(v.len()>=1);
@@ -215,12 +243,7 @@ fn nonroot_is_alive(cursor:&mut lmdb::MdbCursor,key:&[u8])->bool {
 }
 
 
-fn is_alive(cursor:&mut lmdb::MdbCursor,key:&[u8])->bool {
-    (unsafe { memcmp(key.as_ptr() as *const c_void,
-                     ROOT_KEY.as_ptr() as *const c_void,
-                     ROOT_KEY.len() as size_t) == 0 })
-        || nonroot_is_alive(cursor,key)
-}
+
 
 impl <'a> Repository<'a> {
     pub fn new(path:&std::path::Path)->Result<Repository<'a>,Error>{
@@ -1799,15 +1822,23 @@ impl <'a> Repository<'a> {
                 },
                 Change::NewNodes { ref up_context,ref down_context,ref line_num, ref flag, ref nodes } => {
                     debug!(target:"libpijul","apply: newnodes");
-                    let mut pu:[u8;KEY_SIZE]=[0;KEY_SIZE];
-                    let mut pv:[u8;KEY_SIZE]=[0;KEY_SIZE];
+                    let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+                    let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+                    let mut context:[u8;KEY_SIZE]=[0;KEY_SIZE];
                     let mut lnum0= *line_num;
-                    for i in 0..LINE_SIZE { pv[HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
+                    for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
                     let _= unsafe {
                         copy_nonoverlapping(internal.as_ptr(),
-                                            pv.as_mut_ptr(),
-                                            HASH_SIZE)
+                                            pu.as_mut_ptr().offset(1),
+                                            HASH_SIZE);
+                        copy_nonoverlapping(internal.as_ptr(),
+                                            pv.as_mut_ptr().offset(1),
+                                            HASH_SIZE);
                     };
+                    lnum0= (*line_num);
+                    unsafe { copy_nonoverlapping(internal.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE); }
+                    for i in 0..LINE_SIZE { pu[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
+
                     for c in up_context {
                         unsafe {
                             let u= if c.len()>LINE_SIZE {
@@ -1815,15 +1846,30 @@ impl <'a> Repository<'a> {
                             } else {
                                 internal as &[u8]
                             };
-                            copy_nonoverlapping(u.as_ptr(), pu.as_mut_ptr(), HASH_SIZE);
+                            copy_nonoverlapping(u.as_ptr(), context.as_mut_ptr(), HASH_SIZE);
                             copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
-                                                pu.as_mut_ptr().offset(HASH_SIZE as isize),
+                                                context.as_mut_ptr().offset(HASH_SIZE as isize),
                                                 LINE_SIZE);
                         }
-                        if ! is_alive(cursor,&pu[..]) {
-                            self.reconnect(&pu[..], DELETED_EDGE ^ PARENT_EDGE,
-                                           internal,
-                                           new_patches)
+                        if ! has_edge(cursor,&context[..],PARENT_EDGE,true,true) {
+                            let mut relatives=Vec::new();
+                            self.find_alive_relatives(&context[..],DELETED_EDGE|PARENT_EDGE,
+                                                      internal,new_patches,&mut relatives);
+                            println!("up relatives:{}",to_hex(&relatives));
+                            let mut i=0;
+                            while i<relatives.len() {
+                                pu[i]= (*flag | PSEUDO_EDGE);
+                                relatives[0]= (*flag | PSEUDO_EDGE)^PARENT_EDGE;
+                                self.mdb_txn.put(self.dbi_nodes,
+                                                 &relatives[(i+1)..(i+1+KEY_SIZE)],
+                                                 &pu,
+                                                 0);
+                                self.mdb_txn.put(self.dbi_nodes,
+                                                 &pu[1..(1+KEY_SIZE)],
+                                                 &relatives[i..(i+1+KEY_SIZE+HASH_SIZE)],
+                                                 0);
+                                i+=1+KEY_SIZE+HASH_SIZE
+                            }
                         }
                     }
                     lnum0= (*line_num)+nodes.len()-1;
@@ -1836,12 +1882,32 @@ impl <'a> Repository<'a> {
                             } else {
                                 internal as &[u8]
                             };
-                            copy_nonoverlapping(u.as_ptr(), pv.as_mut_ptr(), HASH_SIZE);
+                            copy_nonoverlapping(u.as_ptr(), pv.as_mut_ptr().offset(1), HASH_SIZE);
                             copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
-                                                pv.as_mut_ptr().offset(HASH_SIZE as isize),
+                                                pv.as_mut_ptr().offset(1+HASH_SIZE as isize),
                                                 LINE_SIZE);
-                            if ! is_alive(cursor,&pv[..]) {
-                                unimplemented!() // down context missing
+                        }
+                        debug!(target:"missing","{}",to_hex(&pv[..]));
+                        if ! has_edge(cursor,&pv[..],0,true,true) {
+                            debug!(target:"missing","no_edge !");
+                            let mut relatives=Vec::new();
+                            self.find_alive_relatives(&pv[1..(1+KEY_SIZE)],DELETED_EDGE,
+                                                      internal,new_patches,&mut relatives);
+                            println!("down relatives:{}",to_hex(&relatives));
+                            let mut i=0;
+                            while i<relatives.len() {
+                                // TODO: For each child of relative [(i+1)..(i+1+KEY_SIZE)], add an edge.
+                                pu[i]= (*flag | PSEUDO_EDGE);
+                                relatives[0]= (*flag | PSEUDO_EDGE)^PARENT_EDGE;
+                                self.mdb_txn.put(self.dbi_nodes,
+                                                 &relatives[(i+1)..(i+1+KEY_SIZE)],
+                                                 &pu,
+                                                 0);
+                                self.mdb_txn.put(self.dbi_nodes,
+                                                 &pu[1..(1+KEY_SIZE)],
+                                                 &relatives[i..(i+1+KEY_SIZE+HASH_SIZE)],
+                                                 0);
+                                i+=1+KEY_SIZE+HASH_SIZE
                             }
                         }
                     }
@@ -1864,58 +1930,49 @@ impl <'a> Repository<'a> {
         Ok(self)
     }
 
-    // new_patches is the set of patches that are not in the
-    // repository/branch from which the current patch comes. (of
-    // course, new_patches contains external hashes)
-    fn reconnect(&mut self, a:&[u8], direction:u8, patch_id:&[u8], new_patches:&HashSet<&[u8]>) {
+
+    fn find_alive_relatives(&self, a:&[u8], direction:u8, patch_id:&[u8], new_patches:&HashSet<&[u8]>,
+                            relatives:&mut Vec<u8>) {
         let cursor= unsafe { &mut * self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
-        fn connect(repo:&mut Repository,
+        fn connect(repo:&Repository,
                    cursor:&mut lmdb::MdbCursor,
                    a:&[u8],
                    direction:u8,
+                   result:&mut Vec<u8>,
                    buffer:&mut Vec<u8>,
                    patch_id:&[u8],
                    new_patches:&HashSet<&[u8]>) {
-
-            if !is_alive(cursor,a) {
-                let mut i=buffer.len();
-                for neighbor in CursIter::new(cursor,a,direction,false) {
-                    debug!(target:"pull","reconnect: int={}",to_hex(&neighbor[(1+KEY_SIZE)..]));
-
-                    let ext=repo.external_hash(&neighbor[(1+KEY_SIZE)..]);
-                    debug!(target:"pull","reconnect: dir={}, ext={}, contains: {} ({})",direction,to_hex(ext),
-                           new_patches.contains(ext),new_patches.len());
-                    if new_patches.contains(ext) {
-                        buffer.extend(&neighbor[0..(1+KEY_SIZE)]);
-                        buffer.extend(patch_id);
-                    }
-                }
-                let j=buffer.len();
-                let mut aa=[0;1+HASH_SIZE+KEY_SIZE];
-                aa[0]=PSEUDO_EDGE | direction ^ PARENT_EDGE;
-                unsafe {
-                    copy_nonoverlapping(a.as_ptr(),
-                                        aa.as_mut_ptr().offset(1),
-                                        KEY_SIZE);
-                    copy_nonoverlapping(patch_id.as_ptr(),
-                                        aa.as_mut_ptr().offset(1+KEY_SIZE as isize),
-                                        HASH_SIZE);
-                }
-                let mut buf_copy=[0;KEY_SIZE];
-                while i < j {
-                    buffer[i] ^= PSEUDO_EDGE;
-                    repo.mdb_txn.put(repo.dbi_nodes, a, &buffer[i..(i+1+KEY_SIZE+HASH_SIZE)],0);
-                    repo.mdb_txn.put(repo.dbi_nodes, &buffer[(i+1)..(i+1+KEY_SIZE)], &aa[..], 0);
-                    unsafe { copy_nonoverlapping(buffer.as_ptr().offset((i+1) as isize),
-                                                 buf_copy.as_mut_ptr(),
-                                                 KEY_SIZE) };
-                    connect(repo,cursor, &buf_copy[..], direction,buffer,patch_id,new_patches);
-                    i+= 1+HASH_SIZE+KEY_SIZE
+            let mut i=buffer.len();
+            let i0=buffer.len();
+            for neighbor in CursIter::new(cursor,a,direction,false) {
+                let ext=repo.external_hash(&neighbor[(1+KEY_SIZE)..]);
+                if new_patches.contains(ext) {
+                    buffer.extend(&neighbor[1..(1+KEY_SIZE)]);
                 }
             }
+            let j=buffer.len();
+            if j==i0 && unsafe { memcmp(ROOT_KEY.as_ptr()as *const c_void,a.as_ptr() as *const c_void,KEY_SIZE as size_t)!=0} {
+                debug_assert!(a.len()==KEY_SIZE);
+                debug_assert!(patch_id.len()==HASH_SIZE);
+                result.push(direction|PSEUDO_EDGE);
+                result.extend(a);
+                result.extend(patch_id);
+            } else {
+                let mut copy=[0;KEY_SIZE];
+                while i < j {
+                    unsafe {
+                        copy_nonoverlapping(buffer.as_ptr().offset(i as isize),
+                                            copy.as_mut_ptr(),
+                                            KEY_SIZE);
+                    }
+                    connect(repo,cursor, &copy[..],direction,result,buffer,patch_id,new_patches);
+                    i+= KEY_SIZE
+                }
+            }
+            buffer.truncate(i0)
         }
-        let mut buf=Vec::with_capacity(4*(1+HASH_SIZE+KEY_SIZE));
-        connect(self,cursor,a,direction,&mut buf,patch_id,new_patches);
+        let mut buf=Vec::with_capacity(4*KEY_SIZE);
+        connect(self,cursor,a,direction,relatives,&mut buf,patch_id,new_patches);
         unsafe { lmdb::mdb_cursor_close(cursor); }
     }
 
