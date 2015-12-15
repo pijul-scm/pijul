@@ -134,7 +134,17 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 let changes_file=branch_changes_file(r,DEFAULT_BRANCH.as_bytes());
                 read_changes(&changes_file).unwrap_or(HashSet::new())
             };
+
+            debug!(target:"pull","local {}, remote {}",local_patches.len(),remote_patches.len());
             let pullable=remote_patches.difference(&local_patches);
+            let only_local:HashSet<&[u8]>={
+                let mut only_local:HashSet<&[u8]>=HashSet::new();
+                for i in local_patches.difference(&remote_patches) {
+                    debug!(target:"pull","only_local += {}",to_hex(&i));
+                    only_local.insert(&i);
+                }
+                only_local
+            };
 
             // Then filter the patches in some way.
 
@@ -155,7 +165,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                     }
                 }
             }
-            fn apply_patches<'a>(mut repo:Repository<'a>, branch:&[u8], remote:&Remote, local_patches:&Path, patch_hash:&[u8], patches_were_applied:&mut bool)->Result<Repository<'a>,Error>{
+            fn apply_patches<'a>(mut repo:Repository<'a>, branch:&[u8], remote:&Remote, local_patches:&Path, patch_hash:&[u8], patches_were_applied:&mut bool, only_local:&HashSet<&[u8]>)->Result<Repository<'a>,Error>{
                 // download this patch
                 //println!("has patch : {:?}",patch_hash);
                 if !try!(repo.has_patch(branch,patch_hash)) {
@@ -163,12 +173,13 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                     let mut buffer = BufReader::new(try!(File::open(local_patch)));
                     let patch=try!(Patch::from_reader(&mut buffer));
                     for dep in patch.dependencies.iter() {
-                        repo= try!(apply_patches(repo,branch,remote,local_patches,&dep,patches_were_applied))
+                        repo= try!(apply_patches(repo,branch,remote,local_patches,&dep,patches_were_applied,
+                                                 only_local))
                     }
                     let mut internal=[0;HASH_SIZE];
                     repo.new_internal(&mut internal);
                     //println!("pulling and applying patch {}",to_hex(patch_hash));
-                    let mut repo=try!(repo.apply(&patch, &internal));
+                    let mut repo=try!(repo.apply(&patch, &internal,only_local));
                     *patches_were_applied=true;
                     repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);
                     repo.register_hash(&internal[..],patch_hash);
@@ -191,7 +202,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             };
             let mut patches_were_applied=false;
             for p in pullable {
-                repo=try!(apply_patches(repo,&current_branch,&args.remote,&local_patches,p,&mut patches_were_applied))
+                repo=try!(apply_patches(repo,&current_branch,&args.remote,&local_patches,p,&mut patches_were_applied,&only_local))
             }
             let mut repo = if patches_were_applied {
                 try!(repo.write_changes_file(&branch_changes_file(r,&current_branch)));

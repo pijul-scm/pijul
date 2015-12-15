@@ -23,12 +23,13 @@ extern crate libpijul;
 use commands::StaticSubcommand;
 use self::libpijul::{Repository};
 use self::libpijul::patch::{Patch,HASH_SIZE};
-use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root, branch_changes_file};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root, branch_changes_file,to_hex};
 use std::sync::Arc;
 
 use std::thread;
 
 use commands::error::Error;
+use std::collections::HashSet;
 
 extern crate rand;
 use std::path::{Path};
@@ -97,7 +98,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 repo.new_internal(&mut internal);
                 debug!(target:"pijul","applying patch");
-                let mut repo=repo.apply(&patch_arc, &internal).unwrap();
+                let mut repo=repo.apply(&patch_arc, &internal, &HashSet::new()).unwrap();
                 //println!("sync");
                 //let t1=time::precise_time_s();
                 //info!("applied patch in {}s", t1-t0);
@@ -113,6 +114,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 match hash_child.join() {
                     Ok(Ok(hash))=> {
                         repo.register_hash(&internal[..],&hash[..]);
+                        debug!(target:"pull","hash={}, local={}",to_hex(&hash),to_hex(&internal));
                         //println!("writing changes {:?}",internal);
                         repo.write_changes_file(&branch_changes_file(r,repo.get_current_branch())).unwrap();
                         let t3=time::precise_time_s();

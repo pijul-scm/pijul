@@ -1451,6 +1451,10 @@ impl <'a> Repository<'a> {
                         pu[0]=*flag^PARENT_EDGE;
                         pv[0]=*flag;
                         debug!(target:"libpijul","new edge: {}\n          {}",to_hex(&pu),to_hex(&pv));
+                        unsafe {
+                            copy_nonoverlapping(internal_patch_id.as_ptr(),pu.as_mut_ptr().offset(1+KEY_SIZE as isize), HASH_SIZE);
+                            copy_nonoverlapping(internal_patch_id.as_ptr(),pv.as_mut_ptr().offset(1+KEY_SIZE as isize), HASH_SIZE);
+                        }
                         self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
                         self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
                     }
@@ -1678,7 +1682,7 @@ impl <'a> Repository<'a> {
     }
 
     /// Applies a patch to a repository.
-    pub fn apply<'b>(mut self, patch:&Patch, internal:&'b [u8])->Result<Repository<'a>,Error> {
+    pub fn apply<'b>(mut self, patch:&Patch, internal:&'b [u8], new_patches:&HashSet<&[u8]>)->Result<Repository<'a>,Error> {
         let current=self.get_current_branch().to_vec();
         {
             let curs=self.mdb_txn.cursor(self.dbi_branches).unwrap();
@@ -1817,9 +1821,9 @@ impl <'a> Repository<'a> {
                                                 LINE_SIZE);
                         }
                         if ! is_alive(cursor,&pu[..]) {
-                            self.reconnect(&pu[..],*flag ^ PARENT_EDGE,
+                            self.reconnect(&pu[..], DELETED_EDGE ^ PARENT_EDGE,
                                            internal,
-                                           &HashSet::new())
+                                           new_patches)
                         }
                     }
                     lnum0= (*line_num)+nodes.len()-1;
@@ -1861,7 +1865,8 @@ impl <'a> Repository<'a> {
     }
 
     // new_patches is the set of patches that are not in the
-    // repository/branch from which the current patch comes.
+    // repository/branch from which the current patch comes. (of
+    // course, new_patches contains external hashes)
     fn reconnect(&mut self, a:&[u8], direction:u8, patch_id:&[u8], new_patches:&HashSet<&[u8]>) {
         let cursor= unsafe { &mut * self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         fn connect(repo:&mut Repository,
@@ -1875,7 +1880,12 @@ impl <'a> Repository<'a> {
             if !is_alive(cursor,a) {
                 let mut i=buffer.len();
                 for neighbor in CursIter::new(cursor,a,direction,false) {
-                    if new_patches.contains(&neighbor[(1+KEY_SIZE)..]) {
+                    debug!(target:"pull","reconnect: int={}",to_hex(&neighbor[(1+KEY_SIZE)..]));
+
+                    let ext=repo.external_hash(&neighbor[(1+KEY_SIZE)..]);
+                    debug!(target:"pull","reconnect: dir={}, ext={}, contains: {} ({})",direction,to_hex(ext),
+                           new_patches.contains(ext),new_patches.len());
+                    if new_patches.contains(ext) {
                         buffer.extend(&neighbor[0..(1+KEY_SIZE)]);
                         buffer.extend(patch_id);
                     }
@@ -2113,7 +2123,7 @@ impl <'a> Repository<'a> {
             self.mdb_txn.txn=txn;
             self.new_internal(&mut internal[..]);
 
-            let mut repository=self.apply(pending,&internal[..]).unwrap();
+            let mut repository=self.apply(pending,&internal[..],&HashSet::new()).unwrap();
             let updates=try!(repository.unsafe_output_repository(working_copy));
             lmdb::mdb_txn_abort(txn);
             repository.mdb_txn.txn=parent_txn;
