@@ -198,7 +198,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                     try!(repo.record(&r))
                 };
                 Patch { changes:changes,
-                        dependencies:vec!() }
+                        dependencies:HashSet::new() }
             };
             let mut patches_were_applied=false;
             for p in pullable {

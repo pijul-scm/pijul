@@ -71,7 +71,7 @@ pub enum Change {
 #[derive(Debug,Serialize,Deserialize)]
 pub struct Patch {
     pub changes:Vec<Change>,
-    pub dependencies:Vec<ExternalHash>
+    pub dependencies:HashSet<ExternalHash>
 }
 
 impl Patch {
@@ -84,7 +84,7 @@ impl Patch {
         }
     }
     pub fn empty()->Patch {
-        Patch { changes:vec!(), dependencies:vec!() }
+        Patch { changes:vec!(), dependencies:HashSet::new() }
     }
     pub fn from_reader<R>(r:&mut R)->Result<Patch,Error> where R:Read {
         let p=try!(bincode::serde::deserialize_from(r,SizeLimit::Infinite).map_err(Error::PatchDecoding));
@@ -149,13 +149,15 @@ pub fn read_changes(changes_file:&Path)->Result<HashSet<Vec<u8>>,Error> {
     let dec:Vec<Vec<u8>>=try!(decode(ss).map_err(Error::Decoder));*/
     Ok(dec)
 }
-pub fn dependencies(changes:&[Change])->Vec<ExternalHash> {
-    let mut deps=Vec::new();
-    fn push_dep(deps:&mut Vec<ExternalHash>,dep:ExternalHash) {
+pub fn dependencies(changes:&[Change])->HashSet<ExternalHash> {
+    let mut deps=HashSet::new();
+    fn push_dep(deps:&mut HashSet<ExternalHash>,dep:ExternalHash) {
+        // don't include ROOT_KEY as a dependency
+        debug!(target:"dependencies","dep={}",to_hex(&dep));
         if !if dep.len()==HASH_SIZE {unsafe { memcmp(dep.as_ptr() as *const c_void,
                                                      ROOT_KEY.as_ptr() as *const c_void,
                                                      HASH_SIZE as size_t)==0 }} else {false} {
-            deps.push(dep)
+            deps.insert(dep);
         }
     }
     for ch in changes {
