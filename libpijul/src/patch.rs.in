@@ -181,3 +181,4 @@ pub const HASH_SIZE:usize=20; // pub temporaire
 pub const LINE_SIZE:usize=4;
 pub const KEY_SIZE:usize=HASH_SIZE+LINE_SIZE;
 pub const ROOT_KEY:&'static[u8]=&[0;KEY_SIZE];
+pub const EDGE_SIZE:usize=1+KEY_SIZE+HASH_SIZE;
