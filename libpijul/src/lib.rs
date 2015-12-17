@@ -102,6 +102,12 @@ const LINE_HALF_DELETED:c_uchar=4;
 const LINE_VISITED:c_uchar=2;
 const LINE_ONSTACK:c_uchar=1;
 
+impl <'a>Line<'a> {
+    fn is_zombie(&self)->bool {
+        self.flags & LINE_HALF_DELETED != 0
+    }
+}
+
 struct Line<'a> {
     key:&'a[u8],
     flags:u8,
@@ -147,15 +153,17 @@ struct CursIter<'a,'b> {
     op:lmdb::Op,
     edge_flag:u8,
     include_pseudo:bool,
+    include_folder:bool,
     key:&'b[u8],
     marker:PhantomData<&'a()>
 }
 
 impl <'a,'b>CursIter<'a,'b> {
-    fn new(curs:*mut lmdb::MdbCursor,key:&'b [u8],flag:u8,include_pseudo:bool)->CursIter<'a,'b>{
+    fn new(curs:*mut lmdb::MdbCursor,key:&'b [u8],flag:u8,include_folder:bool,include_pseudo:bool)->CursIter<'a,'b>{
         CursIter { cursor:curs,
                    key:key,
                    include_pseudo:include_pseudo,
+                   include_folder:include_folder,
                    edge_flag:flag,
                    op:lmdb::Op::MDB_GET_BOTH_RANGE,
                    marker:PhantomData }
@@ -168,8 +176,10 @@ impl <'a,'b>Iterator for CursIter<'a,'b> {
         match unsafe { lmdb::cursor_get(self.cursor,self.key,Some(&[self.edge_flag][..]),
                                         std::mem::replace(&mut self.op, lmdb::Op::MDB_NEXT_DUP)) } {
             Ok((_,val))=> {
-                if val[0] == self.edge_flag || (self.include_pseudo && val[0] == (self.edge_flag|PSEUDO_EDGE)) {
-                    Some(val)
+                if val[0] >= self.edge_flag && val[0] <= self.edge_flag | (PSEUDO_EDGE|FOLDER_EDGE)
+                    && (self.include_pseudo || val[0]&PSEUDO_EDGE == 0)
+                    && (self.include_folder || val[0]&FOLDER_EDGE == 0) {
+                        Some(val)
                 } else {
                     None
                 }
@@ -218,32 +228,6 @@ fn is_alive(cursor:&mut lmdb::MdbCursor,key:&[u8])->bool {
                      ROOT_KEY.len() as size_t) == 0 })
         || has_edge(cursor,key,PARENT_EDGE,true,true)
 }
-
-
-fn has_nondeleted_children(cursor:&mut lmdb::MdbCursor,key:&[u8])->bool {
-    let mut flag=[0];
-    let alive= {
-        match unsafe {lmdb::cursor_get(cursor,&key,Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE)} {
-            Ok((_,v))=>{
-                debug_assert!(v.len()>=1);
-                v[0]==flag[0]
-            },
-            _=>false
-        }
-    };
-    alive || {
-        flag[0]=FOLDER_EDGE;
-        match unsafe { lmdb::cursor_get(cursor,&key,Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE) } {
-            Ok((_,v))=>{
-                debug_assert!(v.len()>=1);
-                v[0]==flag[0]
-            },
-            _=>false
-        }
-    }
-}
-
-
 
 
 impl <'a> Repository<'a> {
@@ -562,7 +546,7 @@ impl <'a> Repository<'a> {
                             key:key,flags:if is_zombie {LINE_HALF_DELETED} else {0},
                             children:children.len(),n_children:0,index:0,lowlink:0,scc:0
                         };
-                        for child in CursIter::new(curs,key,0,true) {
+                        for child in CursIter::new(curs,key,0,true,true) {
                             children.push((child.as_ptr(),0));
                             /*
                             unsafe {
@@ -584,7 +568,6 @@ impl <'a> Repository<'a> {
                 let child_key = unsafe {
                     std::slice::from_raw_parts(a.offset(1),KEY_SIZE)
                 };
-                let flag = unsafe { *a };
                 children[l_children+i] = (a, retr(cache,curs,lines,children,child_key))
             }
             if n_children==0 {
@@ -684,7 +667,7 @@ impl <'a> Repository<'a> {
     fn output_file<'b,'c:'b,B:LineBuffer<'c>>(&'c self,buf:&'b mut B,g:Graph<'a>,forward:&mut Vec<u8>) {
         let mut g=g;
         let t0=time::precise_time_s();
-        let scc = self.tarjan(&mut g); // in reverse order.
+        let mut scc = self.tarjan(&mut g); // in reverse order.
         let t1=time::precise_time_s();
         info!("tarjan took {}s",t1-t0);
         info!("There are {} SCC",scc.len());
@@ -766,6 +749,7 @@ impl <'a> Repository<'a> {
         let mut i=scc.len()-1;
         let mut nodes=vec!();
         let mut selected_zombies=HashMap::new();
+        let cursor= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         loop {
             // test for conflict
             if scc[i].len() <= 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] && g.lines[scc[i][0]].flags & LINE_HALF_DELETED == 0 {
@@ -778,21 +762,19 @@ impl <'a> Repository<'a> {
             } else {
                 struct A<'b,'a:'b,'c,B:LineBuffer<'a>> where 'a:'c, B:'b {
                     repo:&'a Repository<'a>,
-                    scc:&'c Vec<Vec<usize>>,
+                    scc:&'c mut Vec<Vec<usize>>,
                     first_visit:&'c[usize],
                     last_visit:&'c[usize],
                     selected_zombies:&'c mut HashMap<&'a [u8],bool>,
-                    forced_zombie:bool,
                     g:&'b Graph<'a>,
                     b:&'b mut B,
                     nodes:&'c mut Vec<&'a[u8]>,
-                    i:usize,
                     next:usize,
-                    is_first:bool
+                    is_first:bool,
+                    cursor:*mut lmdb::MdbCursor
                 }
-                fn get_conflict<'b,'a:'b,'c,B:LineBuffer<'a>>(x:&mut A<'b,'a,'c,B>) {
-
-                    if x.scc[x.i].len() <= 1 && x.first_visit[x.i] <= x.first_visit[0] && x.last_visit[x.i] >= x.last_visit[0] {
+                fn get_conflict<'b,'a:'b,'c,B:LineBuffer<'a>>(x:&mut A<'b,'a,'c,B>,i:usize) {
+                    if x.scc[i].len() <= 1 && x.first_visit[i] <= x.first_visit[0] && x.last_visit[i] >= x.last_visit[0] {
                         if ! x.is_first {x.b.output_line(&[],b"================================\n");}
                         else{
                             x.is_first=false
@@ -800,56 +782,65 @@ impl <'a> Repository<'a> {
                         for key in x.nodes.iter() {
                             x.b.output_line(key,x.repo.contents(key))
                         }
-                        x.next=x.i
+                        x.next=i
                     } else {
                         // Pour chaque permutation de la SCC, ajouter tous les sommets sur la pile, et appel recursif de chaque arete non-forward.
-                        /*
-                        for cousin in x.scc[i].iter() {
-                            let not_zombie=
-                                g.lines[*cousin].flags & LINE_HALF_DELETED == 0
-                                || forced_zombie;
-                            if not_zombie { nodes.push(g.lines[*cousin].key) }
-                            let n=g.lines[*cousin].n_children;
-                            for i in 0 .. n {
-                                let (edge_child,n_child) = g.children[g.lines[*cousin].children + i];
-                                if n_child != 0 || edge_child.is_null() {
-                                    // This is not a forward edges (forward edges are of the form (!=NULL,0))
-                                    let child_component=g.lines[n_child].scc;
-                                    let edge_child= if edge_child.is_null() { &ROOT_KEY[0..HASH_SIZE] } else {
-                                        unsafe {
-                                            std::slice::from_raw_parts(edge_child.offset(1+KEY_SIZE as isize), HASH_SIZE)
-                                        }
-                                    };
-                                    let (forced_zombie,newly_forced)=
-                                        match selected_zombies.entry(edge_child) {
-                                            Entry::Occupied(v)=>(*v.get(),false),
-                                            Entry::Vacant(v)=>{
-                                                let child_is_zombie=
-                                                    g.lines[n_child].flags & LINE_HALF_DELETED != 0;
-                                                v.insert(child_is_zombie);
-                                                (child_is_zombie,true)
-                                            }
-                                        };
-                                    get_conflict(repo,scc,first_visit,last_visit,g,
-                                                 selected_zombies,
-                                                 forced_zombie,
-                                                 child_component,
-                                                 b,nodes,is_first,next);
-                                    if forced_zombie && newly_forced {
-                                        // Dans ce cas, aussi essayer avec l'autre.
-                                        selected_zombies.insert(edge_child,false);
-                                        get_conflict(repo,scc,first_visit,last_visit,g,
-                                                     selected_zombies,
-                                                     false,
-                                                     child_component,
-                                                     b,nodes,is_first,next)
-                                    }
-                                    if newly_forced {
-                                        selected_zombies.remove(edge_child);
+                        fn permutations<'b,'a:'b,'c,B:LineBuffer<'a>>(
+                            params:&mut A<'b,'a,'c,B>,
+                            i:usize,
+                            j:usize,
+                            next:&mut HashSet<usize>) {
+                            if j<params.scc[i].len()-1 {
+                                let n=params.g.lines[params.scc[i][j]].n_children;
+                                for c in 0 .. n {
+                                    let (edge_child,n_child) = params.g.children[params.g.lines[params.scc[i][j]].children + c];
+                                    if n_child != 0 || edge_child.is_null() {
+                                        // Not a forward edge (forward edges are (!=NULL, 0)).
+                                        next.insert(n_child);
                                     }
                                 }
+                                for k in j..params.scc[i].len() {
+                                    params.scc[i].swap(j,k);
+                                    let mut newly_forced=Vec::new();
+                                    let key=params.g.lines[params.scc[i][j]].key;
+                                    if params.g.lines[params.scc[i][j]].is_zombie() {
+                                        let mut is_forced=false;
+                                        for parent in CursIter::new(params.cursor,key,PARENT_EDGE,true,true) {
+                                            if *params.selected_zombies.get(&parent[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]).unwrap_or(&false) {
+                                                is_forced=true;
+                                                break
+                                            } else {
+                                                let f=&parent[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)];
+                                                newly_forced.push(f);
+                                                params.selected_zombies.insert(f,false);
+                                            }
+                                        }
+                                        // If this zombie line is not forced in, try without it.
+                                        if !is_forced { permutations(params,i,j+1,next) }
+                                        else {
+                                            for f in &newly_forced {
+                                                params.selected_zombies.insert(f,true);
+                                            }
+                                        }
+                                    }
+                                    params.nodes.push(key);
+                                    permutations(params,i,j+1,next);
+                                    params.nodes.pop();
+                                    if newly_forced.len()>0 {
+                                        // Unmark here.
+                                        for f in &newly_forced {
+                                            params.selected_zombies.remove(f);
+                                        }
+                                    }
+                                }
+                            } else {
+                                for chi in next.iter() {
+                                    get_conflict(params,*chi);
+                                }
                             }
-                        }*/
+                        }
+                        let mut next=HashSet::new();
+                        permutations(x,i,0,&mut next)
                     }
                 }
                 // TODO: custom conflict outputters (part of the "writer" typeclass?)
@@ -858,19 +849,18 @@ impl <'a> Repository<'a> {
                 let next={
                     let mut conflict= A {
                         repo:self,
-                        scc:&scc,
+                        scc:&mut scc,
                         first_visit:&first_visit,
                         last_visit:&last_visit,
                         g:&g,
                         b:buf,
                         next:0,
-                        i:i,
                         nodes:&mut nodes,
                         is_first:true,
                         selected_zombies:&mut selected_zombies,
-                        forced_zombie:false
+                        cursor:cursor
                     };
-                    get_conflict(&mut conflict);
+                    get_conflict(&mut conflict,i);
                     conflict.next
                 };
                 buf.output_line(&[],b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n");
@@ -997,7 +987,7 @@ impl <'a> Repository<'a> {
     fn delete_edges(&self, cursor:&mut lmdb::MdbCursor,edges:&mut Vec<Edge>, key:&'a[u8],flag:u8){
         if key.len() > 0 {
             let ext_key=self.external_key(key);
-            for v in CursIter::new(cursor,key,flag,false) {
+            for v in CursIter::new(cursor,key,flag,true,false) {
                 edges.push(Edge { from:ext_key.clone(),
                                   to:self.external_key(&v[1..(1+KEY_SIZE)]),
                                   introduced_by:self.external_key(&v[(1+KEY_SIZE)..]) });
@@ -1241,8 +1231,8 @@ impl <'a> Repository<'a> {
                             let mut curs_grandparents=unsafe {
                                 &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()
                             };
-                            for parent in CursIter::new(curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true) {
-                                for grandparent in CursIter::new(curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true) {
+                            for parent in CursIter::new(curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true,false) {
+                                for grandparent in CursIter::new(curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true,false) {
                                     edges.push(Edge {
                                         from:self.external_key(&parent),
                                         to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
@@ -1288,13 +1278,13 @@ impl <'a> Repository<'a> {
                             let mut curs_grandparents=unsafe {
                                 &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()
                             };
-                            for parent in CursIter::new(curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true) {
+                            for parent in CursIter::new(curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true,false) {
                                 edges.push(Edge {
                                     from:self.external_key(&current_node[3..]),
                                     to:self.external_key(&parent[1..(1+KEY_SIZE)]),
                                     introduced_by:self.external_key(&parent[1+KEY_SIZE..])
                                 });
-                                for grandparent in CursIter::new(curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true) {
+                                for grandparent in CursIter::new(curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true,false) {
                                     edges.push(Edge {
                                         from:self.external_key(&parent),
                                         to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
@@ -1808,7 +1798,7 @@ impl <'a> Repository<'a> {
                             parents.extend(&zero);
                             parents_count+=1;
                         }
-                        for parent in CursIter::new(cursor,pv,PARENT_EDGE,true) {
+                        for parent in CursIter::new(cursor,pv,PARENT_EDGE,false,true) {
                             if is_alive(cursor_,&parent[1..(1+KEY_SIZE)]) {
                                 alive_parents.insert(&parent[1..(1+KEY_SIZE)]);
                                 parents_count+=1;
@@ -1817,7 +1807,7 @@ impl <'a> Repository<'a> {
                         max_parents_single=std::cmp::max(max_parents_single,parents_count);
                         let mut children_count=0;
                         // pv is being deleted. Look at its alive children.
-                        for child in CursIter::new(cursor,pv,0,true) {
+                        for child in CursIter::new(cursor,pv,0,false,true) {
                             if is_alive(cursor_,&child[1..(1+KEY_SIZE)]) {
                                 debug!(target:"libpijul_deleting","child alive: {}", to_hex(&child[1..(1+KEY_SIZE)]));
                                 alive_children.insert(&child[1..(1+KEY_SIZE)]);
@@ -1864,7 +1854,7 @@ impl <'a> Repository<'a> {
                     max_parents=std::cmp::max(max_parents,parents.len()/(1+KEY_SIZE+HASH_SIZE));
                     max_children=std::cmp::max(max_children,children.len()/(1+KEY_SIZE+HASH_SIZE));
                 },
-                Change::Edges{ref edges,ref flag}=>{
+                Change::Edges{..}=>{
                     unimplemented!()
                 },
                 Change::NewNodes { ref up_context,ref down_context,ref line_num, ref flag, ref nodes } => {
@@ -1882,7 +1872,7 @@ impl <'a> Repository<'a> {
                                             pv.as_mut_ptr().offset(1),
                                             HASH_SIZE);
                     };
-                    lnum0= (*line_num);
+                    lnum0= *line_num;
                     unsafe { copy_nonoverlapping(internal.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE); }
                     for i in 0..LINE_SIZE { pu[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
 
@@ -1906,15 +1896,15 @@ impl <'a> Repository<'a> {
                             let mut i=0;
                             while i<relatives.len() {
                                 relatives[i+EDGE_SIZE] = (*flag | PSEUDO_EDGE)^PARENT_EDGE;
-                                relatives[i]= (*flag | PSEUDO_EDGE);
+                                relatives[i]= *flag | PSEUDO_EDGE;
                                 self.mdb_txn.put(self.dbi_nodes,
                                                  &relatives[(i+1)..(i+1+KEY_SIZE)],
                                                  &relatives[(i+EDGE_SIZE)..(i+2*EDGE_SIZE)],
-                                                 0);
+                                                 0).unwrap();
                                 self.mdb_txn.put(self.dbi_nodes,
                                                  &relatives[(i+EDGE_SIZE+1)..(i+EDGE_SIZE+1+KEY_SIZE)],
                                                  &relatives[i..(i+EDGE_SIZE)],
-                                                 0);
+                                                 0).unwrap();
                                 i+=2*EDGE_SIZE
                             }
                         }
@@ -1943,15 +1933,15 @@ impl <'a> Repository<'a> {
                             let mut i=0;
                             while i<relatives.len() {
                                 relatives[i+EDGE_SIZE] = (*flag | PSEUDO_EDGE)^PARENT_EDGE;
-                                relatives[i]= (*flag | PSEUDO_EDGE);
+                                relatives[i]= *flag | PSEUDO_EDGE;
                                 self.mdb_txn.put(self.dbi_nodes,
                                                  &relatives[(i+1)..(i+1+KEY_SIZE)],
                                                  &relatives[(i+EDGE_SIZE)..(i+2*EDGE_SIZE)],
-                                                 0);
+                                                 0).unwrap();
                                 self.mdb_txn.put(self.dbi_nodes,
                                                  &relatives[(i+EDGE_SIZE+1)..(i+EDGE_SIZE+1+KEY_SIZE)],
                                                  &relatives[i..(i+EDGE_SIZE)],
-                                                 0);
+                                                 0).unwrap();
                                 i+=2*EDGE_SIZE
                             }
                         }
@@ -1991,8 +1981,7 @@ impl <'a> Repository<'a> {
             if unsafe { memcmp(ROOT_KEY.as_ptr()as *const c_void,a.as_ptr() as *const c_void,KEY_SIZE as size_t)!=0} {
 
                 let mut i=result.len();
-                let i0=result.len();
-                for neighbor in CursIter::new(cursor,a,direction,false) {
+                for neighbor in CursIter::new(cursor,a,direction,false,false) {
                     let ext=repo.external_hash(&neighbor[(1+KEY_SIZE)..]);
                     if new_patches.contains(ext) {
                         result.push(direction|PSEUDO_EDGE);
@@ -2118,7 +2107,7 @@ impl <'a> Repository<'a> {
             if !cache.contains(key) {
                 cache.insert(key);
                 let mut curs_b= unsafe { &mut *repo.mdb_txn.unsafe_cursor(repo.dbi_nodes).unwrap()};
-                for b in CursIter::new(curs_b,key,FOLDER_EDGE,true) {
+                for b in CursIter::new(curs_b,key,FOLDER_EDGE,true,true) {
                     let cont_b=
                         match try!(repo.mdb_txn.get(repo.dbi_contents,&b[1..(1+KEY_SIZE)])) {
                             Some(cont_b)=>cont_b,
@@ -2128,7 +2117,7 @@ impl <'a> Repository<'a> {
                         let filename=&cont_b[2..];
                         let perms= (((cont_b[0] as usize) << 8) | (cont_b[1] as usize)) & 0x1ff;
                         let mut curs_c= unsafe { &mut *repo.mdb_txn.unsafe_cursor(repo.dbi_nodes).unwrap()};
-                        for c in CursIter::new(curs_c,&b[1..(1+KEY_SIZE)],FOLDER_EDGE,true) {
+                        for c in CursIter::new(curs_c,&b[1..(1+KEY_SIZE)],FOLDER_EDGE,true,true) {
                             let cv=&c[1..(1+KEY_SIZE)];
                             match try!(repo.mdb_txn.get(repo.dbi_revinodes,cv)) {
                                 Some(inode)=>{
