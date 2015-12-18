@@ -1458,7 +1458,7 @@ impl <'a> Repository<'a> {
     }
 
 
-    fn has_exclusive_edge(&self,cursor:&mut lmdb::MdbCursor,key:&[u8],flag0:u8,include_folder:bool,include_pseudo:bool,dependencies:&HashSet<&[u8]>)->bool {
+    fn has_exclusive_edge(&self,cursor:&mut lmdb::MdbCursor,key:&[u8],flag0:u8,include_folder:bool,include_pseudo:bool,dependencies:&HashSet<Vec<u8>>)->bool {
         for neighbor in CursIter::new(cursor,key,flag0,include_folder,include_pseudo) {
             let ext=self.external_hash(&neighbor[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]);
             debug!(target:"exclusive", "{:?}, neighbor={},\next={}",flag0,to_hex(&neighbor[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]),to_hex(ext));
@@ -1474,7 +1474,7 @@ impl <'a> Repository<'a> {
     }
 
 
-    fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:&[u8],dependencies:&HashSet<&[u8]>){
+    fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:&[u8],dependencies:&HashSet<Vec<u8>>){
         let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let mut time_newnodes=0f64;
@@ -1740,6 +1740,9 @@ impl <'a> Repository<'a> {
                                 copy_nonoverlapping((v.as_ptr().offset(1)) as *const c_void,
                                                     b.as_mut_ptr() as *mut c_void,
                                                     KEY_SIZE);
+                                copy_nonoverlapping((v.as_ptr().offset(1+KEY_SIZE as isize)) as *const c_void,
+                                                    a.as_mut_ptr().offset(1+KEY_SIZE as isize) as *mut c_void,
+                                                    HASH_SIZE);
                             }
                             a[0]= v[0] ^ PARENT_EDGE;
                             unsafe { lmdb::mdb_cursor_del(cursor,0) };
@@ -1767,7 +1770,7 @@ impl <'a> Repository<'a> {
         }
         self.mdb_txn.put(self.dbi_branches,&current,&internal,lmdb::MDB_NODUPDATA).unwrap();
         let time0=time::precise_time_s();
-        self.unsafe_apply(&patch.changes,internal,new_patches);
+        self.unsafe_apply(&patch.changes,internal,&patch.dependencies);
         let time1=time::precise_time_s();
         info!(target:"libpijul_apply","unsafe_apply took: {}", time1-time0);
         //let mut children=Vec::new();
