@@ -23,6 +23,7 @@ use std::fmt;
 use std::path::{PathBuf};
 //extern crate serde_cbor;
 extern crate bincode;
+use fs_representation::{to_hex};
 
 #[derive(Debug)]
 pub enum Error{
@@ -33,7 +34,8 @@ pub enum Error{
     //PatchDecoding(serde_cbor::error::Error),
     //PatchEncoding(serde_cbor::error::Error)
     PatchDecoding(bincode::serde::DeserializeError),
-    PatchEncoding(bincode::serde::SerializeError)
+    PatchEncoding(bincode::serde::SerializeError),
+    InternalHashNotFound(Vec<u8>)
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -43,7 +45,8 @@ impl fmt::Display for Error {
             Error::AlreadyAdded => write!(f, "File already here"),
             Error::PatchEncoding(ref err) => write!(f, "Patch encoding error {}",err),
             Error::PatchDecoding(ref err) => write!(f, "Patch decoding error {}",err),
-            Error::FileNotInRepo(ref path) => write!(f, "File {} not tracked", path.display())
+            Error::FileNotInRepo(ref path) => write!(f, "File {} not tracked", path.display()),
+            Error::InternalHashNotFound(ref hash) => write!(f, "Internal hash {} not found", to_hex(hash))
         }
     }
 }
@@ -56,7 +59,8 @@ impl std::error::Error for Error {
             Error::AlreadyAdded => "File already here",
             Error::PatchEncoding(ref err) => err.description(),
             Error::PatchDecoding(ref err) => err.description(),
-            Error::FileNotInRepo(_) => "Operation on untracked file"
+            Error::FileNotInRepo(_) => "Operation on untracked file",
+            Error::InternalHashNotFound(_) => "Internal hash not found"
         }
     }
 
@@ -67,7 +71,8 @@ impl std::error::Error for Error {
             Error::AlreadyAdded => None,
             Error::PatchEncoding(ref err) => Some(err),
             Error::PatchDecoding(ref err) => Some(err),
-            Error::FileNotInRepo(_) => None
+            Error::FileNotInRepo(_) => None,
+            Error::InternalHashNotFound(_) => None
         }
     }
 }

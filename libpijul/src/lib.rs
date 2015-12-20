@@ -930,48 +930,46 @@ impl <'a> Repository<'a> {
     }
 
 
-    fn internal_hash(&'a self,key:&[u8])->Option<&'a [u8]> {
+    fn internal_hash(&'a self,key:&[u8])->Result<&'a [u8],Error> {
         debug!("internal_hash: {}, {}",to_hex(key), key.len());
         if key.len()==HASH_SIZE
             && unsafe { memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t) }==0 {
-                Some(ROOT_KEY)
+                Ok(ROOT_KEY)
             } else {
-                self.mdb_txn.get(self.dbi_internal,key).unwrap()
+                match try!(self.mdb_txn.get(self.dbi_internal,key)) {
+                    Some(k)=>Ok(k),
+                    None=>Err(Error::InternalHashNotFound(key.to_vec()))
+                }
             }
     }
-    fn internal_key(&'a self,key:&[u8],result:&mut [u8])->Option<()> {
+    fn internal_key(&'a self,key:&[u8],internal_patch_id:&[u8],result:&mut [u8])->Result<(),Error> {
         debug_assert!(result.len()>=KEY_SIZE);
-        match self.internal_hash(&key[0..(key.len()-LINE_SIZE)]) {
-            Some(inter)=>{
-                unsafe {
-                    copy_nonoverlapping(inter.as_ptr(),result.as_mut_ptr(),HASH_SIZE);
-                    copy_nonoverlapping(key.as_ptr().offset((key.len()-LINE_SIZE) as isize),
-                                        result.as_mut_ptr().offset(HASH_SIZE as isize),
-                                        LINE_SIZE)
-                }
-                Some(())
-            },
-            None=>None
+        let inter=
+            if key.len() == LINE_SIZE { internal_patch_id } else {
+                try!(self.internal_hash(&key[0..(key.len()-LINE_SIZE)]))
+            };
+        unsafe {
+            copy_nonoverlapping(internal_patch_id.as_ptr(),result.as_mut_ptr(),HASH_SIZE);
+            copy_nonoverlapping(key.as_ptr().offset((key.len()-LINE_SIZE) as isize),
+                                result.as_mut_ptr().offset(HASH_SIZE as isize),
+                                LINE_SIZE)
         }
+        Ok(())
     }
     /// "intro" is the internal patch number of the patch that introduced this edge.
-    fn internal_edge(&'a self,flag:u8,to:&[u8],intro:&[u8],result:&mut [u8])->Option<()> {
+    fn internal_edge(&'a self,flag:u8,to:&[u8],intro:&[u8],result:&mut [u8])->Result<(),Error> {
         debug_assert!(result.len()>=1+KEY_SIZE+HASH_SIZE);
         debug_assert!(intro.len() == HASH_SIZE);
         result[0]=flag;
-        match self.internal_hash(&to[0..(to.len()-LINE_SIZE)]) {
-            Some(int_to)=>{
-                unsafe {
-                    copy_nonoverlapping(int_to.as_ptr(),result.as_mut_ptr().offset(1),HASH_SIZE);
-                    copy_nonoverlapping(to.as_ptr().offset((to.len()-LINE_SIZE) as isize),
-                                        result.as_mut_ptr().offset((1+HASH_SIZE) as isize),
-                                        LINE_SIZE);
-                    copy_nonoverlapping(intro.as_ptr(),result.as_mut_ptr().offset(1+KEY_SIZE as isize),HASH_SIZE);
-                }
-                Some(())
-            },
-            _=>None
+        let int_to=try!(self.internal_hash(&to[0..(to.len()-LINE_SIZE)]));
+        unsafe {
+            copy_nonoverlapping(int_to.as_ptr(),result.as_mut_ptr().offset(1),HASH_SIZE);
+            copy_nonoverlapping(to.as_ptr().offset((to.len()-LINE_SIZE) as isize),
+                                result.as_mut_ptr().offset((1+HASH_SIZE) as isize),
+                                LINE_SIZE);
+            copy_nonoverlapping(intro.as_ptr(),result.as_mut_ptr().offset(1+KEY_SIZE as isize),HASH_SIZE);
         }
+        Ok(())
     }
     /// Create a new internal patch id, register it in the "external" and
     /// "internal" bases, and write the result in its second argument
@@ -1474,7 +1472,7 @@ impl <'a> Repository<'a> {
     }
 
 
-    fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:&[u8],dependencies:&HashSet<Vec<u8>>){
+    fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:&[u8],dependencies:&HashSet<Vec<u8>>)->Result<(),Error>{
         let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let mut time_newnodes=0f64;
@@ -1486,31 +1484,35 @@ impl <'a> Repository<'a> {
                 Change::Edges{ref flag, ref edges} => {
                     let time0=time::precise_time_s();
                     // If this hunk deletes nodes that are not known to the author of the current patch, add pseudo-edges (zombie lines) to each edge of this hunk.
-                    debug!(target:"exclusive","add_zombies...");
+
+                    // 1. Ajouter les aretes, supprimer leurs "versions supprimees". (DONE)
+                    //
+                    // 2. Collecter les parents et les enfants encore en vie.
+                    // 3. Supprimer les pseudo-aretes obsoletes.
+                    //
+                    // 4. Reconnecter les parents et enfants.
+                    //
+                    // 5. Ajouter les zombies
                     let mut add_zombies=false;
                     let mut internal=[0;KEY_SIZE];
                     for e in edges {
-                        self.internal_key(&e.from,&mut internal);
+                        self.internal_key(&e.from,internal_patch_id,&mut internal);
                         debug!(target:"exclusive","internal={}",to_hex(&internal));
-                        if self.has_exclusive_edge(cursor,&internal[..],PARENT_EDGE,true,true,dependencies) {
-                            add_zombies=true;
-                            break
-                        } else {
-                            self.internal_key(&e.to,&mut internal);
-                            debug!(target:"exclusive","internal={}",to_hex(&internal));
-                            if self.has_exclusive_edge(cursor,&internal[..],0,true,true,dependencies) {
-                                add_zombies=true;
-                                break
-                            }
-                        }
                     }
                     debug!(target:"exclusive","add_zombies:{}",add_zombies);
                     for e in edges {
                         // First remove the deleted version of the edge
                         {
-                            let p=self.internal_hash(&e.introduced_by).unwrap();
+                            let p= try!(self.internal_hash(&e.introduced_by));
                             self.internal_edge(*flag^DELETED_EDGE^PARENT_EDGE,&e.from,p,&mut pu);
                             self.internal_edge(*flag^DELETED_EDGE,&e.to,p,&mut pv);
+                            // Will we need zombies?
+                            if self.has_exclusive_edge(cursor,&e.to,PARENT_EDGE,true,true,dependencies)
+                                || self.has_exclusive_edge(cursor,&e.from,0,true,true,dependencies) {
+                                    debug!(target:"exclusive","add_zombies:\n{}\n{}",
+                                           to_hex(&e.to),to_hex(&e.from));
+                                    add_zombies=true;
+                                }
                         }
                         self.mdb_txn.del(self.dbi_nodes,&pu[1..(1+KEY_SIZE)], Some(&pv)).unwrap();
                         self.mdb_txn.del(self.dbi_nodes,&pv[1..(1+KEY_SIZE)], Some(&pu)).unwrap();
@@ -1524,16 +1526,15 @@ impl <'a> Repository<'a> {
                         }
                         self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
                         self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
-                        if add_zombies {
+
+                        // Is "pv" still alive? If not, delete pseudo-neighbors and add them to deleted neighbors.
+                        /*if add_zombies {
                             pu[0] ^= PSEUDO_EDGE | DELETED_EDGE;
                             pv[0] ^= PSEUDO_EDGE | DELETED_EDGE;
                             self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
                             self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
-                        }
-
+                        }*/
                     }
-                    let time2=time::precise_time_s();
-                    time_edges += time2-time0;
                     debug!(target:"libpijul","unsafe_apply:edges.done");
                 },
                 Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
@@ -1560,7 +1561,7 @@ impl <'a> Repository<'a> {
                             debug!("newnodes: up_context {:?}",to_hex(&c));
 
                             let u= if c.len()>LINE_SIZE {
-                                self.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
+                                try!(self.internal_hash(&c[0..(c.len()-LINE_SIZE)]))
                             } else {
                                 internal_patch_id
                             };
@@ -1605,7 +1606,7 @@ impl <'a> Repository<'a> {
                         {
                             unsafe {
                                 let u=if c.len()>LINE_SIZE {
-                                    self.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
+                                    try!(self.internal_hash(&c[0..(c.len()-LINE_SIZE)]))
                                 } else {
                                     internal_patch_id
                                 };
@@ -1668,6 +1669,7 @@ impl <'a> Repository<'a> {
             lmdb::mdb_cursor_close(cursor)
         };
         info!(target:"libpijul","edges: {} newnodes: {}", time_edges,time_newnodes);
+        Ok(())
     }
 
     pub fn has_patch(&self, branch:&[u8], hash:&[u8])->Result<bool,Error>{
@@ -1677,14 +1679,15 @@ impl <'a> Repository<'a> {
             Ok(true)
         } else {
             match self.internal_hash(hash) {
-                Some(internal)=>{
+                Ok(internal)=>{
                     let curs=try!(self.mdb_txn.cursor(self.dbi_branches).map_err(Error::IoError));
                     match curs.get(branch,Some(internal),lmdb::Op::MDB_GET_BOTH) {
                         Ok(_)=>Ok(true),
                         Err(_)=>Ok(false)
                     }
                 },
-                None=>Ok(false),
+                Err(Error::InternalHashNotFound(_))=>Ok(false),
+                Err(e)=>Err(e)
             }
         }
     }
@@ -1715,7 +1718,7 @@ impl <'a> Repository<'a> {
             }
         }
     }
-    fn add_pseudo_edge(&mut self,pu:&[u8],pv:&mut [u8]){
+    fn add_edge(&mut self,pu:&[u8],pv:&mut [u8]){
         self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
         self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
     }
@@ -1786,91 +1789,54 @@ impl <'a> Repository<'a> {
         for ch in patch.changes.iter() {
             match *ch {
                 Change::Edges{ref edges,ref flag} if flag & DELETED_EDGE!=0=>{
-                    /*if (*flag)&FOLDER_EDGE!=0 {
-                    self.connect_down_folders(pu,pv,&internal)
-                } else {*/
-                    let mut u:[u8;KEY_SIZE]=[0;KEY_SIZE];
-                    let mut v:[u8;KEY_SIZE]=[0;KEY_SIZE];
-                    let mut alive_children=HashSet::new();
-                    let mut alive_parents=HashSet::new();
-                    let mut parents:Vec<u8>=Vec::with_capacity(edges.len()*2);
+                    // Delete obsolete pseudo-edges
+                    let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+                    let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+                    let mut parents:Vec<u8>=Vec::new();
+                    let mut children:Vec<u8>=Vec::new();
                     for e in edges {
-                        //info!(target:"libpijul_apply","edge={:?}", e);
-                        unsafe {
-                            let hu=self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]).unwrap();
-                            let hv=self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]).unwrap();
-                            copy_nonoverlapping(hu.as_ptr(),u.as_mut_ptr(),HASH_SIZE);
-                            copy_nonoverlapping(hv.as_ptr(),v.as_mut_ptr(),HASH_SIZE);
-                            copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize),
-                                                u.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
-                            copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize),
-                                                v.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
+                        {
+                            let p= try!(self.internal_hash(&e.introduced_by));
+                            self.internal_edge(*flag^PARENT_EDGE,&e.from,p,&mut pu);
+                            self.internal_edge(*flag,&e.to,p,&mut pv);
                         }
-                        let (pu,pv)= if (*flag)&PARENT_EDGE!=0 { (&v,&u) } else { (&u,&v) };
-                        debug!(target:"libpijul_deleting","{} {}", to_hex(pu),to_hex(pv));
-                        let mut parents_count=0;
-                        if is_alive(cursor_,pu) {
-                            //alive_parents.insert(pu);
-                            parents.push(PSEUDO_EDGE|PARENT_EDGE);
-                            parents.extend(pu);
-                            parents.extend(&zero);
-                            parents_count+=1;
+                        let (pu,pv)= if *flag&PARENT_EDGE==0 { (&pu,&pv) } else { (&pv,&pu) };
+                        if has_edge(cursor,&pu[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
+                            let i=parents.len();
+                            parents.extend(&pu[..]);
+                            parents[i]^=PSEUDO_EDGE
                         }
-                        for parent in CursIter::new(cursor,pv,PARENT_EDGE,false,true) {
-                            if is_alive(cursor_,&parent[1..(1+KEY_SIZE)]) {
-                                alive_parents.insert(&parent[1..(1+KEY_SIZE)]);
-                                parents_count+=1;
+                        for neighbor in CursIter::new(cursor,&pv[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
+                            debug!(target:"apply","has_edge {}",to_hex(neighbor));
+                            if has_edge(cursor,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
+                                let i=parents.len();
+                                parents.extend(neighbor);
+                                parents[i]^=PSEUDO_EDGE;
                             }
                         }
-                        max_parents_single=std::cmp::max(max_parents_single,parents_count);
-                        let mut children_count=0;
-                        // pv is being deleted. Look at its alive children.
-                        for child in CursIter::new(cursor,pv,0,false,true) {
-                            if is_alive(cursor_,&child[1..(1+KEY_SIZE)]) {
-                                debug!(target:"libpijul_deleting","child alive: {}", to_hex(&child[1..(1+KEY_SIZE)]));
-                                alive_children.insert(&child[1..(1+KEY_SIZE)]);
-                                children_count+=1
+                        for neighbor in CursIter::new(cursor,&pv[1..(1+KEY_SIZE)],0,true,true) {
+                            debug!(target:"apply","has_edge' {}",to_hex(neighbor));
+                            if has_edge(cursor,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
+                                let i=children.len();
+                                children.extend(neighbor);
+                                children[i]^=PSEUDO_EDGE;
                             }
                         }
-                        max_children_single=std::cmp::max(max_children_single,children_count);
-                    }
-                    let mut children:Vec<u8>=Vec::with_capacity(KEY_SIZE*alive_children.len());
-                    for child in alive_children {
-                        children.push(PSEUDO_EDGE);
-                        children.extend(child);
-                        children.extend(&zero);
-                    }
-                    for parent in alive_parents {
-                        parents.push(PSEUDO_EDGE|PARENT_EDGE);
-                        parents.extend(parent);
-                        parents.extend(&zero);
                     }
                     let mut i=0;
                     while i<children.len() {
                         let mut j=0;
                         while j<parents.len() {
-                            if !self.connected(cursor,
-                                               &parents[j+1 .. j+1+KEY_SIZE],
-                                               &mut children[i .. i+1+KEY_SIZE+HASH_SIZE]) {
-                                self.add_pseudo_edge(&parents[j..(j+1+KEY_SIZE+HASH_SIZE)],
-                                                     &mut children[i..(i+1+KEY_SIZE+HASH_SIZE)]);
+                            if ! self.connected(cursor,
+                                                &parents[j+1 .. j+1+KEY_SIZE],
+                                                &mut children[i .. i+1+KEY_SIZE+HASH_SIZE]) {
+                                self.add_edge(&parents[j..(j+1+KEY_SIZE+HASH_SIZE)],
+                                              &mut children[i..(i+1+KEY_SIZE+HASH_SIZE)]);
                             }
                             j+=1+KEY_SIZE+HASH_SIZE;
                         }
                         i+=1+KEY_SIZE+HASH_SIZE;
                     }
-                    for e in edges {
-                        let to= if (*flag)&PARENT_EDGE!=0 { &e.from } else { &e.to };
-                        unsafe {
-                            let hv=self.internal_hash(&to[0..(e.to.len()-LINE_SIZE)]).unwrap();
-                            copy_nonoverlapping(hv.as_ptr(),v.as_mut_ptr(),HASH_SIZE);
-                            copy_nonoverlapping(to.as_ptr().offset((to.len()-LINE_SIZE) as isize),
-                                                v.as_mut_ptr().offset(HASH_SIZE as isize),LINE_SIZE);
-                        }
-                        self.kill_obsolete_pseudo_edges(cursor,&v);
-                    }
-                    max_parents=std::cmp::max(max_parents,parents.len()/(1+KEY_SIZE+HASH_SIZE));
-                    max_children=std::cmp::max(max_children,children.len()/(1+KEY_SIZE+HASH_SIZE));
                 },
                 Change::Edges{..}=>{
                     unimplemented!()
@@ -1882,7 +1848,7 @@ impl <'a> Repository<'a> {
                     let mut context:[u8;KEY_SIZE]=[0;KEY_SIZE];
                     let mut lnum0= *line_num;
                     for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
-                    let _= unsafe {
+                    unsafe {
                         copy_nonoverlapping(internal.as_ptr(),
                                             pu.as_mut_ptr().offset(1),
                                             HASH_SIZE);
@@ -1975,7 +1941,7 @@ impl <'a> Repository<'a> {
         let time2=time::precise_time_s();
         info!(target:"libpijul_apply","apply took: {}, max_parents:{} (single {}), max_children:{} (single {})", time2-time1,max_parents,max_parents_single,max_children,max_children_single);
         for ref dep in patch.dependencies.iter() {
-            let dep_internal=self.internal_hash(&dep).unwrap().to_vec();
+            let dep_internal=try!(self.internal_hash(&dep)).to_vec();
             self.mdb_txn.put(self.dbi_revdep,&dep_internal,internal,0).unwrap();
         }
         let time3=time::precise_time_s();
