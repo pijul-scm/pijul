@@ -1,7 +1,7 @@
 #!/bin/bash
 
 cd /tmp
-rm -Rf a b c
+rm -Rf a b
 mkdir a
 cd /tmp/a
 pijul init
@@ -12,30 +12,35 @@ B
 C
 D
 E
-F
-G
 EOF
 
 pijul add a
 pijul record
 
+cd /tmp
+pijul get a b
 
-cat << EOF > /tmp/a/a
+cd b
+cat << EOF > /tmp/b/a
 A
 B
 C
+X
+D
 E
-F
-G
 EOF
 pijul record
 
-
+cd /tmp/a
 cat << EOF > /tmp/a/a
 A
-B
-G
+E
 EOF
 pijul record
+pijul pull ../b
 
-dot -Tpdf -o /tmp/a/test.pdf debug
+cd /tmp/b
+pijul pull ../a
+
+dot -Tpdf -o /tmp/a/test.pdf /tmp/a/debug
+dot -Tpdf -o /tmp/b/test.pdf /tmp/b/debug

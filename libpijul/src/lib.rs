@@ -120,7 +120,7 @@ struct Line<'a> {
 
 struct Graph<'a> {
     lines:Vec<Line<'a>>,
-    children:Vec<(*const u8,usize)>
+    children:Vec<(*const u8,usize)> // raw pointer because we might need the edge address. We need the first element anyway, replace "*const u8" by "u8" if not needed.
 }
 
 
@@ -721,11 +721,11 @@ impl <'a> Repository<'a> {
             for cousin in scc[n_scc].iter() {
                 let n=g.lines[*cousin].n_children;
                 for i in 0 .. n {
-                    let (_,n_child) = g.children[g.lines[*cousin].children + i];
+                    let (flag_child,n_child) = g.children[g.lines[*cousin].children + i];
                     let child_component=g.lines[n_child].scc;
                     let is_forward=forward_scc.contains(&child_component);
                     if is_forward {
-                        if n_child & 1 != 0 {
+                        if unsafe {*flag_child} & 1 != 0 {
                             forward.push(PSEUDO_EDGE|PARENT_EDGE);
                             forward.extend(g.lines[*cousin].key);
                             forward.extend(zero);
@@ -872,6 +872,7 @@ impl <'a> Repository<'a> {
         let mut i=0;
         let cursor=unsafe { self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         while i<forward.len() {
+            debug!(target:"remove_redundant_edges","i={},forward.len={}",i,forward.len());
             unsafe {
                 let (_,v)=lmdb::cursor_get(cursor,
                                            &forward[(i+1)..(i+1+KEY_SIZE)],
@@ -1450,8 +1451,9 @@ impl <'a> Repository<'a> {
         self.record_all(&mut actions, &mut line_num,&mut redundant,&mut updatables,
             None,None,ROOT_INODE,&mut realpath,
             &[]);
-        //println!("record done");
+        debug!("record done");
         self.remove_redundant_edges(&mut redundant);
+        debug!("remove_redundant_edges done");
         Ok((actions,updatables))
     }
 
