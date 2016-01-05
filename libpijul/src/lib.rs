@@ -222,14 +222,6 @@ fn has_edge(cursor:&mut lmdb::MdbCursor,key:&[u8],flag0:u8,include_folder:bool,i
 
 
 
-fn is_alive(cursor:&mut lmdb::MdbCursor,key:&[u8])->bool {
-    (unsafe { memcmp(key.as_ptr() as *const c_void,
-                     ROOT_KEY.as_ptr() as *const c_void,
-                     ROOT_KEY.len() as size_t) == 0 })
-        || has_edge(cursor,key,PARENT_EDGE,true,true)
-}
-
-
 impl <'a> Repository<'a> {
     pub fn new(path:&std::path::Path)->Result<Repository<'a>,Error>{
         let env=try!(lmdb::Env_::new());
@@ -943,6 +935,7 @@ impl <'a> Repository<'a> {
                 }
             }
     }
+    /*
     fn internal_key(&'a self,key:&[u8],internal_patch_id:&[u8],result:&mut [u8])->Result<(),Error> {
         debug_assert!(result.len()>=KEY_SIZE);
         let inter=
@@ -950,13 +943,14 @@ impl <'a> Repository<'a> {
                 try!(self.internal_hash(&key[0..(key.len()-LINE_SIZE)]))
             };
         unsafe {
-            copy_nonoverlapping(internal_patch_id.as_ptr(),result.as_mut_ptr(),HASH_SIZE);
+            copy_nonoverlapping(inter.as_ptr(),result.as_mut_ptr(),HASH_SIZE);
             copy_nonoverlapping(key.as_ptr().offset((key.len()-LINE_SIZE) as isize),
                                 result.as_mut_ptr().offset(HASH_SIZE as isize),
                                 LINE_SIZE)
         }
         Ok(())
     }
+     */
     /// "intro" is the internal patch number of the patch that introduced this edge.
     fn internal_edge(&'a self,flag:u8,to:&[u8],intro:&[u8],result:&mut [u8])->Result<(),Error> {
         debug_assert!(result.len()>=1+KEY_SIZE+HASH_SIZE);
@@ -1459,7 +1453,8 @@ impl <'a> Repository<'a> {
 
 
     fn has_exclusive_edge(&self,cursor:&mut lmdb::MdbCursor,key:&[u8],flag0:u8,include_folder:bool,include_pseudo:bool,dependencies:&HashSet<Vec<u8>>)->bool {
-        for neighbor in CursIter::new(cursor,key,flag0,include_folder,include_pseudo) {
+        for neighbor in CursIter::new(cursor,&key[1..(1+KEY_SIZE)],flag0,include_folder,include_pseudo) {
+            debug!(target:"exclusive","exclusive_edge: {}",to_hex(&neighbor));
             let ext=self.external_hash(&neighbor[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]);
             debug!(target:"exclusive", "{:?}, neighbor={},\next={}",flag0,to_hex(&neighbor[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]),to_hex(ext));
             if !dependencies.contains(ext) {
@@ -1477,72 +1472,54 @@ impl <'a> Repository<'a> {
     fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:&[u8],dependencies:&HashSet<Vec<u8>>)->Result<(),Error>{
         let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-        let mut time_newnodes=0f64;
-        let mut time_edges=0f64;
         let alive= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let cursor= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         for ch in changes {
             match *ch {
                 Change::Edges{ref flag, ref edges} => {
-                    let time0=time::precise_time_s();
                     // If this hunk deletes nodes that are not known to the author of the current patch, add pseudo-edges (zombie lines) to each edge of this hunk.
-
-                    // 1. Ajouter les aretes, supprimer leurs "versions supprimees". (DONE)
-                    //
-                    // 2. Collecter les parents et les enfants encore en vie.
-                    // 3. Supprimer les pseudo-aretes obsoletes.
-                    //
-                    // 4. Reconnecter les parents et enfants.
-                    //
-                    // 5. Ajouter les zombies
                     let mut add_zombies=false;
-                    let mut internal=[0;KEY_SIZE];
-                    for e in edges {
-                        self.internal_key(&e.from,internal_patch_id,&mut internal);
-                        debug!(target:"exclusive","internal={}",to_hex(&internal));
-                    }
-                    debug!(target:"exclusive","add_zombies:{}",add_zombies);
                     for e in edges {
                         // First remove the deleted version of the edge
                         {
                             let p= try!(self.internal_hash(&e.introduced_by));
-                            self.internal_edge(*flag^DELETED_EDGE^PARENT_EDGE,&e.from,p,&mut pu);
-                            self.internal_edge(*flag^DELETED_EDGE,&e.to,p,&mut pv);
+                            try!(self.internal_edge(*flag^DELETED_EDGE^PARENT_EDGE,&e.from,p,&mut pu));
+                            try!(self.internal_edge(*flag^DELETED_EDGE,&e.to,p,&mut pv));
+                            debug!(target:"exclusive","pu={}\npv={}",to_hex(&pu),to_hex(&pv));
                             // Will we need zombies?
-                            if self.has_exclusive_edge(cursor,&e.to,PARENT_EDGE,true,true,dependencies)
-                                || self.has_exclusive_edge(cursor,&e.from,0,true,true,dependencies) {
+                            if self.has_exclusive_edge(cursor,&pv,PARENT_EDGE,true,true,dependencies)
+                                || self.has_exclusive_edge(cursor,&pu,0,true,true,dependencies) {
                                     debug!(target:"exclusive","add_zombies:\n{}\n{}",
                                            to_hex(&e.to),to_hex(&e.from));
                                     add_zombies=true;
+                                } else {
+                                    debug!(target:"exclusive","not add zombies: {}",add_zombies);
                                 }
                         }
-                        self.mdb_txn.del(self.dbi_nodes,&pu[1..(1+KEY_SIZE)], Some(&pv)).unwrap();
-                        self.mdb_txn.del(self.dbi_nodes,&pv[1..(1+KEY_SIZE)], Some(&pu)).unwrap();
-                        // Then add the new edges
-                        pu[0]=*flag^PARENT_EDGE;
-                        pv[0]=*flag;
+                        try!(self.mdb_txn.del(self.dbi_nodes,&pu[1..(1+KEY_SIZE)], Some(&pv)));
+                        try!(self.mdb_txn.del(self.dbi_nodes,&pv[1..(1+KEY_SIZE)], Some(&pu)));
+                        self.kill_obsolete_pseudo_edges(cursor,
+                                                        if *flag&PARENT_EDGE == 0 { &mut pv } else { &mut pu })
+                    }
+                    // Then add the new edges, and zombies if needed. Obsolete pseudo-edges need to be killed before this.
+                    for e in edges {
+                        try!(self.internal_edge(*flag^PARENT_EDGE,&e.from,internal_patch_id,&mut pu));
+                        try!(self.internal_edge(*flag,&e.to,internal_patch_id,&mut pv));
                         debug!(target:"apply","new edge: {}\n          {}",to_hex(&pu),to_hex(&pv));
-                        unsafe {
-                            copy_nonoverlapping(internal_patch_id.as_ptr(),pu.as_mut_ptr().offset(1+KEY_SIZE as isize), HASH_SIZE);
-                            copy_nonoverlapping(internal_patch_id.as_ptr(),pv.as_mut_ptr().offset(1+KEY_SIZE as isize), HASH_SIZE);
+                        try!(self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA));
+                        try!(self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA));
+                        if add_zombies {
+                            pu[0] ^= PSEUDO_EDGE;
+                            pv[0] ^= PSEUDO_EDGE;
+                            try!(self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA));
+                            try!(self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA));
                         }
-                        self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
-                        self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
-
-                        // Is "pv" still alive? If not, delete pseudo-neighbors and add them to deleted neighbors.
-                        /*if add_zombies {
-                            pu[0] ^= PSEUDO_EDGE | DELETED_EDGE;
-                            pv[0] ^= PSEUDO_EDGE | DELETED_EDGE;
-                            self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
-                            self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
-                        }*/
                     }
                     debug!(target:"libpijul","unsafe_apply:edges.done");
                 },
                 Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
                     assert!(!nodes.is_empty());
                     debug!(target:"libpijul","unsafe_apply: newnodes");
-                    let time0=time::precise_time_s();
                     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut lnum0= *line_num;
@@ -1660,9 +1637,6 @@ impl <'a> Repository<'a> {
                         }
                          */
                     }
-                    let time1=time::precise_time_s();
-                    time_newnodes += time1-time0;
-                    debug!(target:"libpijul","unsafe_apply:newnodes.done");
                 }
             }
         }
@@ -1670,7 +1644,6 @@ impl <'a> Repository<'a> {
             lmdb::mdb_cursor_close(alive);
             lmdb::mdb_cursor_close(cursor)
         };
-        info!(target:"libpijul","edges: {} newnodes: {}", time_edges,time_newnodes);
         Ok(())
     }
 
@@ -1725,33 +1698,27 @@ impl <'a> Repository<'a> {
         self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
     }
 
-    fn kill_obsolete_pseudo_edges(&mut self,cursor:*mut lmdb::MdbCursor,pv:&[u8]) {
+    fn kill_obsolete_pseudo_edges(&mut self,cursor:*mut lmdb::MdbCursor,pv:&mut [u8]) {
+        debug_assert!(pv.len()==1+KEY_SIZE+HASH_SIZE);
         let mut a:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-        let mut b:[u8;KEY_SIZE]=[0;KEY_SIZE];
-        unsafe {
-            copy_nonoverlapping(pv.as_ptr() as *const c_void,
-                                a.as_mut_ptr().offset(1) as *mut c_void,
-                                KEY_SIZE);
-        }
         for flag in [PSEUDO_EDGE,PARENT_EDGE|PSEUDO_EDGE,
                      FOLDER_EDGE|PSEUDO_EDGE,PARENT_EDGE|PSEUDO_EDGE|FOLDER_EDGE].iter() {
             loop {
                 let flag=[*flag];
-                match unsafe { lmdb::cursor_get(cursor,&pv,Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE) } {
+                match unsafe { lmdb::cursor_get(cursor,&pv[1..(1+KEY_SIZE)],Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE) } {
                     Ok((_,v))=>{
                         if v[0]==flag[0] {
                             debug!(target:"libpijul","kill_obsolete_pseudo: {}",to_hex(v));
                             unsafe {
-                                copy_nonoverlapping((v.as_ptr().offset(1)) as *const c_void,
-                                                    b.as_mut_ptr() as *mut c_void,
-                                                    KEY_SIZE);
-                                copy_nonoverlapping((v.as_ptr().offset(1+KEY_SIZE as isize)) as *const c_void,
-                                                    a.as_mut_ptr().offset(1+KEY_SIZE as isize) as *mut c_void,
-                                                    HASH_SIZE);
+                                copy_nonoverlapping(v.as_ptr() as *const c_void,
+                                                    a.as_mut_ptr() as *mut c_void,
+                                                    1+KEY_SIZE+HASH_SIZE);
                             }
-                            a[0]= v[0] ^ PARENT_EDGE;
+                            let pv0=pv[0];
+                            pv[0]= v[0] ^ PARENT_EDGE;
                             unsafe { lmdb::mdb_cursor_del(cursor,0) };
-                            self.mdb_txn.del(self.dbi_nodes,&b[..],Some(&a[..])).unwrap();
+                            self.mdb_txn.del(self.dbi_nodes,&a[1..(1+KEY_SIZE)],Some(pv)).unwrap();
+                            pv[0]=pv0;
                         } else {
                             debug!(target:"libpijul","not kill_obsolete_pseudo: {}",to_hex(v));
                             break
@@ -1774,16 +1741,7 @@ impl <'a> Repository<'a> {
             }
         }
         self.mdb_txn.put(self.dbi_branches,&current,&internal,lmdb::MDB_NODUPDATA).unwrap();
-        let time0=time::precise_time_s();
-        self.unsafe_apply(&patch.changes,internal,&patch.dependencies);
-        let time1=time::precise_time_s();
-        info!(target:"libpijul_apply","unsafe_apply took: {}", time1-time0);
-        //let mut children=Vec::new();
-        let zero:[u8;HASH_SIZE]=[0;HASH_SIZE];
-        let mut max_parents=0;
-        let mut max_children=0;
-        let mut max_parents_single=0;
-        let mut max_children_single=0;
+        try!(self.unsafe_apply(&patch.changes,internal,&patch.dependencies));
         let cursor= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let cursor_= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let mut relatives=Vec::new();
@@ -1791,7 +1749,7 @@ impl <'a> Repository<'a> {
         for ch in patch.changes.iter() {
             match *ch {
                 Change::Edges{ref edges,ref flag} if flag & DELETED_EDGE!=0=>{
-                    // Delete obsolete pseudo-edges
+                    // Add pseudo-edges between parents and children.
                     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut parents:Vec<u8>=Vec::new();
@@ -1799,8 +1757,8 @@ impl <'a> Repository<'a> {
                     for e in edges {
                         {
                             let p= try!(self.internal_hash(&e.introduced_by));
-                            self.internal_edge(*flag^PARENT_EDGE,&e.from,p,&mut pu);
-                            self.internal_edge(*flag,&e.to,p,&mut pv);
+                            try!(self.internal_edge(*flag^PARENT_EDGE,&e.from,p,&mut pu));
+                            try!(self.internal_edge(*flag,&e.to,p,&mut pv));
                         }
                         let (pu,pv)= if *flag&PARENT_EDGE==0 { (&pu,&pv) } else { (&pv,&pu) };
                         if has_edge(cursor,&pu[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
@@ -1861,7 +1819,7 @@ impl <'a> Repository<'a> {
                     lnum0= *line_num;
                     unsafe { copy_nonoverlapping(internal.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE); }
                     for i in 0..LINE_SIZE { pu[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
-
+                    // Handling missing up contexts
                     for c in up_context {
                         unsafe {
                             let u= if c.len()>LINE_SIZE {
@@ -1898,6 +1856,7 @@ impl <'a> Repository<'a> {
                     lnum0= (*line_num)+nodes.len()-1;
                     unsafe { copy_nonoverlapping(internal.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE); }
                     for i in 0..LINE_SIZE { pu[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
+                    // Handling missing down contexts
                     for c in down_context {
                         unsafe {
                             let u= if c.len()>LINE_SIZE {
@@ -1941,7 +1900,6 @@ impl <'a> Repository<'a> {
             lmdb::mdb_cursor_close(cursor_);
         }
         let time2=time::precise_time_s();
-        info!(target:"libpijul_apply","apply took: {}, max_parents:{} (single {}), max_children:{} (single {})", time2-time1,max_parents,max_parents_single,max_children,max_children_single);
         for ref dep in patch.dependencies.iter() {
             let dep_internal=try!(self.internal_hash(&dep)).to_vec();
             self.mdb_txn.put(self.dbi_revdep,&dep_internal,internal,0).unwrap();
