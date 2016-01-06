@@ -120,7 +120,7 @@ struct Line<'a> {
 
 struct Graph<'a> {
     lines:Vec<Line<'a>>,
-    children:Vec<(*const u8,usize)> // raw pointer because we might need the edge address. We need the first element anyway, replace "*const u8" by "u8" if not needed.
+    children:Vec<(*const u8,usize)> // raw pointer because we might need the edge address. We need the first element anyway, replace "*const u8" by "u8" if the full address is not needed.
 }
 
 
@@ -518,7 +518,6 @@ impl <'a> Repository<'a> {
                         let idx=lines.len();
                         e.insert(idx);
                         debug!(target:"retrieve","{}",to_hex(key));
-                        // Test: is this a zombie line?
                         let is_zombie={
                             let mut tag=PARENT_EDGE|DELETED_EDGE;
                             unsafe {
@@ -533,18 +532,13 @@ impl <'a> Repository<'a> {
                                       }})
                             }
                         };
-                        //
                         let mut l=Line {
                             key:key,flags:if is_zombie {LINE_HALF_DELETED} else {0},
                             children:children.len(),n_children:0,index:0,lowlink:0,scc:0
                         };
                         for child in CursIter::new(curs,key,0,true,true) {
+                            debug!(target:"retrieve", "child: {}",to_hex(child));
                             children.push((child.as_ptr(),0));
-                            /*
-                            unsafe {
-                                children.push(std::mem::transmute(child.as_ptr()))
-                            }
-                            */
                             l.n_children+=1
                         }
                         lines.push(l)
@@ -657,9 +651,10 @@ impl <'a> Repository<'a> {
 
 
     fn output_file<'b,'c:'b,B:LineBuffer<'c>>(&'c self,buf:&'b mut B,g:Graph<'a>,forward:&mut Vec<u8>) {
+        debug!(target:"conflict","output_file");
         let mut g=g;
         let t0=time::precise_time_s();
-        let mut scc = self.tarjan(&mut g); // in reverse order.
+        let mut scc = self.tarjan(&mut g); // SCCs are given here in reverse order.
         let t1=time::precise_time_s();
         info!("tarjan took {}s",t1-t0);
         info!("There are {} SCC",scc.len());
@@ -737,6 +732,7 @@ impl <'a> Repository<'a> {
         }
         let zero=[0;HASH_SIZE];
         dfs(&mut g,&mut first_visit,&mut last_visit,forward,&zero[..],&mut step,&scc,scc.len()-1);
+        debug!("dfs done");
         // assumes no conflict for now.
         let mut i=scc.len()-1;
         let mut nodes=vec!();
@@ -744,14 +740,19 @@ impl <'a> Repository<'a> {
         let cursor= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         loop {
             // test for conflict
-            if scc[i].len() <= 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] && g.lines[scc[i][0]].flags & LINE_HALF_DELETED == 0 {
+            // scc[i] has at least one element (from tarjan).
+            if scc[i].len() == 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0]  && g.lines[scc[i][0]].flags & LINE_HALF_DELETED == 0 {
+                debug!(target:"conflict","/flag = {} {}",g.lines[scc[i][0]].flags,LINE_HALF_DELETED);
                 let key=g.lines[scc[i][0]].key;
-                //unsafe {println!("key={} contents={}",to_hex(key),std::str::from_utf8_unchecked(self.contents(key))) }
+                debug!(target:"conflict","key = {}",to_hex(key));
                 if key.len()>0 {
                     buf.output_line(&key,self.contents(key));
                 }
                 if i==0 { break } else { i-=1 }
             } else {
+                debug!(target:"conflict","flag = {} {}",g.lines[scc[i][0]].flags,LINE_HALF_DELETED);
+                let key=g.lines[scc[i][0]].key;
+                debug!(target:"conflict","key = {}",to_hex(key));
                 struct A<'b,'a:'b,'c,B:LineBuffer<'a>> where 'a:'c, B:'b {
                     repo:&'a Repository<'a>,
                     scc:&'c mut Vec<Vec<usize>>,
@@ -766,7 +767,14 @@ impl <'a> Repository<'a> {
                     cursor:*mut lmdb::MdbCursor
                 }
                 fn get_conflict<'b,'a:'b,'c,B:LineBuffer<'a>>(x:&mut A<'b,'a,'c,B>,i:usize) {
-                    if x.scc[i].len() <= 1 && x.first_visit[i] <= x.first_visit[0] && x.last_visit[i] >= x.last_visit[0] {
+                    // x.scc[i] has at least one element (from tarjan).
+                    {
+                        let key=x.g.lines[x.scc[i][0]].key;
+                        debug!(target:"conflict","get_conflict: {} {}",x.scc[i][0],to_hex(key));
+                    }
+                    if x.scc[i].len() == 1 && x.first_visit[i] <= x.first_visit[0] && x.last_visit[i] >= x.last_visit[0] && x.g.lines[x.scc[i][0]].flags & LINE_HALF_DELETED == 0 {
+                        // End of conflict.
+                        debug!(target:"conflict","end of conflict");
                         if ! x.is_first {x.b.output_line(&[],b"================================\n");}
                         else{
                             x.is_first=false
@@ -782,42 +790,59 @@ impl <'a> Repository<'a> {
                             i:usize,
                             j:usize,
                             next:&mut HashSet<usize>) {
-                            if j<params.scc[i].len()-1 {
+                            debug!(target:"conflict","permutations:j={}, nodes={:?}",j,params.nodes);
+                            if j<params.scc[i].len() {
+                                debug!(target:"conflict","next? j={} {}",j,next.len());
                                 let n=params.g.lines[params.scc[i][j]].n_children;
+                                debug!(target:"conflict","n={}",n);
                                 for c in 0 .. n {
                                     let (edge_child,n_child) = params.g.children[params.g.lines[params.scc[i][j]].children + c];
                                     if n_child != 0 || edge_child.is_null() {
                                         // Not a forward edge (forward edges are (!=NULL, 0)).
-                                        next.insert(n_child);
+                                        debug!(target:"conflict","n_child={}",n_child);
+                                        next.insert(params.g.lines[n_child].scc);
                                     }
                                 }
                                 for k in j..params.scc[i].len() {
                                     params.scc[i].swap(j,k);
                                     let mut newly_forced=Vec::new();
                                     let key=params.g.lines[params.scc[i][j]].key;
+                                    let mut key_is_present = true;
                                     if params.g.lines[params.scc[i][j]].is_zombie() {
-                                        let mut is_forced=false;
+                                        let mut is_forced:bool = false;
+                                        let mut is_defined:bool = false;
                                         for parent in CursIter::new(params.cursor,key,PARENT_EDGE,true,true) {
-                                            if *params.selected_zombies.get(&parent[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]).unwrap_or(&false) {
-                                                is_forced=true;
-                                                break
-                                            } else {
-                                                let f=&parent[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)];
-                                                newly_forced.push(f);
-                                                params.selected_zombies.insert(f,false);
+                                            let f=&parent[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)];
+                                            match params.selected_zombies.get(f) {
+                                                Some(force)=>{
+                                                    is_defined = true;
+                                                    is_forced = *force
+                                                },
+                                                None => {
+                                                    newly_forced.push(f)
+                                                }
                                             }
                                         }
+                                        debug!(target:"conflict","forced:{:?}",is_forced);
                                         // If this zombie line is not forced in, try without it.
-                                        if !is_forced { permutations(params,i,j+1,next) }
-                                        else {
-                                            for f in &newly_forced {
-                                                params.selected_zombies.insert(f,true);
+                                        if !is_defined {
+                                            // pas defini, on le definit.
+                                            for f in newly_forced.iter() {
+                                                params.selected_zombies.insert(f,is_forced);
                                             }
+                                        } else {
+                                            key_is_present = is_forced
+                                        }
+
+                                        if !is_forced {
+                                            permutations(params,i,j+1,next)
                                         }
                                     }
-                                    params.nodes.push(key);
-                                    permutations(params,i,j+1,next);
-                                    params.nodes.pop();
+                                    if key_is_present {
+                                        params.nodes.push(key);
+                                        permutations(params,i,j+1,next);
+                                        params.nodes.pop();
+                                    }
                                     if newly_forced.len()>0 {
                                         // Unmark here.
                                         for f in &newly_forced {
@@ -826,16 +851,18 @@ impl <'a> Repository<'a> {
                                     }
                                 }
                             } else {
+                                debug!(target:"conflict","next? {}",next.len());
                                 for chi in next.iter() {
+                                    debug!(target:"conflict","rec: get_conflict {}",*chi);
                                     get_conflict(params,*chi);
                                 }
                             }
                         }
                         let mut next=HashSet::new();
-                        permutations(x,i,0,&mut next)
+                        debug!(target:"conflict","permutations");
+                        permutations(x,i,0,&mut next);
                     }
                 }
-                // TODO: custom conflict outputters (part of the "writer" typeclass?)
                 buf.output_line(&[],b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
                 nodes.clear();
                 let next={
@@ -859,6 +886,7 @@ impl <'a> Repository<'a> {
                 if i==0 { break } else { i=std::cmp::min(i-1,next) }
             }
         }
+        debug!(target:"conflict","/output_file");
     }
     fn remove_redundant_edges(&mut self,forward:&mut Vec<u8>) {
         let mut i=0;
@@ -1057,15 +1085,6 @@ impl <'a> Repository<'a> {
             let mut j=0;
             fn add_lines(repo:&Repository,actions:&mut Vec<Change>, line_num:&mut usize,
                          up_context:&[u8],down_context:&[&[u8]],lines:&[&[u8]]){
-                /*unsafe {
-                    println!("u {}",std::str::from_utf8_unchecked(repo.contents(up_context)));
-                    for i in lines {
-                        println!("+ {}",std::str::from_utf8_unchecked(i));
-                    }
-                if down_context.len()>0 {
-                        println!("d {}",std::str::from_utf8_unchecked(repo.contents(down_context[0])));
-                    }
-                }*/
                 actions.push(
                     Change::NewNodes {
                         up_context:vec!(repo.external_key(up_context)),
@@ -1092,15 +1111,9 @@ impl <'a> Repository<'a> {
                 if memeq(contents_a[i],b[j]) {
                     if let Some(i0)=oi {
                         debug!(target:"diff","deleting from {} to {} / {}",i0,i,lines_a.len());
-                        //println!("delete starting from line: \"{}\"",to_hex(lines_a[i0]));
-                        //unsafe { println!("contents: \"{}\"",std::str::from_utf8_unchecked(contents_a[i0])); }
                         delete_lines(repo,cursor,actions, &lines_a[i0..i]);
                         oi=None
                     } else if let Some(j0)=oj {
-                        /* unsafe {
-                            println!("adding with context: {} \"{}\"",last_alive_context,to_hex(lines_a[last_alive_context]));
-                            println!("adding with context: +{}",std::str::from_utf8_unchecked(b[j0]));
-                        }*/
                         add_lines(repo,actions, line_num,
                                   lines_a[last_alive_context], // up context
                                   &lines_a[i..i+1], // down context
@@ -1110,21 +1123,15 @@ impl <'a> Repository<'a> {
                     last_alive_context=i;
                     i+=1; j+=1;
                 } else {
-                    //println!("!= {:?} {:?} {:?} {:?}",opt[i+1][j],opt[i][j+1], oi,oj);
                     if opt[i+1][j] >= opt[i][j+1] {
                         // we will delete things starting from i (included).
                         if let Some(j0)=oj {
-                            /*unsafe {
-                                println!("adding with context: \"{}\"",to_hex(lines_a[last_alive_context]));
-                                println!("adding with context: +{}",std::str::from_utf8_unchecked(b[j0]));
-                            }*/
                             add_lines(repo,actions, line_num,
                                       lines_a[last_alive_context], // up context
                                       &lines_a[i..i+1], // down context
                                       &b[j0..j]);
                             oj=None
                         }
-                        //println!("oi {:?}",oi);
                         if oi.is_none() {
                             oi=Some(i)
                         }
@@ -1132,9 +1139,6 @@ impl <'a> Repository<'a> {
                     } else {
                         // We will add things starting from j.
                         if let Some(i0)=oi {
-                            /*unsafe {
-                                println!("deleting: \"{}\"",to_hex(lines_a[i0]));
-                            }*/
                             delete_lines(repo,cursor,actions, &lines_a[i0..i]);
                             last_alive_context=i0-1;
                             oi=None
@@ -1144,10 +1148,8 @@ impl <'a> Repository<'a> {
                         }
                         j+=1
                     }
-                    //println!("done");
                 }
             }
-            //println!("done i={}/{} j={}/{}",i,contents_a.len(),j,b.len());
             if i < lines_a.len() {
                 if let Some(j0)=oj {
                     add_lines(repo,actions, line_num,
@@ -1176,11 +1178,9 @@ impl <'a> Repository<'a> {
             };
             let mut i=0;
             let mut j=0;
-            //unsafe { println!("buf_b= {}",std::str::from_utf8_unchecked(&buf_b))}
 
             while j<buf_b.len() {
                 if buf_b[j]==0xa {
-                    //unsafe {println!("pushing {}",std::str::from_utf8_unchecked(&buf_b[i..j+1]))}
                     lines_b.push(&buf_b[i..j+1]);
                     i=j+1
                 }
@@ -1196,13 +1196,11 @@ impl <'a> Repository<'a> {
                 self.output_file(&mut d,a,redundant);
                 let t1=time::precise_time_s();
                 info!("output_file took {}s",t1-t0);
-                //println!("output, now calling local_diff");
                 let cursor= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()};
                 local_diff(self,cursor,actions, line_num,
                            &d.lines_a,
                            &d.contents_a,
                            &lines_b);
-                //println!("/local_diff");
                 unsafe {
                     lmdb::mdb_cursor_close(cursor);
                 }
@@ -1226,11 +1224,8 @@ impl <'a> Repository<'a> {
                   current_inode:&[u8],
                   realpath:&mut std::path::PathBuf,
                   basename:&[u8]) {
-        //println!("record dfs {}",to_hex(current_inode));
         if parent_inode.is_some() { realpath.push(str::from_utf8(&basename).unwrap()) }
 
-        //let mut k = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
-        //let mut v = MDB_val { mv_data:ptr::null_mut(), mv_size:0 };
         let mut l2=[0;LINE_SIZE];
         let current_node=
             if parent_inode.is_some() {
@@ -1242,10 +1237,8 @@ impl <'a> Repository<'a> {
                             let attr=metadata(&realpath).unwrap();
                             let p=(permissions(&attr)) & 0o777;
                             let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
-                            //println!("int_attr {:?} : {} {}",realpath,p,is_dir);
                             (if p==0 { old_attr } else { p }) | is_dir
                         };
-                        //println!("attributes: {} {}",old_attr,int_attr);
                         if current_node[0]==1 || old_attr!=int_attr {
                             // file moved
 
@@ -1342,7 +1335,6 @@ impl <'a> Repository<'a> {
                         // File addition, create appropriate Newnodes.
                         match metadata(&realpath) {
                             Ok(attr) => {
-                                //println!("file addition, realpath={:?}", realpath);
                                 let int_attr={
                                     let attr=metadata(&realpath).unwrap();
                                     let p=permissions(&attr);
@@ -1408,7 +1400,6 @@ impl <'a> Repository<'a> {
                 Some(ROOT_KEY)
             };
 
-        //println!("current_node={:?}",current_node);
         match current_node {
             None => (), // we just added a file
             Some(current_node)=>{
@@ -1486,6 +1477,11 @@ impl <'a> Repository<'a> {
                             try!(self.internal_edge(*flag^DELETED_EDGE^PARENT_EDGE,&e.from,p,&mut pu));
                             try!(self.internal_edge(*flag^DELETED_EDGE,&e.to,p,&mut pv));
                             debug!(target:"exclusive","pu={}\npv={}",to_hex(&pu),to_hex(&pv));
+                        }
+                        try!(self.mdb_txn.del(self.dbi_nodes,&pu[1..(1+KEY_SIZE)], Some(&pv)));
+                        try!(self.mdb_txn.del(self.dbi_nodes,&pv[1..(1+KEY_SIZE)], Some(&pu)));
+
+                        if *flag & DELETED_EDGE != 0 {
                             // Will we need zombies?
                             if self.has_exclusive_edge(cursor,&pv,PARENT_EDGE,true,true,dependencies)
                                 || self.has_exclusive_edge(cursor,&pu,0,true,true,dependencies) {
@@ -1495,24 +1491,78 @@ impl <'a> Repository<'a> {
                                 } else {
                                     debug!(target:"exclusive","not add zombies: {}",add_zombies);
                                 }
+                            //
+                            self.kill_obsolete_pseudo_edges(cursor, if *flag&PARENT_EDGE == 0 { &mut pv } else { &mut pu })
                         }
-                        try!(self.mdb_txn.del(self.dbi_nodes,&pu[1..(1+KEY_SIZE)], Some(&pv)));
-                        try!(self.mdb_txn.del(self.dbi_nodes,&pv[1..(1+KEY_SIZE)], Some(&pu)));
-                        self.kill_obsolete_pseudo_edges(cursor,
-                                                        if *flag&PARENT_EDGE == 0 { &mut pv } else { &mut pu })
                     }
                     // Then add the new edges, and zombies if needed. Obsolete pseudo-edges need to be killed before this.
+                    let mut parents:Vec<u8>=Vec::new();
+                    let mut children:Vec<u8>=Vec::new();
                     for e in edges {
                         try!(self.internal_edge(*flag^PARENT_EDGE,&e.from,internal_patch_id,&mut pu));
                         try!(self.internal_edge(*flag,&e.to,internal_patch_id,&mut pv));
                         debug!(target:"apply","new edge: {}\n          {}",to_hex(&pu),to_hex(&pv));
                         try!(self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA));
                         try!(self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA));
-                        if add_zombies {
-                            pu[0] ^= PSEUDO_EDGE;
-                            pv[0] ^= PSEUDO_EDGE;
-                            try!(self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA));
-                            try!(self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA));
+                        // Here, there are two options: either we need zombie lines because the currently applied patch doesn't know about some of our edges, or else we just need to reconnect parents and children of a deleted portion of the graph.
+                        if *flag & DELETED_EDGE != 0 {
+                            if add_zombies {
+                                pu[0]^= PSEUDO_EDGE | DELETED_EDGE;
+                                pv[0]^= PSEUDO_EDGE | DELETED_EDGE;
+                                debug!(target:"apply","zombie:\n{}\n{}",to_hex(&pu),to_hex(&pv));
+                                try!(self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA));
+                                try!(self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA));
+                            } else {
+                                // collect alive parents/children of hunk (now done in apply).
+                                let (pu,pv)= if *flag&PARENT_EDGE==0 { (&pu,&pv) } else { (&pv,&pu) };
+                                if has_edge(cursor,&pu[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
+                                    let i=parents.len();
+                                    parents.extend(&pu[..]);
+                                    parents[i]^= PSEUDO_EDGE | DELETED_EDGE;
+                                }
+                                for neighbor in CursIter::new(cursor,&pv[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
+                                    debug!(target:"apply","has_edge {}",to_hex(neighbor));
+                                    if has_edge(cursor,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
+                                        let i=parents.len();
+                                        parents.extend(neighbor);
+                                        parents[i]^=PSEUDO_EDGE;
+                                    }
+                                }
+                                for neighbor in CursIter::new(cursor,&pv[1..(1+KEY_SIZE)],0,true,true) {
+                                    debug!(target:"apply","has_edge' {}",to_hex(neighbor));
+                                    if has_edge(cursor,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
+                                        let i=children.len();
+                                        children.extend(neighbor);
+                                        children[i]^=PSEUDO_EDGE;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Finally: reconnect
+                    if *flag &DELETED_EDGE != 0 {
+                        let mut i=0;
+                        while i<children.len() {
+                            let mut j=0;
+                            while j<parents.len() {
+                                if ! self.connected(cursor,
+                                                    &parents[j+1 .. j+1+KEY_SIZE],
+                                                    &mut children[i .. i+1+KEY_SIZE+HASH_SIZE]) {
+                                    debug!(target:"apply","reconnect:\n{}\n{}",
+                                           to_hex(&parents[j..(j+1+KEY_SIZE+HASH_SIZE)]),
+                                           to_hex(&mut children[i..(i+1+KEY_SIZE+HASH_SIZE)]));
+                                    if unsafe {
+                                        memcmp(parents.as_ptr().offset((j+1) as isize) as *const c_void,
+                                               children.as_ptr().offset((i+1) as isize) as *const c_void,
+                                               KEY_SIZE as size_t) != 0
+                                    } {
+                                        self.add_edge(&parents[j..(j+1+KEY_SIZE+HASH_SIZE)],
+                                                      &mut children[i..(i+1+KEY_SIZE+HASH_SIZE)]);
+                                    }
+                                }
+                                j+=1+KEY_SIZE+HASH_SIZE;
+                            }
+                            i+=1+KEY_SIZE+HASH_SIZE;
                         }
                     }
                     debug!(target:"libpijul","unsafe_apply:edges.done");
@@ -1597,45 +1647,7 @@ impl <'a> Repository<'a> {
                         }
                         self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA).unwrap();
                         self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
-                        /*
-                        // remove edges between up context and down context.
-                        // commented because it could break unrecord.
-                        for up in up_context {
-                            {
-                                unsafe {
-                                    let w= if up.len()>LINE_SIZE {
-                                        self.internal_hash(&up[0..(up.len()-LINE_SIZE)]).unwrap()
-                                    } else {
-                                        internal_patch_id
-                                    };
-                                    copy_nonoverlapping(w.as_ptr() as *const c_char,
-                                                        pw.as_mut_ptr().offset(1) as *mut c_char,
-                                                        HASH_SIZE);
-                                    copy_nonoverlapping(up.as_ptr().offset((c.len()-LINE_SIZE) as isize),
-                                                        pw.as_mut_ptr().offset((1+HASH_SIZE) as isize),
-                                                        LINE_SIZE);
-                                }
-                                pw[0]=pu[0]^PARENT_EDGE;
-                                info!(target:"libpijul_newnodes","newnodes {} {}",to_hex(&pw[1..(1+KEY_SIZE)]),to_hex(&pu[..]));
-                                unsafe {
-                                    match lmdb::cursor_get(cursor,&pw[1..(1+KEY_SIZE)],Some(&pu[0..(1+KEY_SIZE)]),lmdb::Op::MDB_GET_BOTH_RANGE) {
-                                        Ok((_,b)) if b[0]|PSEUDO_EDGE == pu[0]|PSEUDO_EDGE
-                                            && memcmp(b.as_ptr().offset(1) as *const c_void,
-                                                      pu.as_ptr().offset(1) as *const c_void,
-                                                      KEY_SIZE as size_t) == 0 => {
-                                                //info!(target:"libpijul_newnodes","cursor gave {} {}",to_hex(a),to_hex(b));
-                                                copy_nonoverlapping(b.as_ptr().offset(1+KEY_SIZE as isize) as *const c_void,
-                                                                    pw.as_mut_ptr().offset(1+KEY_SIZE as isize) as *mut c_void,
-                                                                    HASH_SIZE);
-                                                lmdb::mdb_cursor_del(cursor,0);
-                                                self.mdb_txn.del(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],Some(&pw));
-                                            },
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                         */
+                        // There was something here before, to remove existing edges between up and down context, but it would break unrecord.
                     }
                 }
             }
@@ -1670,24 +1682,22 @@ impl <'a> Repository<'a> {
     fn connected(&mut self,cursor:*mut lmdb::MdbCursor,pu:&[u8],pv:&mut [u8])->bool{
         let pv_0=pv[0];
         pv[0]=0;
-        match unsafe { lmdb::cursor_get(cursor,&pu,Some(pv),lmdb::Op::MDB_GET_BOTH_RANGE) } {
-            Ok((_,v))=>{
-                let x=unsafe {memcmp(pv.as_ptr() as *const c_void,
-                                     v.as_ptr() as *const c_void,
-                                     (1+KEY_SIZE) as size_t)};
-                pv[0]=pv_0;
-                x == 0
-            },
+        let result=unsafe { lmdb::cursor_get(cursor,&pu,Some(pv),lmdb::Op::MDB_GET_BOTH_RANGE) };
+        pv[0]=pv_0;
+        match result {
+            Ok((_,v))=>
+                unsafe {memcmp(pv.as_ptr() as *const c_void,
+                               v.as_ptr() as *const c_void,
+                               (1+KEY_SIZE) as size_t) == 0},
             _=>{
                 pv[0]=PSEUDO_EDGE;
-                match unsafe { lmdb::cursor_get(cursor,&pu,Some(pv),lmdb::Op::MDB_GET_BOTH_RANGE) } {
-                    Ok((_,v))=>{
-                        let x=unsafe {memcmp(pv.as_ptr() as *const c_void,
-                                             v.as_ptr() as *const c_void,
-                                             (1+KEY_SIZE) as size_t) == 0 };
-                        pv[0]=pv_0;
-                        x
-                    },
+                let result=unsafe { lmdb::cursor_get(cursor,&pu,Some(pv),lmdb::Op::MDB_GET_BOTH_RANGE) };
+                pv[0]=pv_0;
+                match result {
+                    Ok((_,v))=>
+                        unsafe {memcmp(pv.as_ptr() as *const c_void,
+                                       v.as_ptr() as *const c_void,
+                                       (1+KEY_SIZE) as size_t) == 0 },
                     _=>false
                 }
             }
@@ -1748,60 +1758,14 @@ impl <'a> Repository<'a> {
 
         for ch in patch.changes.iter() {
             match *ch {
-                Change::Edges{ref edges,ref flag} if flag & DELETED_EDGE!=0=>{
-                    // Add pseudo-edges between parents and children.
-                    let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-                    let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-                    let mut parents:Vec<u8>=Vec::new();
-                    let mut children:Vec<u8>=Vec::new();
-                    for e in edges {
-                        {
-                            let p= try!(self.internal_hash(&e.introduced_by));
-                            try!(self.internal_edge(*flag^PARENT_EDGE,&e.from,p,&mut pu));
-                            try!(self.internal_edge(*flag,&e.to,p,&mut pv));
-                        }
-                        let (pu,pv)= if *flag&PARENT_EDGE==0 { (&pu,&pv) } else { (&pv,&pu) };
-                        if has_edge(cursor,&pu[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
-                            let i=parents.len();
-                            parents.extend(&pu[..]);
-                            parents[i]^=PSEUDO_EDGE
-                        }
-                        for neighbor in CursIter::new(cursor,&pv[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
-                            debug!(target:"apply","has_edge {}",to_hex(neighbor));
-                            if has_edge(cursor,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
-                                let i=parents.len();
-                                parents.extend(neighbor);
-                                parents[i]^=PSEUDO_EDGE;
-                            }
-                        }
-                        for neighbor in CursIter::new(cursor,&pv[1..(1+KEY_SIZE)],0,true,true) {
-                            debug!(target:"apply","has_edge' {}",to_hex(neighbor));
-                            if has_edge(cursor,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
-                                let i=children.len();
-                                children.extend(neighbor);
-                                children[i]^=PSEUDO_EDGE;
-                            }
-                        }
+                Change::Edges{flag,..}=>{
+                    if flag&DELETED_EDGE == 0 {
+                        // Handle missing context (up and down)
+                        unimplemented!()
                     }
-                    let mut i=0;
-                    while i<children.len() {
-                        let mut j=0;
-                        while j<parents.len() {
-                            if ! self.connected(cursor,
-                                                &parents[j+1 .. j+1+KEY_SIZE],
-                                                &mut children[i .. i+1+KEY_SIZE+HASH_SIZE]) {
-                                self.add_edge(&parents[j..(j+1+KEY_SIZE+HASH_SIZE)],
-                                              &mut children[i..(i+1+KEY_SIZE+HASH_SIZE)]);
-                            }
-                            j+=1+KEY_SIZE+HASH_SIZE;
-                        }
-                        i+=1+KEY_SIZE+HASH_SIZE;
-                    }
-                },
-                Change::Edges{..}=>{
-                    unimplemented!()
                 },
                 Change::NewNodes { ref up_context,ref down_context,ref line_num, ref flag, ref nodes } => {
+                    // Handle missing contexts.
                     debug!(target:"libpijul","apply: newnodes");
                     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                     let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
@@ -1819,7 +1783,7 @@ impl <'a> Repository<'a> {
                     lnum0= *line_num;
                     unsafe { copy_nonoverlapping(internal.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE); }
                     for i in 0..LINE_SIZE { pu[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
-                    // Handling missing up contexts
+                    // missing up contexts
                     for c in up_context {
                         unsafe {
                             let u= if c.len()>LINE_SIZE {
@@ -1856,7 +1820,7 @@ impl <'a> Repository<'a> {
                     lnum0= (*line_num)+nodes.len()-1;
                     unsafe { copy_nonoverlapping(internal.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE); }
                     for i in 0..LINE_SIZE { pu[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
-                    // Handling missing down contexts
+                    // missing down contexts
                     for c in down_context {
                         unsafe {
                             let u= if c.len()>LINE_SIZE {
