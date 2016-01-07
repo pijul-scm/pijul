@@ -1477,6 +1477,8 @@ impl <'a> Repository<'a> {
         let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let alive= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let cursor= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
+        let mut parents:Vec<u8>=Vec::new();
+        let mut children:Vec<u8>=Vec::new();
         for ch in changes {
             match *ch {
                 Change::Edges{ref flag, ref edges} => {
@@ -1511,9 +1513,9 @@ impl <'a> Repository<'a> {
                     }
                     // Then add the new edges.
                     // Then add zombies and pseudo-edges if needed.
-                    let mut parents:Vec<u8>=Vec::new();
-                    let mut children:Vec<u8>=Vec::new();
                     debug!(target:"apply","edges");
+                    parents.clear();
+                    children.clear();
                     for e in edges {
                         try!(self.internal_edge(*flag^PARENT_EDGE,&e.from,internal_patch_id,&mut pu));
                         try!(self.internal_edge(*flag,&e.to,internal_patch_id,&mut pv));
