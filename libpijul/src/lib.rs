@@ -828,14 +828,18 @@ impl <'a> Repository<'a> {
                                         if !is_defined {
                                             // pas defini, on le definit.
                                             for f in newly_forced.iter() {
-                                                params.selected_zombies.insert(f,is_forced);
+                                                params.selected_zombies.insert(f,false);
                                             }
                                         } else {
                                             key_is_present = is_forced
                                         }
-
                                         if !is_forced {
                                             permutations(params,i,j+1,next)
+                                        }
+                                        if key_is_present {
+                                            for f in newly_forced.iter() {
+                                                params.selected_zombies.insert(f,true);
+                                            }
                                         }
                                     }
                                     if key_is_present {
@@ -939,8 +943,8 @@ impl <'a> Repository<'a> {
                         pv
                     },
                     Ok(None)=>{
-                        println!("internal key:{:?}",key);
-                        panic!("external key not found !")
+                        println!("internal key or hash:{:?}",key);
+                        panic!("external hash not found !")
                     },
                     Err(_)=>{
                         println!("internal key:{:?}",key);
@@ -1059,7 +1063,7 @@ impl <'a> Repository<'a> {
             } else { false }
         }
         fn local_diff(repo:&Repository,cursor:&mut lmdb::MdbCursor,actions:&mut Vec<Change>,line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[&[u8]], b:&[&[u8]]) {
-            debug!("local_diff {} {}",contents_a.len(),b.len());
+            debug!(target:"conflictdiff","local_diff {} {}",contents_a.len(),b.len());
             let mut opt=vec![vec![0;b.len()+1];contents_a.len()+1];
             if contents_a.len()>0 {
                 let mut i=contents_a.len() - 1;
@@ -1099,6 +1103,7 @@ impl <'a> Repository<'a> {
                 let mut edges=Vec::with_capacity(lines.len());
                 for i in 0..lines.len() {
                     //unsafe {println!("- {}",std::str::from_utf8_unchecked(repo.contents(lines[i])));}
+                    debug!(target:"conflictdiff","deleting line {}",to_hex(lines[i]));
                     repo.delete_edges(cursor,&mut edges,lines[i],PARENT_EDGE)
                 }
                 actions.push(Change::Edges{edges:edges,flag:PARENT_EDGE|DELETED_EDGE})
@@ -1442,17 +1447,23 @@ impl <'a> Repository<'a> {
         Ok((actions,updatables))
     }
 
-
-    fn has_exclusive_edge(&self,cursor:&mut lmdb::MdbCursor,key:&[u8],flag0:u8,include_folder:bool,include_pseudo:bool,dependencies:&HashSet<Vec<u8>>)->bool {
+    /// Test whether a node has edges unknown to the patch we're applying.
+    fn has_exclusive_edge(&self,cursor:&mut lmdb::MdbCursor,internal_patch_id:&[u8],key:&[u8],flag0:u8,include_folder:bool,include_pseudo:bool,dependencies:&HashSet<Vec<u8>>)->bool {
         for neighbor in CursIter::new(cursor,&key[1..(1+KEY_SIZE)],flag0,include_folder,include_pseudo) {
-            debug!(target:"exclusive","exclusive_edge: {}",to_hex(&neighbor));
-            let ext=self.external_hash(&neighbor[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]);
-            debug!(target:"exclusive", "{:?}, neighbor={},\next={}",flag0,to_hex(&neighbor[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]),to_hex(ext));
-            if !dependencies.contains(ext) {
-                return true
-            } else {
-                for p in dependencies.iter() {
-                    debug!(target:"exclusive","p={}",to_hex(p));
+            if unsafe {
+                memcmp(neighbor.as_ptr().offset(1+KEY_SIZE as isize) as *const c_void,
+                       internal_patch_id.as_ptr() as *const c_void,
+                       HASH_SIZE as size_t)
+                    != 0 } {
+                debug!(target:"exclusive","exclusive_edge: {}",to_hex(&neighbor));
+                let ext=self.external_hash(&neighbor[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]);
+                debug!(target:"exclusive", "{:?}, neighbor={},\next={}",flag0,to_hex(&neighbor[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]),to_hex(ext));
+                if !dependencies.contains(ext) {
+                    return true
+                } else {
+                    for p in dependencies.iter() {
+                        debug!(target:"exclusive","p={}",to_hex(p));
+                    }
                 }
             }
         }
@@ -1461,6 +1472,7 @@ impl <'a> Repository<'a> {
 
 
     fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:&[u8],dependencies:&HashSet<Vec<u8>>)->Result<(),Error>{
+        debug!(target:"conflictdiff","unsafe_apply");
         let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let alive= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
@@ -1472,6 +1484,7 @@ impl <'a> Repository<'a> {
                     let mut add_zombies=false;
                     for e in edges {
                         // First remove the deleted version of the edge
+                        //debug!(target:"conflictdiff","e:{:?}",e);
                         {
                             let p= try!(self.internal_hash(&e.introduced_by));
                             try!(self.internal_edge(*flag^DELETED_EDGE^PARENT_EDGE,&e.from,p,&mut pu));
@@ -1483,8 +1496,9 @@ impl <'a> Repository<'a> {
 
                         if *flag & DELETED_EDGE != 0 {
                             // Will we need zombies?
-                            if self.has_exclusive_edge(cursor,&pv,PARENT_EDGE,true,true,dependencies)
-                                || self.has_exclusive_edge(cursor,&pu,0,true,true,dependencies) {
+                            // We need internal_patch_id here: previous hunks of this patch could have added edges to us.
+                            if self.has_exclusive_edge(cursor,internal_patch_id,&pv,PARENT_EDGE,true,true,dependencies)
+                                || self.has_exclusive_edge(cursor,internal_patch_id,&pu,0,true,true,dependencies) {
                                     debug!(target:"exclusive","add_zombies:\n{}\n{}",
                                            to_hex(&e.to),to_hex(&e.from));
                                     add_zombies=true;
@@ -1495,42 +1509,46 @@ impl <'a> Repository<'a> {
                             self.kill_obsolete_pseudo_edges(cursor, if *flag&PARENT_EDGE == 0 { &mut pv } else { &mut pu })
                         }
                     }
-                    // Then add the new edges, and zombies if needed. Obsolete pseudo-edges need to be killed before this.
+                    // Then add the new edges.
+                    // Then add zombies and pseudo-edges if needed.
                     let mut parents:Vec<u8>=Vec::new();
                     let mut children:Vec<u8>=Vec::new();
+                    debug!(target:"apply","edges");
                     for e in edges {
                         try!(self.internal_edge(*flag^PARENT_EDGE,&e.from,internal_patch_id,&mut pu));
                         try!(self.internal_edge(*flag,&e.to,internal_patch_id,&mut pv));
-                        debug!(target:"apply","new edge: {}\n          {}",to_hex(&pu),to_hex(&pv));
+                        debug!(target:"apply","new edge:\n  {}\n  {}",to_hex(&pu),to_hex(&pv));
                         try!(self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA));
                         try!(self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA));
                         // Here, there are two options: either we need zombie lines because the currently applied patch doesn't know about some of our edges, or else we just need to reconnect parents and children of a deleted portion of the graph.
                         if *flag & DELETED_EDGE != 0 {
                             if add_zombies {
-                                pu[0]^= PSEUDO_EDGE | DELETED_EDGE;
-                                pv[0]^= PSEUDO_EDGE | DELETED_EDGE;
-                                debug!(target:"apply","zombie:\n{}\n{}",to_hex(&pu),to_hex(&pv));
+                                pu[0]^= DELETED_EDGE;
+                                pv[0]^= DELETED_EDGE;
+                                debug!(target:"apply","zombie:\n  {}\n  {}",to_hex(&pu),to_hex(&pv));
                                 try!(self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA));
                                 try!(self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA));
                             } else {
                                 // collect alive parents/children of hunk (now done in apply).
                                 let (pu,pv)= if *flag&PARENT_EDGE==0 { (&pu,&pv) } else { (&pv,&pu) };
+                                debug!(target:"apply","pu has_edge\n  {}",to_hex(&pu[1..(1+KEY_SIZE)]));
                                 if has_edge(cursor,&pu[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
                                     let i=parents.len();
                                     parents.extend(&pu[..]);
                                     parents[i]^= PSEUDO_EDGE | DELETED_EDGE;
                                 }
+                                debug!(target:"apply","pv={}",to_hex(&pv[1..(1+KEY_SIZE)]));
                                 for neighbor in CursIter::new(cursor,&pv[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
-                                    debug!(target:"apply","has_edge {}",to_hex(neighbor));
-                                    if has_edge(cursor,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
+                                    debug!(target:"apply","parent has_edge\n  {}",to_hex(neighbor));
+                                    if has_edge(alive,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
                                         let i=parents.len();
                                         parents.extend(neighbor);
                                         parents[i]^=PSEUDO_EDGE;
                                     }
                                 }
                                 for neighbor in CursIter::new(cursor,&pv[1..(1+KEY_SIZE)],0,true,true) {
-                                    debug!(target:"apply","has_edge' {}",to_hex(neighbor));
-                                    if has_edge(cursor,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
+                                    debug!(target:"apply","children has_edge\n  {}",to_hex(neighbor));
+                                    if has_edge(alive,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
                                         let i=children.len();
                                         children.extend(neighbor);
                                         children[i]^=PSEUDO_EDGE;
@@ -1539,6 +1557,7 @@ impl <'a> Repository<'a> {
                             }
                         }
                     }
+                    debug!(target:"apply","/edges");
                     // Finally: reconnect
                     if *flag &DELETED_EDGE != 0 {
                         let mut i=0;
@@ -1548,7 +1567,7 @@ impl <'a> Repository<'a> {
                                 if ! self.connected(cursor,
                                                     &parents[j+1 .. j+1+KEY_SIZE],
                                                     &mut children[i .. i+1+KEY_SIZE+HASH_SIZE]) {
-                                    debug!(target:"apply","reconnect:\n{}\n{}",
+                                    debug!(target:"apply","reconnect:\n  {}\n  {}",
                                            to_hex(&parents[j..(j+1+KEY_SIZE+HASH_SIZE)]),
                                            to_hex(&mut children[i..(i+1+KEY_SIZE+HASH_SIZE)]));
                                     if unsafe {

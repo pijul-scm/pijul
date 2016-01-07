@@ -37,10 +37,19 @@ A
 E
 EOF
 pijul record
-#pijul pull ../b
+pijul pull ../b
 
 cd /tmp/b
 pijul pull ../a
 
-#dot -Tpdf -o /tmp/a/a.pdf /tmp/a/debug
+cd /tmp/b
+cat << EOF > /tmp/b/a
+A
+X
+E
+EOF
+pijul record
+
+
+dot -Tpdf -o /tmp/a/a.pdf /tmp/a/debug
 dot -Tpdf -o /tmp/b/b.pdf /tmp/b/debug
