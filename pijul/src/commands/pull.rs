@@ -204,8 +204,10 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             for p in pullable {
                 repo=try!(apply_patches(repo,&current_branch,&args.remote,&local_patches,p,&mut patches_were_applied,&only_local))
             }
+            debug!(target:"pull","patches applied? {}",patches_were_applied);
             let mut repo = if patches_were_applied {
                 try!(repo.write_changes_file(&branch_changes_file(r,&current_branch)));
+                debug!(target:"pull","output_repository");
                 try!(repo.output_repository(&r,&pending))
             } else { repo };
             if cfg!(debug_assertions){

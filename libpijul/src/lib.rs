@@ -1322,13 +1322,15 @@ impl <'a> Repository<'a> {
                             actions.push(Change::Edges{edges:edges,flag:FOLDER_EDGE|PARENT_EDGE|DELETED_EDGE});
                             unimplemented!() // Remove all known vertices from this file, for else "missing context" conflicts will not be detected.
                         } else if current_node[0]==0 {
-                            let time0=time::precise_time_s();
-                            let ret=self.retrieve(&current_node[3..]);
-                            let time1=time::precise_time_s();
-                            info!("record: retrieve took {}s, now calling diff", time1-time0);
-                            self.diff(line_num,actions, redundant,ret.unwrap(), realpath.as_path()).unwrap();
-                            let time2=time::precise_time_s();
-                            info!("total diff took {}s", time2-time1);
+                            if old_attr & DIRECTORY_FLAG == 0 {
+                                let time0=time::precise_time_s();
+                                let ret=self.retrieve(&current_node[3..]);
+                                let time1=time::precise_time_s();
+                                info!(target:"record_all","record: retrieve took {}s, now calling diff", time1-time0);
+                                self.diff(line_num,actions, redundant,ret.unwrap(), realpath.as_path()).unwrap();
+                                let time2=time::precise_time_s();
+                                info!(target:"record_all","total diff took {}s", time2-time1);
+                            }
                         } else {
                             panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
                         };
@@ -1364,7 +1366,7 @@ impl <'a> Repository<'a> {
                                                        flag:FOLDER_EDGE }
                                     );
                                 *line_num += 2;
-
+                                updatables.insert(l2.to_vec(),current_inode.to_vec());
                                 // Reading the file
                                 if !attr.is_dir() {
                                     nodes.clear();
@@ -1377,7 +1379,6 @@ impl <'a> Repository<'a> {
                                             Err(_) => break
                                         }
                                     }
-                                    updatables.insert(l2.to_vec(),current_inode.to_vec());
                                     let len=nodes.len();
                                     if !nodes.is_empty() {
                                         actions.push(
@@ -1964,26 +1965,31 @@ impl <'a> Repository<'a> {
             match *change {
                 Change::NewNodes { up_context:_, down_context:_,ref line_num,ref flag,ref nodes } => {
                     if flag&FOLDER_EDGE != 0 {
+                        debug!(target:"sync_file_additions","nodes.len()={}",nodes.len());
                         let mut node=[0;3+KEY_SIZE];
                         unsafe { let _=copy_nonoverlapping(internal_patch_id.as_ptr(), node.as_mut_ptr().offset(3), HASH_SIZE); }
                         let mut l0=*line_num + 1;
                         for i in 0..LINE_SIZE { node[3+HASH_SIZE+i]=(l0&0xff) as u8; l0 = l0>>8 }
                         let mut inode=[0;INODE_SIZE];
-                        let inode_l2 = match updates.get(&node[(3+HASH_SIZE)..]) {
+                        match updates.get(&node[(3+HASH_SIZE)..]) {
                             None => {
                                 // This file comes from a remote patch
                                 self.create_new_inode(&mut inode);
-                                &inode[..]
+                                debug!(target:"sync_file_additions","create {}",to_hex(&inode[..]));
                             },
-                            Some(ref inode)=>
+                            Some(ref up_inode)=> {
                                 // This file comes from a local patch
-                                &inode[..]
+                                debug!(target:"sync_file_additions","needs update {}",to_hex(&up_inode[..]));
+                                unsafe {
+                                    copy_nonoverlapping(up_inode.as_ptr(),inode.as_mut_ptr(),INODE_SIZE);
+                                }
+                            }
                         };
                         //println!("adding inode: {:?} for node {:?}",inode,node);
                         node[1]=(nodes[0][0] & 0xff) as u8;
                         node[2]=(nodes[0][1] & 0xff) as u8;
-                        self.mdb_txn.put(self.dbi_inodes,&inode_l2,&node,0).unwrap();
-                        self.mdb_txn.put(self.dbi_revinodes,&node[3..],&inode_l2,0).unwrap();
+                        self.mdb_txn.put(self.dbi_inodes,&inode,&node,0).unwrap();
+                        self.mdb_txn.put(self.dbi_revinodes,&node[3..],&inode,0).unwrap();
                     }
                 },
                 Change::Edges{..} => {}
@@ -2078,27 +2084,40 @@ impl <'a> Repository<'a> {
             let mut buf=PathBuf::from(working_copy);
             try!(retrieve_paths(self,working_copy,&ROOT_KEY,&mut buf,ROOT_INODE,&mut paths,&mut cache,&mut nfiles));
         }
+        debug!(target:"output_repository","collection done");
         //println!("dropping tree");
         {
             try!(self.mdb_txn.drop(self.dbi_tree,false));
             try!(self.mdb_txn.drop(self.dbi_revtree,false));
         };
         let mut updates=Vec::with_capacity(nfiles);
-        for (k,a) in paths {
+        // First pass: create and move everything needed.
+        for (k,a) in paths.iter() {
             let alen=a.len();
-            let mut kk=k.clone();
-            let mut filename=kk.file_name().unwrap().to_os_string();
+            let mut filename=k.file_name().unwrap().to_os_string();
             let mut i=0;
-            for (node,parent_inode,inode,oldpath,perms) in a {
+            for x in a.iter() {
+                let (_,ref parent_inode,ref inode,ref oldpath,ref perms) = *x;
                 if alen>1 { filename.push(format!("~{}",i)) }
+                let mut kk=k.clone();
                 kk.set_file_name(&filename);
-                match oldpath {
-                    Some(oldpath)=> try!(fs::rename(oldpath,&kk).map_err(Error::IoError)),
-                    None => ()
+                match *oldpath {
+                    Some(ref oldpath)=> try!(fs::rename(oldpath,&kk).map_err(Error::IoError)),
+                    None =>{
+                        if perms & DIRECTORY_FLAG != 0 {
+                            try!(std::fs::create_dir_all(&k).map_err(Error::IoError));
+                        }
+                    }
                 }
                 let mut par=parent_inode.to_vec();
                 par.extend(filename.to_str().unwrap().as_bytes());
                 updates.push((par,inode.to_vec()));
+                i+=1
+            }
+        }
+        for (k,a) in paths.iter() {
+            for x in a.iter() {
+                let (ref node,_,_,_,ref perms) = *x;
                 // Then (if file) output file
                 if perms & DIRECTORY_FLAG == 0 { // this is a real file, not a directory
                     let mut redundant_edges=vec!();
@@ -2107,19 +2126,16 @@ impl <'a> Repository<'a> {
                         let l=self.retrieve(&node).unwrap();
                         let time1=time::precise_time_s();
                         info!("unsafe_output_repository: retrieve took {}s", time1-time0);
-                        let mut f=std::fs::File::create(&kk).unwrap();
+                        let mut f=std::fs::File::create(&k).unwrap();
                         self.output_file(&mut f,l,&mut redundant_edges);
                         let time2=time::precise_time_s();
                         info!("unsafe_output_repository: output_file took {}s", time2-time1);
                     }
                     self.remove_redundant_edges(&mut redundant_edges);
-                } else {
-                    try!(std::fs::create_dir_all(&kk).map_err(Error::IoError));
                 }
-                //
-                i+=1
             }
         }
+        debug!(target:"output_repository","unsafe_output done");
         Ok(updates)
     }
 
