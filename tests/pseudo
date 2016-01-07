@@ -50,6 +50,9 @@ E
 EOF
 pijul record
 
+echo "final pull"
+cd /tmp/a
+pijul pull ../b
 
 dot -Tpdf -o /tmp/a/a.pdf /tmp/a/debug
 dot -Tpdf -o /tmp/b/b.pdf /tmp/b/debug

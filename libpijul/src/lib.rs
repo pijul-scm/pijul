@@ -1729,29 +1729,37 @@ impl <'a> Repository<'a> {
         self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
     }
 
-    fn kill_obsolete_pseudo_edges(&mut self,cursor:*mut lmdb::MdbCursor,pv:&mut [u8]) {
+    fn kill_obsolete_pseudo_edges(&mut self,cursor:*mut lmdb::MdbCursor,pv:&[u8]) {
         debug_assert!(pv.len()==1+KEY_SIZE+HASH_SIZE);
-        let mut a:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+        let mut a:[u8;KEY_SIZE]=[0;KEY_SIZE];
+        let mut b:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
+        unsafe {
+            copy_nonoverlapping(pv.as_ptr().offset(1) as *const c_void,
+                                b.as_mut_ptr().offset(1) as *mut c_void,
+                                KEY_SIZE);
+        }
         for flag in [PSEUDO_EDGE,PARENT_EDGE|PSEUDO_EDGE,
                      FOLDER_EDGE|PSEUDO_EDGE,PARENT_EDGE|PSEUDO_EDGE|FOLDER_EDGE].iter() {
+            let flag=[*flag];
             loop {
-                let flag=[*flag];
                 match unsafe { lmdb::cursor_get(cursor,&pv[1..(1+KEY_SIZE)],Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE) } {
                     Ok((_,v))=>{
                         if v[0]==flag[0] {
-                            debug!(target:"libpijul","kill_obsolete_pseudo: {}",to_hex(v));
+                            debug!(target:"kill_obsolete_pseudo","kill_obsolete_pseudo:\n  {}",to_hex(v));
                             unsafe {
-                                copy_nonoverlapping(v.as_ptr() as *const c_void,
+                                copy_nonoverlapping(v.as_ptr().offset(1) as *const c_void,
                                                     a.as_mut_ptr() as *mut c_void,
-                                                    1+KEY_SIZE+HASH_SIZE);
+                                                    KEY_SIZE);
+                                copy_nonoverlapping(v.as_ptr().offset(1+KEY_SIZE as isize) as *const c_void,
+                                                    b.as_mut_ptr().offset(1+KEY_SIZE as isize) as *mut c_void,
+                                                    HASH_SIZE);
                             }
-                            let pv0=pv[0];
-                            pv[0]= v[0] ^ PARENT_EDGE;
+                            b[0]=v[0]^PARENT_EDGE;
                             unsafe { lmdb::mdb_cursor_del(cursor,0) };
-                            self.mdb_txn.del(self.dbi_nodes,&a[1..(1+KEY_SIZE)],Some(pv)).unwrap();
-                            pv[0]=pv0;
+                            debug!(target:"kill_obsolete_pseudo","kill_obsolete_pseudo (parent):\n  {}\n  {}",to_hex(&a[..]),to_hex(&b[..]));
+                            self.mdb_txn.del(self.dbi_nodes,&a[..],Some(&b[..])).unwrap();
                         } else {
-                            debug!(target:"libpijul","not kill_obsolete_pseudo: {}",to_hex(v));
+                            //debug!(target:"kill_obsolete_pseudo","not kill_obsolete_pseudo:\n  {}",to_hex(v));
                             break
                         }
                     },
@@ -1774,115 +1782,97 @@ impl <'a> Repository<'a> {
         self.mdb_txn.put(self.dbi_branches,&current,&internal,lmdb::MDB_NODUPDATA).unwrap();
         try!(self.unsafe_apply(&patch.changes,internal,&patch.dependencies));
         let cursor= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
-        let cursor_= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
-        let mut relatives=Vec::new();
-
-        for ch in patch.changes.iter() {
-            match *ch {
-                Change::Edges{flag,..}=>{
-                    if flag&DELETED_EDGE == 0 {
-                        // Handle missing context (up and down)
-                        unimplemented!()
-                    }
-                },
-                Change::NewNodes { ref up_context,ref down_context,ref line_num, ref flag, ref nodes } => {
-                    // Handle missing contexts.
-                    debug!(target:"libpijul","apply: newnodes");
-                    let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-                    let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
-                    let mut context:[u8;KEY_SIZE]=[0;KEY_SIZE];
-                    let mut lnum0= *line_num;
-                    for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
-                    unsafe {
-                        copy_nonoverlapping(internal.as_ptr(),
-                                            pu.as_mut_ptr().offset(1),
-                                            HASH_SIZE);
-                        copy_nonoverlapping(internal.as_ptr(),
-                                            pv.as_mut_ptr().offset(1),
-                                            HASH_SIZE);
+        {
+            let mut relatives=Vec::new();
+            let mut repair_missing_context= |repo:&mut Repository,direction_up:bool,flag:u8,c:&[u8] | {
+                let mut context:[u8;KEY_SIZE]=[0;KEY_SIZE];
+                unsafe {
+                    let u= if c.len()>LINE_SIZE {
+                        repo.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
+                    } else {
+                        internal as &[u8]
                     };
-                    lnum0= *line_num;
-                    unsafe { copy_nonoverlapping(internal.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE); }
-                    for i in 0..LINE_SIZE { pu[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
-                    // missing up contexts
-                    for c in up_context {
-                        unsafe {
-                            let u= if c.len()>LINE_SIZE {
-                                self.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
-                            } else {
-                                internal as &[u8]
-                            };
-                            copy_nonoverlapping(u.as_ptr(), context.as_mut_ptr(), HASH_SIZE);
-                            copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
-                                                context.as_mut_ptr().offset(HASH_SIZE as isize),
-                                                LINE_SIZE);
+                    copy_nonoverlapping(u.as_ptr(), context.as_mut_ptr(), HASH_SIZE);
+                    copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
+                                        context.as_mut_ptr().offset(HASH_SIZE as isize),
+                                        LINE_SIZE);
+                }
+                if ! has_edge(cursor,&context[..],PARENT_EDGE,true,true) {
+                    relatives.clear();
+                    repo.find_alive_relatives(&context[..],
+                                              if direction_up {DELETED_EDGE|PARENT_EDGE} else {DELETED_EDGE},
+                                              internal,new_patches,
+                                              &mut relatives);
+                    debug!("up relatives:{} {}",to_hex(&relatives),relatives.len());
+                    let mut i=0;
+                    while i<relatives.len() {
+                        if direction_up {
+                            relatives[i+EDGE_SIZE] = (flag | PSEUDO_EDGE)^PARENT_EDGE;
+                            relatives[i]= flag | PSEUDO_EDGE;
+                        } else {
+                            relatives[i+EDGE_SIZE] = flag | PSEUDO_EDGE;
+                            relatives[i]= (flag | PSEUDO_EDGE) ^ PARENT_EDGE;
                         }
-                        if ! has_edge(cursor,&context[..],PARENT_EDGE,true,true) {
-                            relatives.clear();
-                            self.find_alive_relatives(&context[..],DELETED_EDGE|PARENT_EDGE,
-                                                      internal,new_patches,&mut relatives);
-                            debug!("up relatives:{} {}",to_hex(&relatives),relatives.len());
-                            let mut i=0;
-                            while i<relatives.len() {
-                                relatives[i+EDGE_SIZE] = (*flag | PSEUDO_EDGE)^PARENT_EDGE;
-                                relatives[i]= *flag | PSEUDO_EDGE;
-                                self.mdb_txn.put(self.dbi_nodes,
-                                                 &relatives[(i+1)..(i+1+KEY_SIZE)],
-                                                 &relatives[(i+EDGE_SIZE)..(i+2*EDGE_SIZE)],
-                                                 0).unwrap();
-                                self.mdb_txn.put(self.dbi_nodes,
-                                                 &relatives[(i+EDGE_SIZE+1)..(i+EDGE_SIZE+1+KEY_SIZE)],
-                                                 &relatives[i..(i+EDGE_SIZE)],
-                                                 0).unwrap();
-                                i+=2*EDGE_SIZE
+                        debug!(target:"missing context",
+                               "relatives:\n  {}\n  {}",
+                               to_hex(&relatives[(i)..(i+EDGE_SIZE)]),
+                               to_hex(&relatives[(i+EDGE_SIZE)..(i+2*EDGE_SIZE)]));
+                        repo.mdb_txn.put(repo.dbi_nodes,
+                                         &relatives[(i+1)..(i+1+KEY_SIZE)],
+                                         &relatives[(i+EDGE_SIZE)..(i+2*EDGE_SIZE)],
+                                         0).unwrap();
+                        repo.mdb_txn.put(repo.dbi_nodes,
+                                         &relatives[(i+EDGE_SIZE+1)..(i+EDGE_SIZE+1+KEY_SIZE)],
+                                         &relatives[i..(i+EDGE_SIZE)],
+                                         0).unwrap();
+                        i+=2*EDGE_SIZE
+                    }
+                }
+            };
+
+            for ch in patch.changes.iter() {
+                match *ch {
+                    Change::Edges{ref flag,ref edges}=>{
+
+                        if (*flag)&DELETED_EDGE == 0 {
+                            // Handle missing context (up and down)
+                            for e in edges {
+                                let mut u=[0;KEY_SIZE];
+                                let mut v=[0;KEY_SIZE];
+                                {
+                                    let int_from=try!(self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]));
+                                    let int_to=try!(self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]));
+                                    unsafe {
+                                        copy_nonoverlapping(int_from.as_ptr(),u.as_mut_ptr(),HASH_SIZE);
+                                        copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize),
+                                                            u.as_mut_ptr().offset(HASH_SIZE as isize),
+                                                            LINE_SIZE);
+                                        copy_nonoverlapping(int_to.as_ptr(),v.as_mut_ptr(),HASH_SIZE);
+                                        copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize),
+                                                            v.as_mut_ptr().offset(HASH_SIZE as isize),
+                                                            LINE_SIZE);
+                                    }
+                                }
+                                repair_missing_context(&mut self,true,*flag,&u[..]);
+                                repair_missing_context(&mut self,false,*flag,&v[..]);
                             }
                         }
-                    }
-                    lnum0= (*line_num)+nodes.len()-1;
-                    unsafe { copy_nonoverlapping(internal.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE); }
-                    for i in 0..LINE_SIZE { pu[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
-                    // missing down contexts
-                    for c in down_context {
-                        unsafe {
-                            let u= if c.len()>LINE_SIZE {
-                                self.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
-                            } else {
-                                internal as &[u8]
-                            };
-                            copy_nonoverlapping(u.as_ptr(), pv.as_mut_ptr().offset(1), HASH_SIZE);
-                            copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
-                                                pv.as_mut_ptr().offset(1+HASH_SIZE as isize),
-                                                LINE_SIZE);
+                    },
+                    Change::NewNodes { ref up_context,ref down_context,ref flag, .. } => {
+                        // Handle missing contexts.
+                        for c in up_context {
+                            repair_missing_context(&mut self,true,*flag,c)
                         }
-                        debug!(target:"missing","{}",to_hex(&pv[..]));
-                        if ! has_edge(cursor,&pv[1..(1+KEY_SIZE)],0,true,true) {
-                            relatives.clear();
-                            self.find_alive_relatives(&pv[1..(1+KEY_SIZE)],DELETED_EDGE,
-                                                      internal,new_patches,&mut relatives);
-                            debug!("down relatives:{} {}",to_hex(&relatives),relatives.len());
-                            let mut i=0;
-                            while i<relatives.len() {
-                                relatives[i+EDGE_SIZE] = *flag | PSEUDO_EDGE;
-                                relatives[i]= (*flag | PSEUDO_EDGE) ^ PARENT_EDGE;
-                                self.mdb_txn.put(self.dbi_nodes,
-                                                 &relatives[(i+1)..(i+1+KEY_SIZE)],
-                                                 &relatives[(i+EDGE_SIZE)..(i+2*EDGE_SIZE)],
-                                                 0).unwrap();
-                                self.mdb_txn.put(self.dbi_nodes,
-                                                 &relatives[(i+EDGE_SIZE+1)..(i+EDGE_SIZE+1+KEY_SIZE)],
-                                                 &relatives[i..(i+EDGE_SIZE)],
-                                                 0).unwrap();
-                                i+=2*EDGE_SIZE
-                            }
+                        for c in down_context {
+                            repair_missing_context(&mut self,false,*flag,c)
                         }
+                        debug!(target:"libpijul","apply: newnodes, done");
                     }
-                    debug!(target:"libpijul","apply: newnodes, done");
                 }
             }
         }
         unsafe {
             lmdb::mdb_cursor_close(cursor);
-            lmdb::mdb_cursor_close(cursor_);
         }
         let time2=time::precise_time_s();
         for ref dep in patch.dependencies.iter() {
@@ -1917,8 +1907,8 @@ impl <'a> Repository<'a> {
                         result.extend(a);
                         result.extend(patch_id);
 
-                        result.extend(neighbor);
-                        //buffer.extend(&neighbor[1..(1+KEY_SIZE)]);
+                        result.extend(&neighbor[0..(1+KEY_SIZE)]);
+                        result.extend(patch_id);
                     }
                 }
 
