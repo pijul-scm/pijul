@@ -431,7 +431,8 @@ impl <'a> Repository<'a> {
             let b=
                 match repo.mdb_txn.get(repo.dbi_inodes,key) {
                     Ok(Some(node)) => {
-                        debug_assert!(node.len()==KEY_SIZE);
+                        debug!(target:"remove_file","node={}",to_hex(node));
+                        debug_assert!(node.len()==3+KEY_SIZE);
                         unsafe {
                             copy_nonoverlapping(node.as_ptr() as *const c_void,
                                                 node_.as_ptr() as *mut c_void,
@@ -1229,6 +1230,7 @@ impl <'a> Repository<'a> {
                   current_inode:&[u8],
                   realpath:&mut std::path::PathBuf,
                   basename:&[u8]) {
+        debug!(target:"record_all","realpath:{:?}",realpath);
         if parent_inode.is_some() { realpath.push(str::from_utf8(&basename).unwrap()) }
 
         let mut l2=[0;LINE_SIZE];
@@ -1297,12 +1299,8 @@ impl <'a> Repository<'a> {
                             // file deleted. delete recursively
                             let mut edges=Vec::new();
                             // Now take all grandparents of l2, delete them.
-                            let mut curs_parents=unsafe {
-                                &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()
-                            };
-                            let mut curs_grandparents=unsafe {
-                                &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()
-                            };
+                            let mut curs_parents= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
+                            let mut curs_grandparents= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
                             for parent in CursIter::new(curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true,false) {
                                 edges.push(Edge {
                                     from:self.external_key(&current_node[3..]),
@@ -1311,7 +1309,7 @@ impl <'a> Repository<'a> {
                                 });
                                 for grandparent in CursIter::new(curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true,false) {
                                     edges.push(Edge {
-                                        from:self.external_key(&parent),
+                                        from:self.external_key(&parent[1..(1+KEY_SIZE)]),
                                         to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
                                         introduced_by:self.external_key(&grandparent[1+KEY_SIZE..])
                                     });
@@ -1338,6 +1336,7 @@ impl <'a> Repository<'a> {
                     },
                     Ok(None)=>{
                         // File addition, create appropriate Newnodes.
+                        debug!(target:"record_all","metadata");
                         match metadata(&realpath) {
                             Ok(attr) => {
                                 let int_attr={
@@ -1355,7 +1354,10 @@ impl <'a> Repository<'a> {
                                 name.push((int_attr & 0xff) as u8);
                                 name.extend(basename);
                                 actions.push(
-                                    Change::NewNodes { up_context: vec!(self.external_key(parent_node.unwrap())),
+                                    Change::NewNodes { up_context: vec!(
+                                        if parent_node.unwrap().len()>LINE_SIZE { self.external_key(parent_node.unwrap()) }
+                                        else {parent_node.unwrap().to_vec()}
+                                            ),
                                                        line_num: *line_num,
                                                        down_context: vec!(),
                                                        nodes: vec!(name,vec!()),
@@ -1387,9 +1389,9 @@ impl <'a> Repository<'a> {
                                             );
                                     }
                                     *line_num+=len;
-                                    Some(&l2[..])
-                                } else {
                                     None
+                                } else {
+                                    Some(&l2[..])
                                 }
                             },
                             Err(_)=>{
@@ -1404,11 +1406,11 @@ impl <'a> Repository<'a> {
             } else {
                 Some(ROOT_KEY)
             };
-
+        debug!(target:"record_all","current_node={:?}",current_node);
         match current_node {
             None => (), // we just added a file
             Some(current_node)=>{
-
+                debug!(target:"record_all","children of current_inode {}",to_hex(current_inode));
                 let cursor=self.mdb_txn.cursor(self.dbi_tree).unwrap();
                 let mut op=lmdb::Op::MDB_SET_RANGE;
                 while let Ok((k,v))=cursor.get(current_inode,None,op) {
@@ -1417,12 +1419,15 @@ impl <'a> Repository<'a> {
                                      INODE_SIZE as size_t) } != 0 {
                         break
                     } else {
-                        self.record_all(actions, line_num,redundant,updatables,
-                                        Some(current_inode), // parent_inode
-                                        Some(current_node), // parent_node
-                                        v,// current_inode
-                                        realpath,
-                                        &k[INODE_SIZE..]);
+                        if v.len()>0 { // directories have len==0
+                            debug!(target:"record_all","  child: {}",to_hex(v));
+                            self.record_all(actions, line_num,redundant,updatables,
+                                            Some(current_inode), // parent_inode
+                                            Some(current_node), // parent_node
+                                            v,// current_inode
+                                            realpath,
+                                            &k[INODE_SIZE..]);
+                        }
                         op=lmdb::Op::MDB_NEXT;
                     }
                 }
@@ -1441,7 +1446,7 @@ impl <'a> Repository<'a> {
         self.record_all(&mut actions, &mut line_num,&mut redundant,&mut updatables,
             None,None,ROOT_INODE,&mut realpath,
             &[]);
-        debug!("record done");
+        debug!(target:"record","record done");
         self.remove_redundant_edges(&mut redundant);
         debug!("remove_redundant_edges done");
         Ok((actions,updatables))
@@ -2034,7 +2039,7 @@ impl <'a> Repository<'a> {
                         };
                     if cont_b.len()<2 { panic!("node (b) too short") } else {
                         let filename=&cont_b[2..];
-                        let perms= (((cont_b[0] as usize) << 8) | (cont_b[1] as usize)) & 0x1ff;
+                        let perms= ((cont_b[0] as usize) << 8) | (cont_b[1] as usize);
                         let mut curs_c= unsafe { &mut *repo.mdb_txn.unsafe_cursor(repo.dbi_nodes).unwrap()};
                         for c in CursIter::new(curs_c,&b[1..(1+KEY_SIZE)],FOLDER_EDGE,true,true) {
                             let cv=&c[1..(1+KEY_SIZE)];
