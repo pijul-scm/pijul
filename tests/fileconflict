@@ -1,0 +1,33 @@
+#!/bin/bash
+
+rm -Rf /tmp/a /tmp/b
+
+mkdir -p /tmp/a
+cd /tmp/a
+pijul init
+
+cd /tmp
+echo "--------------- Get a b"
+pijul get a b
+
+
+cd /tmp/a
+echo "blabla" > /tmp/a/a
+pijul add a
+echo "--------------- Initial record in a"
+pijul record
+
+
+cd /tmp/b
+echo "blibli" > /tmp/b/a
+pijul add a
+echo "--------------- Initial record in b"
+pijul record
+
+cd /tmp/a
+pijul pull ../b
+cd /tmp/b
+pijul pull ../a
+
+dot -Tpdf -o /tmp/a/a.pdf /tmp/a/debug
+dot -Tpdf -o /tmp/b/b.pdf /tmp/b/debug

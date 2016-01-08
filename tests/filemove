@@ -1,0 +1,35 @@
+#!/bin/bash
+
+rm -Rf /tmp/a /tmp/b
+
+mkdir -p /tmp/a/a
+cd /tmp/a
+pijul init
+
+echo "blabla" > /tmp/a/a/b
+pijul add a/b
+echo "--------------- Initial record in a"
+pijul record
+
+cd /tmp
+echo "--------------- Get a b"
+pijul get a b
+
+cd /tmp/b
+pijul mv a x
+echo "blibli" > /tmp/b/y
+pijul add y
+echo "--------------- Record in b"
+pijul record
+echo "--------------- /record in b"
+
+cd /tmp/a
+echo "--------------- Record in a"
+pijul mv a z
+pijul record
+echo "--------------- /record in a"
+echo "--------------- Final pull from a"
+pijul pull ../b
+
+dot -Tpdf -o /tmp/a/a.pdf /tmp/a/debug
+dot -Tpdf -o /tmp/b/b.pdf /tmp/b/debug

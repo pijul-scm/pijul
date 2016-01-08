@@ -2310,7 +2310,14 @@ impl <'a> Repository<'a> {
         }
         debug!(target:"output_repository","now outputting files");
         for (k,a) in paths.iter() {
+            let alen=a.len();
+            debug!(target:"output_repository","output: k={:?}, alen={}",k,alen);
+            let mut i=0;
             for x in a.iter() {
+                let mut filename=k.file_name().unwrap().to_os_string();
+                if alen>1 { filename.push(format!("~{}",i)) }
+                let mut kk=k.clone();
+                kk.set_file_name(&filename);
                 let (ref node,_,_,_,ref perms) = *x;
                 // Then (if file) output file
                 if perms & DIRECTORY_FLAG == 0 { // this is a real file, not a directory
@@ -2320,18 +2327,19 @@ impl <'a> Repository<'a> {
                         let l=self.retrieve(&node).unwrap();
                         let time1=time::precise_time_s();
                         info!(target:"output_repository","unsafe_output_repository: retrieve took {}s", time1-time0);
-                        debug!(target:"output_repository","create file: {:?}",k);
+                        debug!(target:"output_repository","create file: {:?}",kk);
                         if fs::metadata(k.parent().unwrap()).is_err() {
-                            println!("Output repository: there is probably a name conflict on directory {:?} and something else, this version of Pijul doesn't say (even though it would be easy).", k.parent().unwrap());
-                            try!(std::fs::create_dir_all(k.parent().unwrap()).map_err(Error::IoError));
+                            println!("Output repository: there is probably a name conflict on directory {:?} and something else, this version of Pijul doesn't say (even though it would be easy).", kk.parent().unwrap());
+                            try!(std::fs::create_dir_all(kk.parent().unwrap()).map_err(Error::IoError));
                         }
-                        let mut f=std::fs::File::create(&k).unwrap();
+                        let mut f=std::fs::File::create(&kk).unwrap();
                         self.output_file(&mut f,l,&mut redundant_edges);
                         let time2=time::precise_time_s();
                         info!(target:"output_repository","unsafe_output_repository: output_file took {}s", time2-time1);
                     }
                     self.remove_redundant_edges(&mut redundant_edges);
                 }
+                i+=1
             }
         }
         debug!(target:"output_repository","unsafe_output done");
