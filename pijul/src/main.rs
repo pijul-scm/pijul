@@ -52,6 +52,7 @@ fn main() {
                                "pull" => pull,
                                "get" => get,
                                "remove" => remove,
+                               "mv" => mv,
                                "ls" => ls,
                                "revert" => revert
                                );

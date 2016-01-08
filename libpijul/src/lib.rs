@@ -286,8 +286,10 @@ impl <'a> Repository<'a> {
             buf.extend(ss.as_bytes());
             let mut broken=false;
             {
+                debug!(target:"mv","mdb_get: dbi_tree, {}",to_hex(&buf));
                 match self.mdb_txn.get(self.dbi_tree,&buf) {
                     Ok(Some(v))=> {
+                        debug!(target:"mv","got Some({})",to_hex(v));
                         if cs.is_none() {
                             return Err(Error::AlreadyAdded)
                         } else {
@@ -335,26 +337,31 @@ impl <'a> Repository<'a> {
 
         (*inode).extend(ROOT_INODE);
         for c in path.components() {
+            inode.truncate(INODE_SIZE);
             inode.extend(c.as_os_str().to_str().unwrap().as_bytes());
+            debug!(target:"mv","first get: {}",to_hex(inode));
             match self.mdb_txn.get(self.dbi_tree,&inode) {
                 Ok(Some(x))=> {
+                    debug!(target:"mv","got some: {}",to_hex(x));
                     std::mem::swap(inode,parent);
                     (*inode).clear();
                     (*inode).extend(x);
                 },
                 _=>{
+                    debug!(target:"mv","got none");
                     return Err(Error::FileNotInRepo(path.to_path_buf()))
                 }
             }
         }
         // Now the last inode is in "*inode"
         let basename=path.file_name().unwrap();
+        (*parent).truncate(INODE_SIZE);
         (*parent).extend(basename.to_str().unwrap().as_bytes());
 
+        debug!(target:"mv","mdb_txn.del parent={:?}",to_hex(parent));
         try!(self.mdb_txn.del(self.dbi_tree,parent,None));
-
-        self.add_inode(&Some(inode),path_,is_dir).unwrap();
-
+        debug!(target:"mv","inode={} path_={:?}",to_hex(inode),path_);
+        try!(self.add_inode(&Some(inode),path_,is_dir));
         let vv=
             match self.mdb_txn.get(self.dbi_inodes,inode) {
                 Ok(Some(v))=> {
@@ -1230,8 +1237,9 @@ impl <'a> Repository<'a> {
                   current_inode:&[u8],
                   realpath:&mut std::path::PathBuf,
                   basename:&[u8]) {
-        debug!(target:"record_all","realpath:{:?}",realpath);
+
         if parent_inode.is_some() { realpath.push(str::from_utf8(&basename).unwrap()) }
+        debug!(target:"record_all","realpath:{:?}",realpath);
 
         let mut l2=[0;LINE_SIZE];
         let current_node=
@@ -1261,7 +1269,7 @@ impl <'a> Repository<'a> {
                             for parent in CursIter::new(curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true,false) {
                                 for grandparent in CursIter::new(curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true,false) {
                                     edges.push(Edge {
-                                        from:self.external_key(&parent),
+                                        from:self.external_key(&parent[1..(1+KEY_SIZE)]),
                                         to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
                                         introduced_by:self.external_key(&grandparent[1+KEY_SIZE..])
                                     });
@@ -1285,15 +1293,16 @@ impl <'a> Repository<'a> {
                                                    flag:FOLDER_EDGE }
                                 );
                             *line_num += 1;
-                            info!("retrieving");
-                            let time0=time::precise_time_s();
-                            let ret=self.retrieve(&current_node[3..]);
-                            let time1=time::precise_time_s();
-                            info!("retrieve took {}s, now calling diff", time1-time0);
-                            self.diff(line_num,actions, redundant,ret.unwrap(), realpath.as_path()).unwrap();
-                            let time2=time::precise_time_s();
-                            info!("total diff took {}s", time2-time1);
-
+                            if old_attr & DIRECTORY_FLAG == 0 {
+                                info!("retrieving");
+                                let time0=time::precise_time_s();
+                                let ret=self.retrieve(&current_node[3..]);
+                                let time1=time::precise_time_s();
+                                info!("retrieve took {}s, now calling diff", time1-time0);
+                                self.diff(line_num,actions, redundant,ret.unwrap(), realpath.as_path()).unwrap();
+                                let time2=time::precise_time_s();
+                                info!("total diff took {}s", time2-time1);
+                            }
 
                         } else if current_node[0]==2 {
                             let mut edges=Vec::new();
@@ -1889,7 +1898,12 @@ impl <'a> Repository<'a> {
                                                                 LINE_SIZE);
                                         }
                                     }
-                                    if has_edge(cursor_,&u[..],0,true,true) {
+                                    let u_is_empty=
+                                        match try!(self.mdb_txn.get(self.dbi_contents,&u[..])) {
+                                            Some(cont)=>cont.len()==0,
+                                            None=>true
+                                        };
+                                    if u_is_empty && has_edge(cursor_,&u[..],0,true,true) {
                                         // If a deleted folder edge has alive children, reconnect it to the root.
                                         try!(self.reconnect_zombie_folder(&u[..],internal));
                                     }
@@ -2192,10 +2206,10 @@ impl <'a> Repository<'a> {
         // First pass: create and move everything needed.
         for (k,a) in paths.iter() {
             let alen=a.len();
-            let mut filename=k.file_name().unwrap().to_os_string();
             let mut i=0;
             for x in a.iter() {
                 let (_,ref parent_inode,ref inode,ref oldpath,ref perms) = *x;
+                let mut filename=k.file_name().unwrap().to_os_string();
                 if alen>1 { filename.push(format!("~{}",i)) }
                 let mut kk=k.clone();
                 debug!(target:"output_repository","output: {:?}",filename);

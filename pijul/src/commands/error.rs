@@ -10,7 +10,9 @@ pub enum Error{
     InARepository,
     PathNotFound(PathBuf),
     IoError(io::Error),
-    Repository(libpijul::error::Error)
+    Repository(libpijul::error::Error),
+    NotEnoughArguments,
+    MoveTargetNotDirectory
 }
 
 impl fmt::Display for Error {
@@ -20,7 +22,9 @@ impl fmt::Display for Error {
             Error::InARepository => write!(f, "In a repository"),
             Error::PathNotFound(ref p) => write!(f, "Path not found: {}", p.to_string_lossy()),
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
-            Error::Repository(ref err) => write!(f, "Repository error: {}", err)
+            Error::Repository(ref err) => write!(f, "Repository error: {}", err),
+            Error::NotEnoughArguments => write!(f, "Not enough arguments"),
+            Error::MoveTargetNotDirectory => write!(f, "Target of mv is not a directory")
         }
     }
 }
@@ -32,7 +36,9 @@ impl error::Error for Error {
             Error::InARepository => "In a repository",
             Error::PathNotFound(_) => "path not found",
             Error::IoError(ref err) => error::Error::description(err),
-            Error::Repository(ref err) => libpijul::error::Error::description(err)
+            Error::Repository(ref err) => libpijul::error::Error::description(err),
+            Error::NotEnoughArguments => "Not enough arguments",
+            Error::MoveTargetNotDirectory => "Target of mv is not a directory"
         }
     }
 
@@ -42,7 +48,9 @@ impl error::Error for Error {
             Error::Repository(ref err) => Some(err),
             Error::PathNotFound(_) => None,
             Error::NotInARepository => None,
-            Error::InARepository => None
+            Error::InARepository => None,
+            Error::NotEnoughArguments => None,
+            Error::MoveTargetNotDirectory => None
         }
     }
 }
