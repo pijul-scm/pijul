@@ -1,0 +1,43 @@
+#!/bin/bash
+
+cd /tmp
+rm -Rf a b
+mkdir -p a/c
+cd /tmp/a
+pijul init
+
+cat << EOF > /tmp/a/c/d
+A
+B
+C
+D
+E
+EOF
+
+pijul add c/d
+pijul record
+
+cd /tmp
+pijul get a b
+
+cd b
+cat << EOF > /tmp/b/c/d
+A
+B
+C
+X
+D
+E
+EOF
+pijul record
+
+cd /tmp/a
+pijul remove c
+pijul record
+pijul pull ../b
+
+cd /tmp/b
+pijul pull ../a
+
+dot -Tpdf -o /tmp/a/a.pdf /tmp/a/debug
+dot -Tpdf -o /tmp/b/b.pdf /tmp/b/debug
