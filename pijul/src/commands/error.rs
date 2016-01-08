@@ -2,13 +2,11 @@ extern crate libpijul;
 use std::io;
 use std::error;
 use std::fmt;
-use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum Error{
     NotInARepository,
     InARepository,
-    PathNotFound(PathBuf),
     IoError(io::Error),
     Repository(libpijul::error::Error),
     NotEnoughArguments,
@@ -20,7 +18,6 @@ impl fmt::Display for Error {
         match *self {
             Error::NotInARepository => write!(f, "Not in a repository"),
             Error::InARepository => write!(f, "In a repository"),
-            Error::PathNotFound(ref p) => write!(f, "Path not found: {}", p.to_string_lossy()),
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
             Error::Repository(ref err) => write!(f, "Repository error: {}", err),
             Error::NotEnoughArguments => write!(f, "Not enough arguments"),
@@ -34,7 +31,6 @@ impl error::Error for Error {
         match *self {
             Error::NotInARepository => "not in a repository",
             Error::InARepository => "In a repository",
-            Error::PathNotFound(_) => "path not found",
             Error::IoError(ref err) => error::Error::description(err),
             Error::Repository(ref err) => libpijul::error::Error::description(err),
             Error::NotEnoughArguments => "Not enough arguments",
@@ -46,7 +42,6 @@ impl error::Error for Error {
         match *self {
             Error::IoError(ref err) => Some(err),
             Error::Repository(ref err) => Some(err),
-            Error::PathNotFound(_) => None,
             Error::NotInARepository => None,
             Error::InARepository => None,
             Error::NotEnoughArguments => None,

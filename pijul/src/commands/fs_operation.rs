@@ -4,7 +4,7 @@ extern crate libpijul;
 use clap::ArgMatches;
 use self::libpijul::{Repository};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
-use std::path::{Path,PathBuf};
+use std::path::{Path};
 use std::fs::{metadata,rename};
 use commands::error;
 
@@ -106,13 +106,9 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                 },
                 Operation::Remove => {
                     for file in &files[..] {
-                        let m=metadata(file).unwrap();
                         let p=pwd.join(*file);
                         let file=iter_after(p.components(), r.components()).unwrap();
-                        match repo.remove_file(file.as_path()) {
-                            Ok(_) => (),
-                            Err(e) => return Err(error::Error::Repository(e))
-                        }
+                        try!(repo.remove_file(file.as_path()))
                     }
                 }
             }
