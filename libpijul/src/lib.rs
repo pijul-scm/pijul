@@ -32,6 +32,7 @@ use std::ptr;
 use std::str;
 
 use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
 use std::path::{PathBuf,Path};
 
@@ -1046,6 +1047,8 @@ impl <'a> Repository<'a> {
     }
 
     pub fn register_hash(&mut self,internal:&[u8],external:&[u8]){
+        debug!(target:"apply","registering patch\n  {}\n  as\n  {}",
+               to_hex(external),to_hex(internal));
         self.mdb_txn.put(self.dbi_external,internal,external,0).unwrap();
         self.mdb_txn.put(self.dbi_internal,external,internal,0).unwrap();
     }
@@ -1254,6 +1257,8 @@ impl <'a> Repository<'a> {
                             let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
                             (if p==0 { old_attr } else { p }) | is_dir
                         };
+                        debug!(target:"record_all","current_node[0]={},old_attr={},int_attr={}",
+                               current_node[0],old_attr,int_attr);
                         if current_node[0]==1 || old_attr!=int_attr {
                             // file moved
 
@@ -1473,7 +1478,7 @@ impl <'a> Repository<'a> {
         self.record_all(&mut actions, &mut line_num,&mut redundant,&mut updatables,
             None,None,ROOT_INODE,&mut realpath,
             &[]);
-        debug!(target:"record","record done");
+        debug!(target:"record","record done, {} changes", actions.len());
         self.remove_redundant_edges(&mut redundant);
         debug!("remove_redundant_edges done");
         Ok((actions,updatables))
@@ -1511,6 +1516,7 @@ impl <'a> Repository<'a> {
         let cursor= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let mut parents:Vec<u8>=Vec::new();
         let mut children:Vec<u8>=Vec::new();
+        debug!(target:"apply","unsafe_apply (patch {})",to_hex(internal_patch_id));
         for ch in changes {
             match *ch {
                 Change::Edges{ref flag, ref edges} => {
@@ -1545,7 +1551,7 @@ impl <'a> Repository<'a> {
                     }
                     // Then add the new edges.
                     // Then add zombies and pseudo-edges if needed.
-                    debug!(target:"apply","edges");
+                    debug!(target:"apply","edges (patch {})",to_hex(internal_patch_id));
                     parents.clear();
                     children.clear();
                     for e in edges {
@@ -2073,16 +2079,18 @@ impl <'a> Repository<'a> {
 
 
     pub fn sync_file_additions(&mut self, changes:&[Change], updates:&HashMap<LocalKey,Inode>, internal_patch_id:&[u8]){
+        let mut node=[0;3+KEY_SIZE];
+        let mut node_=[0;3+KEY_SIZE];
+        let mut inode=[0;INODE_SIZE];
+        let mut cursor= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         for change in changes {
             match *change {
-                Change::NewNodes { up_context:_, down_context:_,ref line_num,ref flag,ref nodes } => {
+                Change::NewNodes { ref line_num,ref flag,ref nodes,.. } => {
                     if flag&FOLDER_EDGE != 0 {
                         debug!(target:"sync_file_additions","nodes.len()={}",nodes.len());
-                        let mut node=[0;3+KEY_SIZE];
                         unsafe { let _=copy_nonoverlapping(internal_patch_id.as_ptr(), node.as_mut_ptr().offset(3), HASH_SIZE); }
                         let mut l0=*line_num + 1;
                         for i in 0..LINE_SIZE { node[3+HASH_SIZE+i]=(l0&0xff) as u8; l0 = l0>>8 }
-                        let mut inode=[0;INODE_SIZE];
                         match updates.get(&node[(3+HASH_SIZE)..]) {
                             None => {
                                 // This file comes from a remote patch
@@ -2098,14 +2106,63 @@ impl <'a> Repository<'a> {
                             }
                         };
                         //println!("adding inode: {:?} for node {:?}",inode,node);
+                        node[0]=0;
                         node[1]=(nodes[0][0] & 0xff) as u8;
                         node[2]=(nodes[0][1] & 0xff) as u8;
                         self.mdb_txn.put(self.dbi_inodes,&inode,&node,0).unwrap();
                         self.mdb_txn.put(self.dbi_revinodes,&node[3..],&inode,0).unwrap();
                     }
                 },
-                Change::Edges{..} => {}
+                Change::Edges{ ref flag, ref edges} => {
+                    if flag&FOLDER_EDGE != 0 {
+                        for e in edges {
+                            {
+                                let no= if flag&PARENT_EDGE==0 { &e.to } else { &e.from };
+                                let to= self.internal_hash(&no[0..(no.len()-LINE_SIZE)]).unwrap();
+                                debug!(target:"sync","to={}",to_hex(&to));
+                                unsafe {
+                                    copy_nonoverlapping(to.as_ptr(),node.as_mut_ptr().offset(3),HASH_SIZE);
+                                    copy_nonoverlapping(no.as_ptr().offset((no.len()-LINE_SIZE) as isize),
+                                                        node.as_mut_ptr().offset((3+HASH_SIZE) as isize),
+                                                        LINE_SIZE);
+                                }
+                            }
+                            let mut unique_child= true;
+                            for child in CursIter::new(cursor,&node[3..],FOLDER_EDGE,true,false) {
+                                // Invariant: there "should be" only one child here.
+                                debug_assert!(unique_child);
+                                unique_child=false;
+                                //
+                                let needs_update= {
+                                    match self.mdb_txn.get(self.dbi_revinodes,&child[1..(1+KEY_SIZE)]).unwrap() {
+                                        None=>false,
+                                        Some(inode_)=> {
+                                            let old_node = self.mdb_txn.get(self.dbi_inodes,&inode_).unwrap().unwrap();
+                                            unsafe {
+                                                copy_nonoverlapping(inode_.as_ptr(),
+                                                                    inode.as_mut_ptr(),
+                                                                    INODE_SIZE);
+                                                copy_nonoverlapping(old_node.as_ptr(),
+                                                                    node_.as_mut_ptr(),
+                                                                    3+KEY_SIZE);
+                                                node_[0]=0;
+                                            }
+                                            true
+                                        }
+                                    }
+                                };
+                                if needs_update {
+                                    self.mdb_txn.put(self.dbi_inodes,&inode,&node_,0).unwrap();
+                                    self.mdb_txn.put(self.dbi_revinodes,&node_[3..],&inode,0).unwrap();
+                                }
+                            }
+                        }
+                    }
+                }
             }
+        }
+        unsafe {
+            lmdb::mdb_cursor_close(cursor);
         }
     }
 
@@ -2143,23 +2200,27 @@ impl <'a> Repository<'a> {
         fn retrieve_paths<'a> (repo:&'a Repository,
                                working_copy:&Path,
                                key:&'a [u8],path:&mut PathBuf,parent_inode:&'a [u8],
-                               paths:&mut HashMap<PathBuf,Vec<(Vec<u8>,Vec<u8>,Vec<u8>,Option<PathBuf>,usize)>>,
+                               paths:&mut BTreeMap<PathBuf,Vec<(Vec<u8>,Vec<u8>,Vec<u8>,Option<PathBuf>,usize)>>,
                                cache:&mut HashSet<&'a [u8]>,
                                nfiles:&mut usize)-> Result<(),Error> {
             if !cache.contains(key) {
                 cache.insert(key);
                 let mut curs_b= unsafe { &mut *repo.mdb_txn.unsafe_cursor(repo.dbi_nodes).unwrap()};
+                debug!(target:"output_repository","key={}",to_hex(key));
                 for b in CursIter::new(curs_b,key,FOLDER_EDGE,true,true) {
+                    debug!(target:"output_repository","b={}",to_hex(b));
                     let cont_b=
                         match try!(repo.mdb_txn.get(repo.dbi_contents,&b[1..(1+KEY_SIZE)])) {
                             Some(cont_b)=>cont_b,
                             None=>&[][..]
                         };
+                    debug!(target:"output_repository","path:{:?} cont_b={}",path,std::str::from_utf8(&cont_b[2..]).unwrap());
                     if cont_b.len()<2 { panic!("node (b) too short") } else {
                         let filename=&cont_b[2..];
                         let perms= ((cont_b[0] as usize) << 8) | (cont_b[1] as usize);
                         let mut curs_c= unsafe { &mut *repo.mdb_txn.unsafe_cursor(repo.dbi_nodes).unwrap()};
                         for c in CursIter::new(curs_c,&b[1..(1+KEY_SIZE)],FOLDER_EDGE,true,true) {
+                            debug!(target:"output_repository","c={}",to_hex(c));
                             let cv=&c[1..(1+KEY_SIZE)];
                             match try!(repo.mdb_txn.get(repo.dbi_revinodes,cv)) {
                                 Some(inode)=>{
@@ -2168,12 +2229,12 @@ impl <'a> Repository<'a> {
                                         let vec=paths.entry(path.clone()).or_insert(Vec::new());
                                         let mut buf=PathBuf::from(working_copy);
                                         *nfiles+=1;
-                                        vec.push((c[1..(1+KEY_SIZE)].to_vec(),parent_inode.to_vec(),inode.to_vec(),
+                                        vec.push((cv.to_vec(),parent_inode.to_vec(),inode.to_vec(),
                                                   if repo.filename_of_inode(inode,&mut buf) {Some(buf)} else { None },
                                                   perms))
                                     }
                                     if perms & DIRECTORY_FLAG != 0 { // is_directory
-                                        try!(retrieve_paths(repo,working_copy,&c[1..(1+KEY_SIZE)],path,inode,paths,cache,nfiles));
+                                        try!(retrieve_paths(repo,working_copy,cv,path,inode,paths,cache,nfiles));
                                     }
                                     path.pop();
                                 },
@@ -2184,12 +2245,13 @@ impl <'a> Repository<'a> {
                         }
                         unsafe { lmdb::mdb_cursor_close(curs_c) }
                     }
+                    debug!(target:"output_repository","/b");
                 }
                 unsafe { lmdb::mdb_cursor_close(curs_b) }
             }
             Ok(())
         }
-        let mut paths=HashMap::new();
+        let mut paths=BTreeMap::new();
         let mut nfiles=0;
         {
             let mut cache=HashSet::new();
@@ -2203,9 +2265,11 @@ impl <'a> Repository<'a> {
             try!(self.mdb_txn.drop(self.dbi_revtree,false));
         };
         let mut updates=Vec::with_capacity(nfiles);
+        let mut new_paths:HashMap<&Path,PathBuf>=HashMap::new();
         // First pass: create and move everything needed.
         for (k,a) in paths.iter() {
             let alen=a.len();
+            debug!(target:"output_repository","output: k={:?}, alen={}",k,alen);
             let mut i=0;
             for x in a.iter() {
                 let (_,ref parent_inode,ref inode,ref oldpath,ref perms) = *x;
@@ -2215,7 +2279,23 @@ impl <'a> Repository<'a> {
                 debug!(target:"output_repository","output: {:?}",filename);
                 kk.set_file_name(&filename);
                 match *oldpath {
-                    Some(ref oldpath) if i==0 => try!(fs::rename(oldpath,&kk).map_err(Error::IoError)),
+                    Some(ref oldpath) if i==0 => {
+                        debug!(target:"output_repository","oldpath: {:?}, newpath: {:?}",oldpath,kk);
+                        {
+                            let oldpath_=oldpath.as_path();
+                            debug!(target:"output_repository","oldpath.parent(): {:?} {:?}",oldpath.parent(),new_paths.get(oldpath.parent().unwrap()));
+                            let oldpath_=match new_paths.get(oldpath.parent().unwrap()) {
+                                None=>PathBuf::from(oldpath_),
+                                Some(dirname)=>{
+                                    let base:&std::ffi::OsStr=oldpath.file_name().unwrap();
+                                    dirname.as_path().join(base)
+                                }
+                            };
+                            debug!(target:"output_repository","oldpath_: {:?}",oldpath_);
+                            let _ = fs::rename(&oldpath_,&kk).map_err(Error::IoError);
+                        }
+                        new_paths.insert(oldpath,kk);
+                    },
                     _ =>{
                         if perms & DIRECTORY_FLAG != 0 {
                             try!(std::fs::create_dir_all(&k).map_err(Error::IoError));
@@ -2228,6 +2308,7 @@ impl <'a> Repository<'a> {
                 i+=1
             }
         }
+        debug!(target:"output_repository","now outputting files");
         for (k,a) in paths.iter() {
             for x in a.iter() {
                 let (ref node,_,_,_,ref perms) = *x;
@@ -2238,11 +2319,16 @@ impl <'a> Repository<'a> {
                         let time0=time::precise_time_s();
                         let l=self.retrieve(&node).unwrap();
                         let time1=time::precise_time_s();
-                        info!("unsafe_output_repository: retrieve took {}s", time1-time0);
+                        info!(target:"output_repository","unsafe_output_repository: retrieve took {}s", time1-time0);
+                        debug!(target:"output_repository","create file: {:?}",k);
+                        if fs::metadata(k.parent().unwrap()).is_err() {
+                            println!("Output repository: there is probably a name conflict on directory {:?} and something else, this version of Pijul doesn't say (even though it would be easy).", k.parent().unwrap());
+                            try!(std::fs::create_dir_all(k.parent().unwrap()).map_err(Error::IoError));
+                        }
                         let mut f=std::fs::File::create(&k).unwrap();
                         self.output_file(&mut f,l,&mut redundant_edges);
                         let time2=time::precise_time_s();
-                        info!("unsafe_output_repository: output_file took {}s", time2-time1);
+                        info!(target:"output_repository","unsafe_output_repository: output_file took {}s", time2-time1);
                     }
                     self.remove_redundant_edges(&mut redundant_edges);
                 }
@@ -2262,6 +2348,7 @@ impl <'a> Repository<'a> {
 
 
     pub fn output_repository(mut self, working_copy:&Path, pending:&Patch) -> Result<Repository<'a>,Error>{
+        debug!(target:"output_repository","begin output repository");
         unsafe {
             let mut internal=[0;HASH_SIZE];
             let parent_txn=self.mdb_txn.txn;
@@ -2273,12 +2360,13 @@ impl <'a> Repository<'a> {
             }
             self.mdb_txn.txn=txn;
             self.new_internal(&mut internal[..]);
-
+            debug!(target:"output_repository","pending patch: {}",to_hex(&internal[..]));
             let mut repository=self.apply(pending,&internal[..],&HashSet::new()).unwrap();
             let updates=try!(repository.unsafe_output_repository(working_copy));
             lmdb::mdb_txn_abort(txn);
             repository.mdb_txn.txn=parent_txn;
             repository.update_tree(updates);
+            debug!(target:"output_repository","end output repository");
             Ok(repository)
         }
     }

@@ -114,7 +114,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 match hash_child.join() {
                     Ok(Ok(hash))=> {
                         repo.register_hash(&internal[..],&hash[..]);
-                        debug!(target:"pull","hash={}, local={}",to_hex(&hash),to_hex(&internal));
+                        debug!(target:"record","hash={}, local={}",to_hex(&hash),to_hex(&internal));
                         //println!("writing changes {:?}",internal);
                         repo.write_changes_file(&branch_changes_file(r,repo.get_current_branch())).unwrap();
                         let t3=time::precise_time_s();
