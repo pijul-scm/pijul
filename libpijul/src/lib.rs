@@ -1296,17 +1296,11 @@ impl <'a> Repository<'a> {
 
 
                         } else if current_node[0]==2 {
-                            // file deleted. delete recursively
                             let mut edges=Vec::new();
                             // Now take all grandparents of l2, delete them.
                             let mut curs_parents= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
                             let mut curs_grandparents= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
                             for parent in CursIter::new(curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true,false) {
-                                edges.push(Edge {
-                                    from:self.external_key(&current_node[3..]),
-                                    to:self.external_key(&parent[1..(1+KEY_SIZE)]),
-                                    introduced_by:self.external_key(&parent[1+KEY_SIZE..])
-                                });
                                 for grandparent in CursIter::new(curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true,false) {
                                     edges.push(Edge {
                                         from:self.external_key(&parent[1..(1+KEY_SIZE)]),
@@ -1315,12 +1309,35 @@ impl <'a> Repository<'a> {
                                     });
                                 }
                             }
+
+                            // file deleted. delete recursively
+                            let mut file_edges=vec!();
+                            {
+                                debug!(target:"record_all","del={}",to_hex(current_node));
+                                let ret = self.retrieve(&current_node[3..]).unwrap();
+                                for l in ret.lines {
+                                    if l.key.len()>0 {
+                                        let ext_key=self.external_key(l.key);
+                                        debug!(target:"record_all","ext_key={}",to_hex(&ext_key));
+                                        for v in CursIter::new(curs_parents,l.key,PARENT_EDGE,true,false) {
+                                            debug!(target:"record_all","v={}",to_hex(v));
+                                            if v[0] & FOLDER_EDGE != 0 { &mut edges } else { &mut file_edges }
+                                            .push(Edge { from:ext_key.clone(),
+                                                         to:self.external_key(&v[1..(1+KEY_SIZE)]),
+                                                         introduced_by:self.external_key(&v[(1+KEY_SIZE)..]) });
+                                        }
+                                    }
+                                }
+                            }
                             unsafe {
                                 lmdb::mdb_cursor_close(curs_parents);
                                 lmdb::mdb_cursor_close(curs_grandparents);
                             }
+
                             actions.push(Change::Edges{edges:edges,flag:FOLDER_EDGE|PARENT_EDGE|DELETED_EDGE});
-                            unimplemented!() // Remove all known vertices from this file, for else "missing context" conflicts will not be detected.
+                            if file_edges.len()>0 {
+                                actions.push(Change::Edges{edges:file_edges,flag:PARENT_EDGE|DELETED_EDGE});
+                            }
                         } else if current_node[0]==0 {
                             if old_attr & DIRECTORY_FLAG == 0 {
                                 let time0=time::precise_time_s();
@@ -1334,7 +1351,7 @@ impl <'a> Repository<'a> {
                         } else {
                             panic!("record: wrong inode tag (in base INODES) {}", current_node[0])
                         };
-                        Some(current_node)
+                        Some(&current_node[3..])
                     },
                     Ok(None)=>{
                         // File addition, create appropriate Newnodes.
@@ -1536,8 +1553,8 @@ impl <'a> Repository<'a> {
                                 debug!(target:"apply","zombie:\n  {}\n  {}",to_hex(&pu),to_hex(&pv));
                                 try!(self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA));
                                 try!(self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA));
-                            } else {
-                                // collect alive parents/children of hunk (now done in apply).
+                            } else if *flag & FOLDER_EDGE == 0 {
+                                // collect alive parents/children of hunk
                                 let (pu,pv)= if *flag&PARENT_EDGE==0 { (&pu,&pv) } else { (&pv,&pu) };
                                 debug!(target:"apply","pu has_edge\n  {}",to_hex(&pu[1..(1+KEY_SIZE)]));
                                 if has_edge(cursor,&pu[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
@@ -1775,7 +1792,7 @@ impl <'a> Repository<'a> {
         }
     }
 
-    /// Applies a patch to a repository.
+    /// Applies a patch to a repository. "new_patches" are patches that just this repository has, and the remote repository doesn't have.
     pub fn apply<'b>(mut self, patch:&Patch, internal:&'b [u8], new_patches:&HashSet<&[u8]>)->Result<Repository<'a>,Error> {
         let current=self.get_current_branch().to_vec();
         {
@@ -1788,9 +1805,11 @@ impl <'a> Repository<'a> {
         self.mdb_txn.put(self.dbi_branches,&current,&internal,lmdb::MDB_NODUPDATA).unwrap();
         try!(self.unsafe_apply(&patch.changes,internal,&patch.dependencies));
         let cursor= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
+        let cursor_= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         {
             let mut relatives=Vec::new();
-            let mut repair_missing_context= |repo:&mut Repository,direction_up:bool,flag:u8,c:&[u8] | {
+            // repair_missing_context adds all zombie edges needed.
+            let mut repair_missing_context= |repo:&mut Repository,direction_up:bool,c:&[u8] | {
                 let mut context:[u8;KEY_SIZE]=[0;KEY_SIZE];
                 unsafe {
                     let u= if c.len()>LINE_SIZE {
@@ -1803,22 +1822,16 @@ impl <'a> Repository<'a> {
                                         context.as_mut_ptr().offset(HASH_SIZE as isize),
                                         LINE_SIZE);
                 }
-                if ! has_edge(cursor,&context[..],PARENT_EDGE,true,true) {
+                debug!(target:"missing context","{} context:{}",direction_up,to_hex(&context[..]));
+                if if direction_up { !has_edge(cursor,&context[..],PARENT_EDGE,true,true) } else { has_edge(cursor,&context[..],PARENT_EDGE|DELETED_EDGE,true,true) } {
                     relatives.clear();
                     repo.find_alive_relatives(&context[..],
                                               if direction_up {DELETED_EDGE|PARENT_EDGE} else {DELETED_EDGE},
                                               internal,new_patches,
                                               &mut relatives);
-                    debug!("up relatives:{} {}",to_hex(&relatives),relatives.len());
+                    debug!(target:"missing context","up relatives:{} {}",to_hex(&relatives),relatives.len());
                     let mut i=0;
                     while i<relatives.len() {
-                        if direction_up {
-                            relatives[i+EDGE_SIZE] = (flag | PSEUDO_EDGE)^PARENT_EDGE;
-                            relatives[i]= flag | PSEUDO_EDGE;
-                        } else {
-                            relatives[i+EDGE_SIZE] = flag | PSEUDO_EDGE;
-                            relatives[i]= (flag | PSEUDO_EDGE) ^ PARENT_EDGE;
-                        }
                         debug!(target:"missing context",
                                "relatives:\n  {}\n  {}",
                                to_hex(&relatives[(i)..(i+EDGE_SIZE)]),
@@ -1836,15 +1849,16 @@ impl <'a> Repository<'a> {
                 }
             };
 
+            let mut u=[0;KEY_SIZE];
+            let mut v=[0;KEY_SIZE];
             for ch in patch.changes.iter() {
                 match *ch {
                     Change::Edges{ref flag,ref edges}=>{
 
                         if (*flag)&DELETED_EDGE == 0 {
                             // Handle missing context (up and down)
+                            // Untested (how to generate non-deleted Change::Edges?)
                             for e in edges {
-                                let mut u=[0;KEY_SIZE];
-                                let mut v=[0;KEY_SIZE];
                                 {
                                     let int_from=try!(self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]));
                                     let int_to=try!(self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]));
@@ -1859,18 +1873,36 @@ impl <'a> Repository<'a> {
                                                             LINE_SIZE);
                                     }
                                 }
-                                repair_missing_context(&mut self,true,*flag,&u[..]);
-                                repair_missing_context(&mut self,false,*flag,&v[..]);
+                                repair_missing_context(&mut self,(*flag)&PARENT_EDGE != 0,&u[..]);
+                                repair_missing_context(&mut self,(*flag)&PARENT_EDGE == 0,&v[..]);
                             }
-                        }
+                        } else // DELETED_EDGE
+                            if (*flag) & FOLDER_EDGE != 0 {
+                                for e in edges {
+                                    {
+                                        let dest= if *flag & PARENT_EDGE != 0 { &e.from } else { &e.to };
+                                        let int_dest=try!(self.internal_hash(&dest[0..(dest.len()-LINE_SIZE)]));
+                                        unsafe {
+                                            copy_nonoverlapping(int_dest.as_ptr(),u.as_mut_ptr(),HASH_SIZE);
+                                            copy_nonoverlapping(dest.as_ptr().offset((dest.len()-LINE_SIZE) as isize),
+                                                                u.as_mut_ptr().offset(HASH_SIZE as isize),
+                                                                LINE_SIZE);
+                                        }
+                                    }
+                                    if has_edge(cursor_,&u[..],0,true,true) {
+                                        // If a deleted folder edge has alive children, reconnect it to the root.
+                                        try!(self.reconnect_zombie_folder(&u[..],internal));
+                                    }
+                                }
+                            }
                     },
-                    Change::NewNodes { ref up_context,ref down_context,ref flag, .. } => {
+                    Change::NewNodes { ref up_context,ref down_context, .. } => {
                         // Handle missing contexts.
                         for c in up_context {
-                            repair_missing_context(&mut self,true,*flag,c)
+                            repair_missing_context(&mut self,true,c)
                         }
                         for c in down_context {
-                            repair_missing_context(&mut self,false,*flag,c)
+                            repair_missing_context(&mut self,false,c)
                         }
                         debug!(target:"libpijul","apply: newnodes, done");
                     }
@@ -1879,6 +1911,7 @@ impl <'a> Repository<'a> {
         }
         unsafe {
             lmdb::mdb_cursor_close(cursor);
+            lmdb::mdb_cursor_close(cursor_);
         }
         let time2=time::precise_time_s();
         for ref dep in patch.dependencies.iter() {
@@ -1906,18 +1939,27 @@ impl <'a> Repository<'a> {
             if unsafe { memcmp(ROOT_KEY.as_ptr()as *const c_void,a.as_ptr() as *const c_void,KEY_SIZE as size_t)!=0} {
 
                 let mut i=result.len();
-                for neighbor in CursIter::new(cursor,a,direction,false,false) {
-                    let ext=repo.external_hash(&neighbor[(1+KEY_SIZE)..]);
-                    if new_patches.contains(ext) {
-                        result.push(direction|PSEUDO_EDGE);
+                for neighbor in CursIter::new(cursor,a,direction,true,false) {
+                    // Is this neighbor from one of the newly applied patches?
+                    let is_new=
+                        if unsafe { memcmp(neighbor.as_ptr().offset(1+KEY_SIZE as isize) as *const c_void,
+                                           patch_id.as_ptr() as *const c_void,
+                                           HASH_SIZE as size_t) == 0 } {
+                            false
+                        } else {
+                            let ext=repo.external_hash(&neighbor[(1+KEY_SIZE)..]);
+                            new_patches.contains(ext)
+                        };
+                    if is_new {
+                        result.push((neighbor[0]^PARENT_EDGE)^DELETED_EDGE);
                         result.extend(a);
                         result.extend(patch_id);
 
-                        result.extend(&neighbor[0..(1+KEY_SIZE)]);
+                        result.push(neighbor[0]^DELETED_EDGE);
+                        result.extend(&neighbor[1..(1+KEY_SIZE)]);
                         result.extend(patch_id);
                     }
                 }
-
                 let j=result.len();
                 debug_assert!(a.len()==KEY_SIZE);
                 debug_assert!(patch_id.len()==HASH_SIZE);
@@ -1940,6 +1982,62 @@ impl <'a> Repository<'a> {
         //let mut buf=Vec::with_capacity(4*KEY_SIZE);
         connect(self,cursor,a,direction,relatives,patch_id,new_patches);
         unsafe { lmdb::mdb_cursor_close(cursor); }
+    }
+
+
+    fn reconnect_zombie_folder(&mut self, a:&[u8], patch_id:&[u8])->Result<(),Error> {
+        fn connect(repo:&Repository,
+                   cursor:&mut lmdb::MdbCursor,
+                   a:&[u8],
+                   patch_id:&[u8],
+                   edges:&mut Vec<u8>) {
+            debug!(target:"missing context","connect zombie: {} {}",to_hex(a),
+                   has_edge(cursor,&a,PARENT_EDGE|FOLDER_EDGE,true,false));
+            if unsafe { memcmp(ROOT_KEY.as_ptr()as *const c_void,a.as_ptr() as *const c_void,KEY_SIZE as size_t)!=0}
+            && !has_edge(cursor,&a,PARENT_EDGE|FOLDER_EDGE,true,false) {
+                let i=edges.len();
+                for neighbor in CursIter::new(cursor,&a,PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE,true,false) {
+                    debug!(target:"missing context","pushing from {}",to_hex(a));
+                    debug!(target:"missing context","pushing {}",to_hex(neighbor));
+                    edges.push(FOLDER_EDGE);
+                    edges.extend(a);
+                    edges.extend(patch_id);
+                    edges.push(PARENT_EDGE|FOLDER_EDGE);
+                    edges.extend(&neighbor[1..(1+KEY_SIZE)]);
+                    edges.extend(patch_id);
+                }
+                let mut j=i;
+                let l=edges.len();
+                let mut neighbor=[0;KEY_SIZE];
+                while j<l {
+                    unsafe {
+                        copy_nonoverlapping(edges.as_ptr().offset((j+EDGE_SIZE+1) as isize),
+                                            neighbor.as_mut_ptr(),
+                                            KEY_SIZE)
+                    }
+                    connect(repo,cursor,&neighbor[..],patch_id,edges);
+                    j+=2*EDGE_SIZE
+                }
+            }
+            debug!(target:"missing context","/connect zombie: {}",to_hex(a));
+        }
+        //let mut buf=Vec::with_capacity(4*KEY_SIZE);
+        let mut edges=Vec::new();
+        let cursor= unsafe { &mut * self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
+        connect(self,cursor,a,patch_id,&mut edges);
+        debug!(target:"missing context","edges.len()={}",edges.len());
+        let mut i=0;
+        while i<edges.len() {
+            try!(self.mdb_txn.put(self.dbi_nodes,&edges[(i+1)..(i+1+KEY_SIZE)],
+                                  &edges[(i+EDGE_SIZE)..(i+2*EDGE_SIZE)],
+                                  lmdb::MDB_NODUPDATA));
+            try!(self.mdb_txn.put(self.dbi_nodes,&edges[(i+EDGE_SIZE+1)..(i+EDGE_SIZE+1+KEY_SIZE)],
+                                  &edges[i..(i+EDGE_SIZE)],
+                                  lmdb::MDB_NODUPDATA));
+            i+=2*EDGE_SIZE
+        }
+        unsafe { lmdb::mdb_cursor_close(cursor); }
+        Ok(())
     }
 
 
@@ -2100,10 +2198,11 @@ impl <'a> Repository<'a> {
                 let (_,ref parent_inode,ref inode,ref oldpath,ref perms) = *x;
                 if alen>1 { filename.push(format!("~{}",i)) }
                 let mut kk=k.clone();
+                debug!(target:"output_repository","output: {:?}",filename);
                 kk.set_file_name(&filename);
                 match *oldpath {
-                    Some(ref oldpath)=> try!(fs::rename(oldpath,&kk).map_err(Error::IoError)),
-                    None =>{
+                    Some(ref oldpath) if i==0 => try!(fs::rename(oldpath,&kk).map_err(Error::IoError)),
+                    _ =>{
                         if perms & DIRECTORY_FLAG != 0 {
                             try!(std::fs::create_dir_all(&k).map_err(Error::IoError));
                         }
@@ -2173,7 +2272,7 @@ impl <'a> Repository<'a> {
 
     pub fn debug<W>(&mut self,w:&mut W) where W:Write {
         let mut styles=Vec::with_capacity(16);
-        for i in 0..15 {
+        for i in 0..16 {
             styles.push(("color=").to_string()
                         +["red","blue","green","black"][(i >> 1)&3]
                         +if (i as u8)&DELETED_EDGE!=0 { ", style=dashed"} else {""}
