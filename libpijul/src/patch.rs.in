@@ -139,9 +139,7 @@ pub fn write_changes(patches:&HashSet<&[u8]>,changes_file:&Path)->Result<(),Erro
     Ok(())
 }
 
-pub fn read_changes(changes_file:&Path)->Result<HashSet<Vec<u8>>,Error> {
-    let file=try!(File::open(changes_file).map_err(Error::IoError));
-    let mut r = BufReader::new(file);
+pub fn read_changes<R:Read>(mut r:R)->Result<HashSet<Vec<u8>>,Error> {
     let dec=try!(bincode::serde::deserialize_from(&mut r,SizeLimit::Infinite).map_err(Error::PatchDecoding));
     /*let mut s=Vec::new();
     try!(r.read_to_end(&mut s).map_err(Error::IO));
@@ -149,6 +147,12 @@ pub fn read_changes(changes_file:&Path)->Result<HashSet<Vec<u8>>,Error> {
     let dec:Vec<Vec<u8>>=try!(decode(ss).map_err(Error::Decoder));*/
     Ok(dec)
 }
+pub fn read_changes_from_file(changes_file:&Path)->Result<HashSet<Vec<u8>>,Error> {
+    let file=try!(File::open(changes_file).map_err(Error::IoError));
+    let r = BufReader::new(file);
+    read_changes(r)
+}
+
 pub fn dependencies(changes:&[Change])->HashSet<ExternalHash> {
     let mut deps=HashSet::new();
     fn push_dep(deps:&mut HashSet<ExternalHash>,dep:ExternalHash) {

@@ -37,9 +37,13 @@ pub fn pristine_dir(p : &Path) -> PathBuf {
 pub fn patches_dir(p : &Path) -> PathBuf {
     return p.join(pijul_dir_name()).join("patches")
 }
+
+pub fn branch_changes_base_path(b:&[u8])->String {
+    "changes.".to_string() + &to_hex(b)
+}
+
 pub fn branch_changes_file(p : &Path, b: &[u8]) -> PathBuf {
-    let changes=String::from("changes.") + &to_hex(b)[..];
-    return p.join(pijul_dir_name()).join(changes)
+    p.join(pijul_dir_name()).join(branch_changes_base_path(b))
 }
 
 pub fn find_repo_root(dir : &Path) -> Option<&Path> {

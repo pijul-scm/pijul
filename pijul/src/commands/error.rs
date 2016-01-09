@@ -2,7 +2,7 @@ extern crate libpijul;
 use std::io;
 use std::error;
 use std::fmt;
-
+use std::string;
 #[derive(Debug)]
 pub enum Error{
     NotInARepository,
@@ -10,7 +10,8 @@ pub enum Error{
     IoError(io::Error),
     Repository(libpijul::error::Error),
     NotEnoughArguments,
-    MoveTargetNotDirectory
+    MoveTargetNotDirectory,
+    UTF8(string::FromUtf8Error)
 }
 
 impl fmt::Display for Error {
@@ -21,7 +22,8 @@ impl fmt::Display for Error {
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
             Error::Repository(ref err) => write!(f, "Repository error: {}", err),
             Error::NotEnoughArguments => write!(f, "Not enough arguments"),
-            Error::MoveTargetNotDirectory => write!(f, "Target of mv is not a directory")
+            Error::MoveTargetNotDirectory => write!(f, "Target of mv is not a directory"),
+            Error::UTF8(ref err) => write!(f, "UTF8Error: {}",err)
         }
     }
 }
@@ -34,7 +36,8 @@ impl error::Error for Error {
             Error::IoError(ref err) => error::Error::description(err),
             Error::Repository(ref err) => libpijul::error::Error::description(err),
             Error::NotEnoughArguments => "Not enough arguments",
-            Error::MoveTargetNotDirectory => "Target of mv is not a directory"
+            Error::MoveTargetNotDirectory => "Target of mv is not a directory",
+            Error::UTF8(ref err) => err.description()
         }
     }
 
@@ -45,7 +48,8 @@ impl error::Error for Error {
             Error::NotInARepository => None,
             Error::InARepository => None,
             Error::NotEnoughArguments => None,
-            Error::MoveTargetNotDirectory => None
+            Error::MoveTargetNotDirectory => None,
+            Error::UTF8(ref err) => Some(err)
         }
     }
 }
@@ -58,5 +62,10 @@ impl From<io::Error> for Error {
 impl From<libpijul::error::Error> for Error {
     fn from(err: libpijul::error::Error) -> Error {
         Error::Repository(err)
+    }
+}
+impl From<string::FromUtf8Error> for Error {
+    fn from(err: string::FromUtf8Error) -> Error {
+        Error::UTF8(err)
     }
 }

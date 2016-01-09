@@ -14,5 +14,9 @@ time="*"
 env_logger="*"
 libpijul = {path="../libpijul"}
 
+ssh2 = "*"
+rpassword="0.1"
+libc="*"
+
 [dev-dependencies]
 tempdir="*"
