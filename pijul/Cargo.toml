@@ -5,18 +5,20 @@ authors = ["Pierre-Étienne Meunier","Florent Becker"]
 license = "AGPL-3.0"
 
 [dependencies]
-clap = "*"
-rust-crypto = "*"
-regex=">=0.1.41"
-rand= "*"
-log="*"
-time="*"
-env_logger="*"
-libpijul = {path="../libpijul"}
+clap = "1.5"
+rust-crypto = "0.2"
+regex="0.1"
+rand= "0.3"
+log="0.3"
+time="0.1"
+env_logger="0.3"
 
 ssh = "0.1"
 
-rustc-serialize="*"
+rustc-serialize="0.3"
+hyper="0.7"
+
+libpijul = {path="../libpijul"}
 
 [dev-dependencies]
-tempdir="*"
+tempdir="0.3"

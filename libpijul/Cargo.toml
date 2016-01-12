@@ -6,17 +6,17 @@ license = "AGPL-3.0"
 build = "build.rs"
 
 [dependencies]
-libc = "*"
+libc = "0.2"
 rustc-serialize="0.3"
-rand = "*"
-rust-crypto="*"
-bincode="*"
+rand = "0.3"
+rust-crypto="0.2"
+bincode="0.4"
 
-time="*"
+time="0.1"
 log="0.3"
-serde="*"
+serde="0.6"
 
 [build-dependencies]
-gcc="*"
-syntex="*"
-serde_codegen="*"
+gcc="0.3"
+syntex="0.22.0"
+serde_codegen="0.6"
