@@ -22,13 +22,12 @@ use clap::{ArgMatches};
 extern crate libpijul;
 use self::libpijul::{Repository,DEFAULT_BRANCH};
 use self::libpijul::patch::{Patch,read_changes_from_file,read_changes,HASH_SIZE};
-use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, branch_changes_file,to_hex};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, branch_changes_base_path,branch_changes_file,to_hex,PIJUL_DIR_NAME,PATCHES_DIR_NAME};
 use std::path::{Path,PathBuf};
 use std::io::{BufWriter,BufReader};
-use std::fs::File;
 use std::collections::hash_set::{HashSet};
 use std::collections::hash_map::{HashMap};
-use std::fs::{hard_link,metadata};
+use std::fs::{File,hard_link,copy,metadata};
 
 use commands::error::Error;
 use std::str::{from_utf8};
@@ -45,6 +44,9 @@ use std::borrow::Cow;
 use super::init;
 use std::collections::hash_set::Iter;
 
+
+extern crate hyper;
+
 #[derive(Debug)]
 pub enum Remote<'a> {
     Ssh { user:Option<&'a str>, host:&'a str, port:Option<u16>, path:&'a Path },
@@ -57,7 +59,8 @@ pub enum Session<'a> {
         path:&'a Path,
         session:ssh::Session
     },
-    Uri,
+    Uri { uri:&'a str,
+          client:hyper::Client },
     Local{path:&'a Path},
 }
 
@@ -116,21 +119,30 @@ impl<'a> Session<'a> {
                 let changes_file=branch_changes_file(path,branch);
                 Ok(read_changes_from_file(&changes_file).unwrap_or(HashSet::new()))
             },
-            Session::Uri =>{
-                unimplemented!()
+            Session::Uri {uri,ref mut client} =>{
+                let mut uri=uri.to_string();
+                uri = uri + "/" + PIJUL_DIR_NAME + "/" + &branch_changes_base_path(DEFAULT_BRANCH.as_bytes());
+                let mut res = try!(client.get(&uri)
+                                   .header(hyper::header::Connection::close())
+                                   .send());
+                let changes=read_changes(&mut res).unwrap_or(HashSet::new());
+                debug!("http: {:?}",changes);
+                Ok(changes)
             },
         }
     }
     pub fn download_patch(&mut self, local_patches:&Path, patch_hash:&[u8])->Result<PathBuf,Error>{
         match *self {
             Session::Local{path}=>{
-                let hash=to_hex(patch_hash);
+                let hash=patch_hash.to_hex();
                 debug!("local downloading {:?}",hash);
                 let remote_file=patches_dir(path).join(&hash).with_extension("cbor");
                 let local_file=local_patches.join(&hash).with_extension("cbor");
                 if metadata(&local_file).is_err() {
                     debug!("hard linking {:?} to {:?}",remote_file,local_file);
-                    try!(hard_link(&remote_file,&local_file));
+                    try!(hard_link(&remote_file,&local_file).or_else(|_|{
+                        copy(&remote_file, &local_file).and_then(|_| Ok(()))
+                    }));
                 }
                 Ok(local_file)
             },
@@ -148,8 +160,24 @@ impl<'a> Session<'a> {
                 }
                 Ok(local_file)
             },
-            Session::Uri=>{
-                unimplemented!()
+            Session::Uri{ref mut client,uri}=>{
+                let hash=patch_hash.to_hex();
+                let local_file=local_patches.join(&hash).with_extension("cbor");
+                if metadata(&local_file).is_err() {
+                    let uri = uri.to_string()
+                        + "/" + PIJUL_DIR_NAME
+                        + "/" + PATCHES_DIR_NAME
+                        + "/" + &patch_hash.to_hex() + ".cbor";
+                    let mut res = try!(client.get(&uri)
+                                       .header(hyper::header::Connection::close())
+                                       .send());
+                    let mut body=Vec::new();
+                    try!(res.read_to_end(&mut body));
+                    let mut f=try!(File::create(&local_file));
+                    try!(f.write_all(&body));
+                    debug!("patch downloaded through http: {:?}",body);
+                }
+                Ok(local_file)
             }
         }
     }
@@ -179,7 +207,9 @@ impl<'a> Session<'a> {
                     let remote_file=patches_dir(path).join(&hash).with_extension("cbor");
                     let local_file=local_patches.join(&hash).with_extension("cbor");
                     if metadata(&remote_file).is_err() {
-                        try!(hard_link(&local_file,&remote_file));
+                        try!(hard_link(&local_file,&remote_file).or_else(|_|{
+                            copy(&local_file, &remote_file).and_then(|_| Ok(()))
+                        }));
                     }
                 }
                 Ok(())
@@ -246,7 +276,10 @@ impl <'a>Remote<'a> {
         //fn from_remote(remote:&Remote<'a>) -> Result<Session<'a>,Error> {
         match *self {
             Remote::Local{path} => Ok(Session::Local{path:path}),
-            Remote::Uri{..} => Ok(Session::Uri),
+            Remote::Uri{uri} => Ok(Session::Uri {
+                uri:uri,
+                client:hyper::Client::new()
+            }),
             Remote::Ssh{ref user,ref host,ref port,ref path}=>{
                 let mut session = ssh::Session::new().unwrap();
                 session.set_host(host).unwrap();

@@ -5,6 +5,7 @@ use std::fmt;
 use std::string;
 extern crate ssh;
 extern crate rustc_serialize;
+extern crate hyper;
 #[derive(Debug)]
 pub enum Error{
     NotInARepository,
@@ -15,7 +16,8 @@ pub enum Error{
     MoveTargetNotDirectory,
     UTF8(string::FromUtf8Error),
     Hex(rustc_serialize::hex::FromHexError),
-    SSH(ssh::Error)
+    SSH(ssh::Error),
+    Hyper(hyper::error::Error)
 }
 
 impl fmt::Display for Error {
@@ -29,6 +31,7 @@ impl fmt::Display for Error {
             Error::MoveTargetNotDirectory => write!(f, "Target of mv is not a directory"),
             Error::SSH(ref err) => write!(f, "SSH: {}",err),
             Error::Hex(ref err) => write!(f, "Hex: {}",err),
+            Error::Hyper(ref err) => write!(f, "Hyper: {}",err),
             Error::UTF8(ref err) => write!(f, "UTF8Error: {}",err)
         }
     }
@@ -45,6 +48,7 @@ impl error::Error for Error {
             Error::MoveTargetNotDirectory => "Target of mv is not a directory",
             Error::SSH(ref err) => err.description(),
             Error::Hex(ref err) => err.description(),
+            Error::Hyper(ref err) => err.description(),
             Error::UTF8(ref err) => err.description()
         }
     }
@@ -59,6 +63,7 @@ impl error::Error for Error {
             Error::MoveTargetNotDirectory => None,
             Error::SSH(ref err) => Some(err),
             Error::Hex(ref err) => Some(err),
+            Error::Hyper(ref err) => Some(err),
             Error::UTF8(ref err) => Some(err)
         }
     }
@@ -87,5 +92,10 @@ impl From<string::FromUtf8Error> for Error {
 impl From<rustc_serialize::hex::FromHexError> for Error {
     fn from(err:rustc_serialize::hex::FromHexError) -> Error {
         Error::Hex(err)
+    }
+}
+impl From<hyper::error::Error> for Error {
+    fn from(err:hyper::error::Error) -> Error {
+        Error::Hyper(err)
     }
 }

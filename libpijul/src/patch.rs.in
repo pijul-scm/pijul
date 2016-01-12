@@ -26,8 +26,8 @@ use std::fs::File;
 use std::str::{from_utf8};
 
 use std;
-//extern crate serde_cbor;
 extern crate bincode;
+//extern crate serde_cbor;
 //use self::serde_cbor::{to_writer};
 use self::bincode::{SizeLimit};
 extern crate crypto;

@@ -23,19 +23,20 @@ use std::fs::{metadata,create_dir_all};
 
 use std;
 
-pub fn pijul_dir_name() -> &'static Path {
-    return Path::new(".pijul")
-}
+pub const PIJUL_DIR_NAME:&'static str=".pijul";
 
 pub fn repo_dir(p : &Path) -> PathBuf {
-    return p.join(pijul_dir_name())
+    p.join(PIJUL_DIR_NAME)
 }
 
 pub fn pristine_dir(p : &Path) -> PathBuf {
-    return p.join(pijul_dir_name()).join("pristine")
+    return p.join(PIJUL_DIR_NAME).join("pristine")
 }
+
+pub const PATCHES_DIR_NAME:&'static str="patches";
+
 pub fn patches_dir(p : &Path) -> PathBuf {
-    return p.join(pijul_dir_name()).join("patches")
+    return p.join(PIJUL_DIR_NAME).join(PATCHES_DIR_NAME)
 }
 
 pub fn branch_changes_base_path(b:&[u8])->String {
@@ -43,7 +44,7 @@ pub fn branch_changes_base_path(b:&[u8])->String {
 }
 
 pub fn branch_changes_file(p : &Path, b: &[u8]) -> PathBuf {
-    p.join(pijul_dir_name()).join(branch_changes_base_path(b))
+    p.join(PIJUL_DIR_NAME).join(branch_changes_base_path(b))
 }
 
 pub fn find_repo_root(dir : &Path) -> Option<&Path> {
