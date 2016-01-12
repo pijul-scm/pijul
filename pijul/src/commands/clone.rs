@@ -19,22 +19,22 @@
 extern crate clap;
 use clap::{SubCommand, ArgMatches,Arg};
 
-use commands::StaticSubcommand;
+use super::StaticSubcommand;
 
-use super::pull;
 use super::init;
 
-use commands::error::Error;
+use super::error::Error;
+use super::remote::{Remote,parse_remote,pull,push,pullable_patches,pushable_patches};
 
 pub fn invocation() -> StaticSubcommand {
     return
-        SubCommand::with_name("get")
+        SubCommand::with_name("clone")
         .about("clone a remote repository")
-        .arg(Arg::with_name("remote")
-             .help("Remote repository to clone.")
+        .arg(Arg::with_name("from")
+             .help("Repository to clone.")
              )
-        .arg(Arg::with_name("repository")
-             .help("Local path.")
+        .arg(Arg::with_name("to")
+             .help("Target.")
              )
         .arg(Arg::with_name("port")
              .short("p")
@@ -47,19 +47,40 @@ pub fn invocation() -> StaticSubcommand {
              })
              )
 }
-
+#[derive(Debug)]
 pub struct Params<'a> {
-    pub pull_params:pull::Params<'a>
+    pub from:Remote<'a>,
+    pub to:Remote<'a>,
 }
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
-    let x=pull::parse_args(args);
-    Params { pull_params:x }
+    let from = parse_remote(args.value_of("from").unwrap(),args);
+    let to = parse_remote(args.value_of("to").unwrap_or("."),args);
+    Params { from:from, to:to }
 }
 
 
+
 pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
-    try!(init::run(&init::Params { location:args.pull_params.repository, allow_nested:false }));
-    try!(pull::run(&args.pull_params));
-    Ok(())
+    debug!("{:?}",args);
+    match args.from {
+        Remote::Local{ref path}=>{
+            let mut to_session=try!(args.to.session());
+            debug!("remote init");
+            try!(to_session.remote_init());
+            debug!("push");
+            let pushable=try!(pushable_patches(path,&mut to_session));
+            push(path,&mut to_session,&pushable)
+        },
+        _=>match args.to {
+            Remote::Local{ref path} =>{
+                // This is "darcs get"
+                try!(init::run(&init::Params { location:path, allow_nested:false }));
+                let mut session=try!(args.from.session());
+                let pullable=try!(pullable_patches(path,&mut session));
+                pull(path,&mut session,&pullable)
+            },
+            _=>unimplemented!()
+        }
+    }
 }

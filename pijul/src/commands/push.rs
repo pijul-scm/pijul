@@ -21,20 +21,18 @@ use clap::{SubCommand, ArgMatches,Arg};
 
 use super::StaticSubcommand;
 use super::error::Error;
-use super::remote::{Remote};
+use super::remote;
 use std::path::Path;
-
 extern crate libpijul;
 use self::libpijul::fs_representation::{find_repo_root};
 
-use super::remote;
 
 pub fn invocation() -> StaticSubcommand {
     return
-        SubCommand::with_name("pull")
-        .about("pull from a remote repository")
+        SubCommand::with_name("push")
+        .about("push to a remote repository")
         .arg(Arg::with_name("remote")
-             .help("Repository from which to pull.")
+             .help("Repository to push to.")
              )
         .arg(Arg::with_name("repository")
              .help("Local repository.")
@@ -54,7 +52,7 @@ pub fn invocation() -> StaticSubcommand {
 #[derive(Debug)]
 pub struct Params<'a> {
     pub repository : &'a Path,
-    pub remote : Remote<'a>,
+    pub remote : remote::Remote<'a>,
     pub remote_id : &'a str
 }
 
@@ -69,13 +67,12 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
 
 pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
     let pwd = args.repository;
-    debug!("pull args {:?}",args);
     match find_repo_root(&pwd){
         None => return Err(Error::NotInARepository),
         Some(r) => {
             let mut session=try!(args.remote.session());
-            let pullable=try!(remote::pullable_patches(r,&mut session));
-            remote::pull(r,&mut session,&pullable)
+            let pushable=try!(remote::pushable_patches(r,&mut session));
+            remote::push(r,&mut session,&pushable)
         }
     }
 }

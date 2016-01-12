@@ -3,6 +3,8 @@ use std::io;
 use std::error;
 use std::fmt;
 use std::string;
+extern crate ssh;
+extern crate rustc_serialize;
 #[derive(Debug)]
 pub enum Error{
     NotInARepository,
@@ -11,7 +13,9 @@ pub enum Error{
     Repository(libpijul::error::Error),
     NotEnoughArguments,
     MoveTargetNotDirectory,
-    UTF8(string::FromUtf8Error)
+    UTF8(string::FromUtf8Error),
+    Hex(rustc_serialize::hex::FromHexError),
+    SSH(ssh::Error)
 }
 
 impl fmt::Display for Error {
@@ -23,6 +27,8 @@ impl fmt::Display for Error {
             Error::Repository(ref err) => write!(f, "Repository error: {}", err),
             Error::NotEnoughArguments => write!(f, "Not enough arguments"),
             Error::MoveTargetNotDirectory => write!(f, "Target of mv is not a directory"),
+            Error::SSH(ref err) => write!(f, "SSH: {}",err),
+            Error::Hex(ref err) => write!(f, "Hex: {}",err),
             Error::UTF8(ref err) => write!(f, "UTF8Error: {}",err)
         }
     }
@@ -37,6 +43,8 @@ impl error::Error for Error {
             Error::Repository(ref err) => libpijul::error::Error::description(err),
             Error::NotEnoughArguments => "Not enough arguments",
             Error::MoveTargetNotDirectory => "Target of mv is not a directory",
+            Error::SSH(ref err) => err.description(),
+            Error::Hex(ref err) => err.description(),
             Error::UTF8(ref err) => err.description()
         }
     }
@@ -49,6 +57,8 @@ impl error::Error for Error {
             Error::InARepository => None,
             Error::NotEnoughArguments => None,
             Error::MoveTargetNotDirectory => None,
+            Error::SSH(ref err) => Some(err),
+            Error::Hex(ref err) => Some(err),
             Error::UTF8(ref err) => Some(err)
         }
     }
@@ -59,6 +69,11 @@ impl From<io::Error> for Error {
         Error::IoError(err)
     }
 }
+impl From<ssh::Error> for Error {
+    fn from(err: ssh::Error) -> Error {
+        Error::SSH(err)
+    }
+}
 impl From<libpijul::error::Error> for Error {
     fn from(err: libpijul::error::Error) -> Error {
         Error::Repository(err)
@@ -67,5 +82,10 @@ impl From<libpijul::error::Error> for Error {
 impl From<string::FromUtf8Error> for Error {
     fn from(err: string::FromUtf8Error) -> Error {
         Error::UTF8(err)
+    }
+}
+impl From<rustc_serialize::hex::FromHexError> for Error {
+    fn from(err:rustc_serialize::hex::FromHexError) -> Error {
+        Error::Hex(err)
     }
 }

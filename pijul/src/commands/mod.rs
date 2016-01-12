@@ -3,13 +3,17 @@ extern crate clap;
 pub type StaticSubcommand = clap::App<'static, 'static, 'static, 'static, 'static, 'static>;
 
 mod fs_operation;
+mod remote;
+mod escape;
 pub mod info;
 pub mod check;
 pub mod init;
 pub mod record;
 pub mod add;
 pub mod pull;
-pub mod get;
+pub mod push;
+pub mod apply;
+pub mod clone;
 pub mod remove;
 pub mod mv;
 pub mod ls;
@@ -26,7 +30,9 @@ pub fn all_command_invocations() -> Vec<StaticSubcommand> {
         record::invocation(),
         add::invocation(),
         pull::invocation(),
-        get::invocation(),
+        push::invocation(),
+        apply::invocation(),
+        clone::invocation(),
         remove::invocation(),
         mv::invocation(),
         ls::invocation(),

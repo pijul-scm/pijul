@@ -7,16 +7,16 @@ license = "AGPL-3.0"
 [dependencies]
 clap = "*"
 rust-crypto = "*"
-regex="0.1.41"
+regex=">=0.1.41"
 rand= "*"
 log="*"
 time="*"
 env_logger="*"
 libpijul = {path="../libpijul"}
 
-ssh2 = "*"
-rpassword="0.1"
-libc="*"
+ssh = "0.1"
+
+rustc-serialize="*"
 
 [dev-dependencies]
 tempdir="*"
