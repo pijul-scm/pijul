@@ -32,6 +32,7 @@ pijul pull ../a
 cd /tmp/a
 echo "--------------- MV"
 pijul mv a~0 a0
+pijul mv a~1 a
 echo "--------------- Solving conflict"
 pijul record
 

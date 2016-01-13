@@ -1241,7 +1241,7 @@ impl <'a> Repository<'a> {
                   parent_node:Option<&[u8]>,
                   current_inode:&[u8],
                   realpath:&mut std::path::PathBuf,
-                  basename:&[u8]) {
+                  basename:&[u8])->Result<(),Error> {
 
         if parent_inode.is_some() { realpath.push(str::from_utf8(&basename).unwrap()) }
         debug!(target:"record_all","realpath:{:?}",realpath);
@@ -1254,7 +1254,7 @@ impl <'a> Repository<'a> {
                         let old_attr=((current_node[1] as usize) << 8) | (current_node[2] as usize);
                         // Add the new name.
                         let int_attr={
-                            let attr=metadata(&realpath).unwrap();
+                            let attr=try!(metadata(&realpath));
                             let p=(permissions(&attr)) & 0o777;
                             let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
                             (if p==0 { old_attr } else { p }) | is_dir
@@ -1268,37 +1268,46 @@ impl <'a> Repository<'a> {
                             let mut edges=Vec::new();
                             // Now take all grandparents of l2, delete them.
                             let mut curs_parents=unsafe {
-                                &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()
+                                &mut *try!(self.mdb_txn.unsafe_cursor(self.dbi_nodes))
                             };
                             let mut curs_grandparents=unsafe {
-                                &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()
+                                &mut *try!(self.mdb_txn.unsafe_cursor(self.dbi_nodes))
                             };
+                            let mut name=Vec::with_capacity(basename.len()+2);
+                            name.push(((int_attr >> 8) & 0xff) as u8);
+                            name.push((int_attr & 0xff) as u8);
+                            name.extend(basename);
                             for parent in CursIter::new(curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true,false) {
+                                let previous_name=
+                                    match try!(self.mdb_txn.get(self.dbi_contents,&parent[1..(1+KEY_SIZE)])) {
+                                        None=>"".as_bytes(),
+                                        Some(n)=>n
+                                    };
                                 for grandparent in CursIter::new(curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true,false) {
-                                    edges.push(Edge {
-                                        from:self.external_key(&parent[1..(1+KEY_SIZE)]),
-                                        to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
-                                        introduced_by:self.external_key(&grandparent[1+KEY_SIZE..])
-                                    });
+                                    if &grandparent[1..(1+KEY_SIZE)] != parent_node.unwrap()
+                                        || &name[..] != previous_name {
+                                            edges.push(Edge {
+                                                from:self.external_key(&parent[1..(1+KEY_SIZE)]),
+                                                to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
+                                                introduced_by:self.external_key(&grandparent[1+KEY_SIZE..])
+                                            });
+                                        }
                                 }
                             }
                             unsafe {
                                 lmdb::mdb_cursor_close(curs_parents);
                                 lmdb::mdb_cursor_close(curs_grandparents);
                             }
-                            actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
-
-                            let mut name=Vec::with_capacity(basename.len()+2);
-                            name.push(((int_attr >> 8) & 0xff) as u8);
-                            name.push((int_attr & 0xff) as u8);
-                            name.extend(basename);
-                            actions.push(
-                                Change::NewNodes { up_context: vec!(self.external_key(parent_node.unwrap())),
-                                                   line_num: *line_num,
-                                                   down_context: vec!(self.external_key(&current_node[3..])),
-                                                   nodes: vec!(name),
-                                                   flag:FOLDER_EDGE }
-                                );
+                            if !edges.is_empty(){
+                                actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
+                                actions.push(
+                                    Change::NewNodes { up_context: vec!(self.external_key(parent_node.unwrap())),
+                                                       line_num: *line_num,
+                                                       down_context: vec!(self.external_key(&current_node[3..])),
+                                                       nodes: vec!(name),
+                                                       flag:FOLDER_EDGE }
+                                    );
+                            }
                             *line_num += 1;
                             if old_attr & DIRECTORY_FLAG == 0 {
                                 info!("retrieving");
@@ -1445,7 +1454,7 @@ impl <'a> Repository<'a> {
             None => (), // we just added a file
             Some(current_node)=>{
                 debug!(target:"record_all","children of current_inode {}",to_hex(current_inode));
-                let cursor=self.mdb_txn.cursor(self.dbi_tree).unwrap();
+                let cursor=try!(self.mdb_txn.cursor(self.dbi_tree));
                 let mut op=lmdb::Op::MDB_SET_RANGE;
                 while let Ok((k,v))=cursor.get(current_inode,None,op) {
                     if unsafe{memcmp(k.as_ptr() as *const c_void,
@@ -1456,12 +1465,12 @@ impl <'a> Repository<'a> {
                         if v.len()>0 { // directories have len==0
                             debug!(target:"record_all","  child: {} + {}",to_hex(&v[0..INODE_SIZE]),
                                    std::str::from_utf8(&k[INODE_SIZE..]).unwrap());
-                            self.record_all(actions, line_num,redundant,updatables,
-                                            Some(current_inode), // parent_inode
-                                            Some(current_node), // parent_node
-                                            v,// current_inode
-                                            realpath,
-                                            &k[INODE_SIZE..]);
+                            try!(self.record_all(actions, line_num,redundant,updatables,
+                                                 Some(current_inode), // parent_inode
+                                                 Some(current_node), // parent_node
+                                                 v,// current_inode
+                                                 realpath,
+                                                 &k[INODE_SIZE..]));
                         }
                         op=lmdb::Op::MDB_NEXT;
                     }
@@ -1469,6 +1478,7 @@ impl <'a> Repository<'a> {
             }
         }
         if parent_inode.is_some() { let _=realpath.pop(); }
+        Ok(())
     }
 
     /// Records,i.e. produce a patch and a HashMap mapping line numbers to inodes.
@@ -1478,9 +1488,9 @@ impl <'a> Repository<'a> {
         let mut updatables:HashMap<Vec<u8>,Vec<u8>>=HashMap::new();
         let mut realpath=PathBuf::from(working_copy);
         let mut redundant=vec!();
-        self.record_all(&mut actions, &mut line_num,&mut redundant,&mut updatables,
-            None,None,ROOT_INODE,&mut realpath,
-            &[]);
+        try!(self.record_all(&mut actions, &mut line_num,&mut redundant,&mut updatables,
+                             None,None,ROOT_INODE,&mut realpath,
+                             &[]));
         debug!(target:"record","record done, {} changes", actions.len());
         self.remove_redundant_edges(&mut redundant);
         debug!("remove_redundant_edges done");
