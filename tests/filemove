@@ -13,7 +13,7 @@ pijul record
 
 cd /tmp
 echo "--------------- Get a b"
-pijul get a b
+pijul clone a b
 
 cd /tmp/b
 pijul mv a x

@@ -1,0 +1,89 @@
+#!/bin/bash
+
+cd /tmp
+rm -Rf a b http
+
+#scp $(which pijul) localhost:/usr/local/bin/pijul
+mkdir a
+cd a
+pijul init
+
+cd /tmp/a
+cat << EOF > /tmp/a/file
+X
+Y
+EOF
+
+pijul add file
+echo "----------- Record a"
+pijul record
+
+
+cd /tmp
+pijul clone a localhost:/tmp/b
+
+rm -Rf /var/www/html/bla
+pijul clone b /var/www/html/bla/bli
+
+cd /tmp
+pijul clone http://localhost/bla/bli http
+echo "-----------"
+cat /tmp/http/file
+echo "-----------"
+
+
+echo "-----------"
+cat /tmp/b/file
+echo "-----------"
+
+cd /tmp/a
+cat << EOF > /tmp/a/file
+X
+U
+Y
+EOF
+pijul record
+pijul push localhost:/tmp/b
+
+echo "-----------"
+cat /tmp/b/file
+echo "-----------"
+
+cd /tmp/b/
+cat << EOF > /tmp/b/file
+X
+blabla
+Y
+EOF
+pijul record
+
+cd /tmp/a
+echo "pulling"
+pijul pull /tmp/b
+echo "-----------"
+cat /tmp/a/file
+echo "-----------"
+
+cd /tmp/b/
+cat << EOF > /tmp/b/file
+X
+blabla
+Y
+encore un coup
+EOF
+pijul record
+
+cd /tmp/a
+echo "pulling"
+pijul pull localhost:/tmp/b
+echo "-----------"
+cat /tmp/a/file
+echo "-----------"
+
+pijul push /var/www/html/bla/bli
+
+cd /tmp/http
+pijul pull http://localhost/bla/bli
+echo "-----------"
+cat /tmp/http/file
+echo "-----------"

@@ -372,7 +372,8 @@ pub fn pushable_patches<'a>(source:&Path,to_session:&mut Session<'a>) -> Result<
     debug!("source: {:?}",source);
     let mut from_changes:HashSet<Vec<u8>>={
         let changes_file=branch_changes_file(source,DEFAULT_BRANCH.as_bytes());
-        read_changes_from_file(&changes_file).unwrap() // _or(HashSet::new())
+        debug!("changes_file: {:?}",changes_file);
+        read_changes_from_file(&changes_file).unwrap_or(HashSet::new()) // empty repositories don't have this file
     };
     debug!("pushing: {:?}",from_changes);
     let to_changes=try!(to_session.changes(DEFAULT_BRANCH.as_bytes()));

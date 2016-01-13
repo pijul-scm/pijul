@@ -8,7 +8,7 @@ pijul init
 
 cd /tmp
 echo "--------------- Get a b"
-pijul get a b
+pijul clone a b
 
 
 cd /tmp/a
@@ -28,6 +28,12 @@ cd /tmp/a
 pijul pull ../b
 cd /tmp/b
 pijul pull ../a
+
+cd /tmp/a
+echo "--------------- MV"
+pijul mv a~0 a0
+echo "--------------- Solving conflict"
+pijul record
 
 dot -Tpdf -o /tmp/a/a.pdf /tmp/a/debug
 dot -Tpdf -o /tmp/b/b.pdf /tmp/b/debug

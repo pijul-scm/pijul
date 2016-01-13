@@ -312,6 +312,7 @@ impl <'a> Repository<'a> {
                     self.create_new_inode(&mut inode_);
                     &inode_[..]
                 };
+                debug!(target:"mv","put: dbi_tree, {} {}",to_hex(&buf),to_hex(&inode));
                 self.mdb_txn.put(self.dbi_tree,&buf,&inode,0).unwrap();
                 self.mdb_txn.put(self.dbi_revtree,&inode,&buf,0).unwrap();
                 if cs.is_some() || is_dir {
@@ -355,12 +356,13 @@ impl <'a> Repository<'a> {
             }
         }
         // Now the last inode is in "*inode"
+        debug!(target:"mv","mdb_txn.del parent={:?}",to_hex(parent));
+        try!(self.mdb_txn.del(self.dbi_tree,parent,None));
+
         let basename=path.file_name().unwrap();
         (*parent).truncate(INODE_SIZE);
         (*parent).extend(basename.to_str().unwrap().as_bytes());
 
-        debug!(target:"mv","mdb_txn.del parent={:?}",to_hex(parent));
-        try!(self.mdb_txn.del(self.dbi_tree,parent,None));
         debug!(target:"mv","inode={} path_={:?}",to_hex(inode),path_);
         try!(self.add_inode(&Some(inode),path_,is_dir));
         let vv=
@@ -1452,7 +1454,8 @@ impl <'a> Repository<'a> {
                         break
                     } else {
                         if v.len()>0 { // directories have len==0
-                            debug!(target:"record_all","  child: {}",to_hex(v));
+                            debug!(target:"record_all","  child: {} + {}",to_hex(&v[0..INODE_SIZE]),
+                                   std::str::from_utf8(&k[INODE_SIZE..]).unwrap());
                             self.record_all(actions, line_num,redundant,updatables,
                                             Some(current_inode), // parent_inode
                                             Some(current_node), // parent_node
@@ -2346,12 +2349,19 @@ impl <'a> Repository<'a> {
         Ok(updates)
     }
 
-
-    fn update_tree(&mut self,updates:Vec<(Vec<u8>,Vec<u8>)>){
+    /// This is relatively suboptimal right now: in the future, we should carefully delete outdated parts of the tree database in unsafe_output_repository, and then reinsert them here.
+    fn update_tree(&mut self,updates:Vec<(Vec<u8>,Vec<u8>)>)->Result<(),Error>{
+        try!(self.mdb_txn.drop(self.dbi_tree,false));
+        try!(self.mdb_txn.drop(self.dbi_revtree,false));
         for (par,inode) in updates {
-            self.mdb_txn.put(self.dbi_tree,&par,&inode,0).unwrap();
-            self.mdb_txn.put(self.dbi_revtree,&inode,&par,0).unwrap();
+            debug!(target:"output_repository","update_tree:{},{},{}",
+                   to_hex(&par[0..INODE_SIZE]),
+                   to_hex(&inode),
+                   std::str::from_utf8(&par[INODE_SIZE..]).unwrap());
+            try!(self.mdb_txn.put(self.dbi_tree,&par,&inode,0));
+            try!(self.mdb_txn.put(self.dbi_revtree,&inode,&par,0));
         }
+        Ok(())
     }
 
 
@@ -2373,7 +2383,7 @@ impl <'a> Repository<'a> {
             let updates=try!(repository.unsafe_output_repository(working_copy));
             lmdb::mdb_txn_abort(txn);
             repository.mdb_txn.txn=parent_txn;
-            repository.update_tree(updates);
+            try!(repository.update_tree(updates));
             debug!(target:"output_repository","end output repository");
             Ok(repository)
         }

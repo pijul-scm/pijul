@@ -68,8 +68,9 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             let mut to_session=try!(args.to.session());
             debug!("remote init");
             try!(to_session.remote_init());
-            debug!("push");
+            debug!("pushable?");
             let pushable=try!(pushable_patches(path,&mut to_session));
+            debug!("pushable = {:?}",pushable);
             push(path,&mut to_session,&pushable)
         },
         _=>match args.to {
