@@ -24,8 +24,11 @@ use super::error::Error;
 use super::remote;
 use std::path::Path;
 extern crate libpijul;
-use self::libpijul::fs_representation::{find_repo_root};
-
+use self::libpijul::fs_representation::{find_repo_root,patches_dir};
+use std::fs::File;
+use self::libpijul::patch::{Patch};
+extern crate rustc_serialize;
+use self::rustc_serialize::hex::{ToHex};
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -72,6 +75,11 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
         Some(r) => {
             let mut session=try!(args.remote.session());
             let pushable=try!(remote::pushable_patches(r,&mut session));
+            for i in pushable.iter() {
+                let filename=patches_dir(r).join(i.to_hex()).with_extension("cbor");
+                let mut file=try!(File::open(filename));
+                try!(Patch::from_reader(&mut file));
+            }
             remote::push(r,&mut session,&pushable)
         }
     }

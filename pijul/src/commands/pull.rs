@@ -26,8 +26,11 @@ use std::path::Path;
 
 extern crate libpijul;
 use self::libpijul::fs_representation::{find_repo_root};
+use self::libpijul::patch::{Patch};
 
 use super::remote;
+use std::fs::File;
+use std::collections::HashMap;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -75,6 +78,17 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
         Some(r) => {
             let mut session=try!(args.remote.session());
             let pullable=try!(remote::pullable_patches(r,&mut session));
+            // Loading a patch's dependencies
+            let mut deps=HashMap::new();
+            for i in pullable.iter() {
+                let patch={
+                    let filename=try!(session.download_patch(r,i));
+                    let mut file=try!(File::open(filename));
+                    try!(Patch::from_reader(&mut file))
+                };
+                deps.insert(i,patch.dependencies);
+            }
+            // Pulling and applying
             remote::pull(r,&mut session,&pullable)
         }
     }

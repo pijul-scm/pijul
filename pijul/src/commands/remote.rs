@@ -29,7 +29,7 @@ use std::collections::hash_set::{HashSet};
 use std::collections::hash_map::{HashMap};
 use std::fs::{File,hard_link,copy,metadata};
 
-use commands::error::Error;
+use super::error::Error;
 use std::str::{from_utf8};
 extern crate ssh;
 use std::io::prelude::*;
