@@ -5,6 +5,8 @@ pub type StaticSubcommand = clap::App<'static, 'static, 'static, 'static, 'stati
 mod fs_operation;
 mod remote;
 mod escape;
+mod ask;
+
 pub mod info;
 pub mod check;
 pub mod init;

@@ -432,8 +432,9 @@ fn apply_patches<'a>(r:&Path,
             let mut repo = try!(Repository::new(&repo_dir));
             try!(repo.record(&r))
         };
-        Patch { changes:changes,
-                dependencies:HashSet::new() }
+        let mut p=Patch::empty();
+        p.changes=changes;
+        p
     };
     let mut patches_were_applied=false;
     for p in pullable {

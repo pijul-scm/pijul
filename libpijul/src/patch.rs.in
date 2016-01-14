@@ -70,21 +70,30 @@ pub enum Change {
 
 #[derive(Debug,Serialize,Deserialize)]
 pub struct Patch {
-    pub changes:Vec<Change>,
-    pub dependencies:HashSet<ExternalHash>
+    pub authors:Vec<String>,
+    pub name:String,
+    pub description:Option<String>,
+    pub timestamp:i64,
+    pub dependencies:HashSet<ExternalHash>,
+    pub changes:Vec<Change>
 }
 
 impl Patch {
 
-    pub fn new(changes:Vec<Change>)->Patch {
+    pub fn new(authors:Vec<String>,name:String,description:Option<String>,timestamp:i64,changes:Vec<Change>)->Patch {
         let deps=dependencies(&changes);
         Patch {
+            authors:authors,
+            name:name,
+            description:description,
+            timestamp:timestamp,
             changes:changes,
             dependencies:deps
         }
     }
     pub fn empty()->Patch {
-        Patch { changes:vec!(), dependencies:HashSet::new() }
+        Patch { authors:vec!(),name:"".to_string(),description:None,timestamp:0,
+                changes:vec!(), dependencies:HashSet::new() }
     }
     pub fn from_reader<R>(r:&mut R)->Result<Patch,Error> where R:Read {
         let p=try!(bincode::serde::deserialize_from(r,SizeLimit::Infinite).map_err(Error::PatchDecoding));

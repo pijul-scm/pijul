@@ -30,7 +30,8 @@ use self::libpijul::patch::{Patch};
 
 use super::remote;
 use std::fs::File;
-use std::collections::HashMap;
+//use std::collections::HashMap;
+use super::ask::ask_apply;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -79,15 +80,16 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             let mut session=try!(args.remote.session());
             let pullable=try!(remote::pullable_patches(r,&mut session));
             // Loading a patch's dependencies
-            let mut deps=HashMap::new();
+            let mut deps=Vec::new();
             for i in pullable.iter() {
                 let patch={
                     let filename=try!(session.download_patch(r,i));
                     let mut file=try!(File::open(filename));
                     try!(Patch::from_reader(&mut file))
                 };
-                deps.insert(i,patch.dependencies);
+                deps.push((&i[..],patch));
             }
+            try!(ask_apply("pull",&deps));
             // Pulling and applying
             remote::pull(r,&mut session,&pullable)
         }

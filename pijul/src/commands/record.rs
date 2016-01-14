@@ -27,6 +27,7 @@ use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, fin
 use std::sync::Arc;
 
 use std::thread;
+extern crate time;
 
 use commands::error::Error;
 use std::collections::HashSet;
@@ -37,7 +38,6 @@ use std::path::{Path};
 use std::io::{BufWriter};
 use std::fs::File;
 
-extern crate time;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -78,7 +78,11 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 Ok(None)
             } else {
                 //println!("patch: {:?}",changes);
-                let patch=Patch::new(changes);
+                let patch=Patch::new(vec!("Me <me@mydomain.com>".to_string()),
+                                     "no name".to_string(),
+                                     None,
+                                     self::time::now().to_timespec().sec,
+                                     changes);
                 // save patch
                 info!("patch ready: {} changes", patch.changes.len());
                 let patch_arc=Arc::new(patch);
