@@ -5,7 +5,7 @@ extern crate log;
 
 extern crate libpijul;
 mod commands;
-
+mod languages;
 extern crate time;
 
 extern crate env_logger;

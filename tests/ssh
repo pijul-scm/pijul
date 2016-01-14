@@ -59,7 +59,7 @@ pijul record
 
 cd /tmp/a
 echo "pulling"
-pijul pull /tmp/b
+pijul pull /tmp/b -a
 echo "-----------"
 cat /tmp/a/file
 echo "-----------"

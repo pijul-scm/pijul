@@ -29,34 +29,75 @@ use std::fs::File;
 use self::libpijul::patch::{Patch};
 extern crate rustc_serialize;
 use self::rustc_serialize::hex::{ToHex};
+use super::ask::{ask_apply,Command};
+use super::super::languages::{get_language,Translate,Language,Territory};
+
+#[derive(Clone,Copy)]
+enum Push {
+    About,
+    Remote,
+    Local,
+    Port
+}
+impl Translate for Push {
+    fn trans(&self,l:Language,v:Option<Territory>)-> &'static str {
+        match *self {
+            Push::About => {
+                match (l,v) {
+                    (Language::FR,_) => "Pousse des patchs locaux vers un dépôt distant",
+                    (Language::EN,_) => "Pushes local patches to a remote repository"
+                }
+            },
+            Push::Remote => {
+                match (l,v) {
+                    (Language::FR,_) => "Adresse du dépôt distant",
+                    (Language::EN,_) => "Location of the remote repository"
+                }
+            },
+            Push::Local => {
+                match (l,v) {
+                    (Language::FR,_) => "Chemin du dépôt local",
+                    (Language::EN,_) => "Path to the local repository"
+                }
+            },
+            Push::Port => {
+                match (l,v) {
+                    (Language::FR,_) => "Port du serveur SSH distant",
+                    (Language::EN,_) => "Port of the remote SSH host"
+                }
+            }
+        }
+    }
+}
 
 pub fn invocation() -> StaticSubcommand {
+    let (l,t)=get_language();
     return
         SubCommand::with_name("push")
-        .about("push to a remote repository")
+        .about(Push::About.trans(l,t))
         .arg(Arg::with_name("remote")
-             .help("Repository to push to.")
+             .help(Push::Remote.trans(l,t))
              )
         .arg(Arg::with_name("repository")
-             .help("Local repository.")
+             .help(Push::Local.trans(l,t))
              )
         .arg(Arg::with_name("port")
              .short("p")
              .long("port")
-             .help("Port of the remote ssh server.")
+             .help(Push::Port.trans(l,t))
              .takes_value(true)
              .validator(|val| { let x:Result<u16,_>=val.parse();
                                 match x { Ok(_)=>Ok(()),
                                           Err(_)=>Err(val) }
-             })
-             )
+             }))
 }
 
 #[derive(Debug)]
 pub struct Params<'a> {
     pub repository : &'a Path,
     pub remote : remote::Remote<'a>,
-    pub remote_id : &'a str
+    pub remote_id : &'a str,
+    pub yes_to_all : bool
 }
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
@@ -65,20 +106,32 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
     let remote=remote::parse_remote(&remote_id,args);
     Params { repository : repository,
              remote : remote,
-             remote_id : remote_id }
+             remote_id : remote_id,
+             yes_to_all : args.is_present("all") }
 }
 
 pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
     let pwd = args.repository;
+    let (l,t)=get_language();
     match find_repo_root(&pwd){
         None => return Err(Error::NotInARepository),
         Some(r) => {
             let mut session=try!(args.remote.session());
-            let pushable=try!(remote::pushable_patches(r,&mut session));
-            for i in pushable.iter() {
-                let filename=patches_dir(r).join(i.to_hex()).with_extension("cbor");
-                let mut file=try!(File::open(filename));
-                try!(Patch::from_reader(&mut file));
+            let mut pushable=try!(remote::pushable_patches(r,&mut session));
+            if !args.yes_to_all {
+                let selected={
+                    let mut patches=Vec::new();
+                    for i in pushable.iter() {
+                        let patch={
+                            let filename=patches_dir(r).join(i.to_hex()).with_extension("cbor");
+                            let mut file=try!(File::open(filename));
+                            try!(Patch::from_reader(&mut file))
+                        };
+                        patches.push((&i[..],patch));
+                    }
+                    try!(ask_apply(Command::Push,l,t,&patches))
+                };
+                pushable=selected;
             }
             remote::push(r,&mut session,&pushable)
         }

@@ -30,8 +30,8 @@ use self::libpijul::patch::{Patch};
 
 use super::remote;
 use std::fs::File;
-//use std::collections::HashMap;
-use super::ask::ask_apply;
+use super::ask::{ask_apply,Command};
+use super::super::languages::get_language;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -42,6 +42,12 @@ pub fn invocation() -> StaticSubcommand {
              )
         .arg(Arg::with_name("repository")
              .help("Local repository.")
+             )
+        .arg(Arg::with_name("all")
+             .short("a")
+             .long("all")
+             .help("Answer 'y' to all questions")
+             .takes_value(false)
              )
         .arg(Arg::with_name("port")
              .short("p")
@@ -59,7 +65,8 @@ pub fn invocation() -> StaticSubcommand {
 pub struct Params<'a> {
     pub repository : &'a Path,
     pub remote : Remote<'a>,
-    pub remote_id : &'a str
+    pub remote_id : &'a str,
+    pub yes_to_all : bool
 }
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
@@ -68,28 +75,35 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
     let remote=remote::parse_remote(&remote_id,args);
     Params { repository : repository,
              remote : remote,
-             remote_id : remote_id }
+             remote_id : remote_id,
+             yes_to_all : args.is_present("all") }
 }
 
 pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
     let pwd = args.repository;
     debug!("pull args {:?}",args);
+    let (l,t)=get_language();
     match find_repo_root(&pwd){
         None => return Err(Error::NotInARepository),
         Some(r) => {
             let mut session=try!(args.remote.session());
-            let pullable=try!(remote::pullable_patches(r,&mut session));
+            let mut pullable=try!(remote::pullable_patches(r,&mut session));
             // Loading a patch's dependencies
-            let mut deps=Vec::new();
-            for i in pullable.iter() {
-                let patch={
-                    let filename=try!(session.download_patch(r,i));
-                    let mut file=try!(File::open(filename));
-                    try!(Patch::from_reader(&mut file))
+            if !args.yes_to_all {
+                let selected={
+                    let mut patches=Vec::new();
+                    for i in pullable.iter() {
+                        let patch={
+                            let filename=try!(session.download_patch(r,i));
+                            let mut file=try!(File::open(filename));
+                            try!(Patch::from_reader(&mut file))
+                        };
+                        patches.push((&i[..],patch));
+                    }
+                    try!(ask_apply(Command::Pull,l,t,&patches))
                 };
-                deps.push((&i[..],patch));
+                pullable.remote=selected;
             }
-            try!(ask_apply("pull",&deps));
             // Pulling and applying
             remote::pull(r,&mut session,&pullable)
         }

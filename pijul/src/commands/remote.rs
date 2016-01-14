@@ -326,8 +326,8 @@ pub fn parse_remote<'a>(remote_id:&'a str,args:&'a ArgMatches)->Remote<'a> {
 // Reimplementation of hash_set::Difference (because of unstable features used there)
 
 pub struct Pullable {
-    local:HashSet<Vec<u8>>,
-    remote:HashSet<Vec<u8>>
+    pub local:HashSet<Vec<u8>>,
+    pub remote:HashSet<Vec<u8>>
 }
 
 pub struct PullableIter<'a> { iter:Iter<'a,Vec<u8>>, pullable:&'a Pullable }

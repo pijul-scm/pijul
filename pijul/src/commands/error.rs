@@ -40,7 +40,7 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn description(&self) -> &str {
         match *self {
-            Error::NotInARepository => "not in a repository",
+            Error::NotInARepository => "Not in a repository",
             Error::InARepository => "In a repository",
             Error::IoError(ref err) => error::Error::description(err),
             Error::Repository(ref err) => libpijul::error::Error::description(err),
