@@ -60,7 +60,7 @@ pub enum Change {
         up_context:Vec<ExternalKey>,
         down_context:Vec<ExternalKey>,
         flag:Flag,
-        line_num:usize,
+        line_num:u32,
         nodes:Vec<Vec<u8>>
     },
     Edges{ flag:Flag,

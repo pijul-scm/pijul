@@ -391,7 +391,7 @@ pub fn push<'a>(source:&Path,to_session:&mut Session<'a>,pushable:&HashSet<Vec<u
 
 
 /// Assumes all patches have been downloaded. Only pull, push locally, and apply need this.
-fn apply_patches<'a>(r:&Path,
+pub fn apply_patches<'a>(r:&Path,
                      remote_patches:&HashSet<Vec<u8>>,
                      local_patches:&HashSet<Vec<u8>>) -> Result<(), Error> {
     debug!("local {}, remote {}",local_patches.len(),remote_patches.len());

@@ -16,20 +16,21 @@ EOF
 
 pijul add file
 echo "----------- Record a"
-pijul record
+pijul record -a
 
 
 cd /tmp
+echo "----------- Cloning"
 pijul clone a localhost:/tmp/b
 
-rm -Rf /var/www/html/bla
-pijul clone b /var/www/html/bla/bli
+# rm -Rf /var/www/html/bla
+# pijul clone b /var/www/html/bla/bli
 
-cd /tmp
-pijul clone http://localhost/bla/bli http
-echo "-----------"
-cat /tmp/http/file
-echo "-----------"
+# cd /tmp
+# pijul clone http://localhost/bla/bli http
+# echo "-----------"
+# cat /tmp/http/file
+# echo "-----------"
 
 
 echo "-----------"
@@ -42,48 +43,51 @@ X
 U
 Y
 EOF
-pijul record
-pijul push localhost:/tmp/b
+pijul record -a
+cd /tmp/a
+pijul push -a localhost:/tmp/b
 
 echo "-----------"
 cat /tmp/b/file
 echo "-----------"
 
-cd /tmp/b/
-cat << EOF > /tmp/b/file
-X
-blabla
-Y
-EOF
-pijul record
+# dot -Tpdf -o /tmp/b/b.pdf /tmp/b/debug
 
-cd /tmp/a
-echo "pulling"
-pijul pull /tmp/b -a
-echo "-----------"
-cat /tmp/a/file
-echo "-----------"
+# cd /tmp/a/
+# cat << EOF > /tmp/a/file
+# X
+# blabla
+# Y
+# EOF
+# pijul record
 
-cd /tmp/b/
-cat << EOF > /tmp/b/file
-X
-blabla
-Y
-encore un coup
-EOF
-pijul record
+# cd /tmp/a
+# echo "pulling"
+# pijul pull /tmp/b -a
+# echo "-----------"
+# cat /tmp/a/file
+# echo "-----------"
 
-cd /tmp/a
-echo "pulling"
-pijul pull localhost:/tmp/b
-echo "-----------"
-cat /tmp/a/file
-echo "-----------"
+# cd /tmp/b/
+# cat << EOF > /tmp/b/file
+# X
+# blabla
+# Y
+# encore un coup
+# EOF
+# pijul record
 
-pijul push /var/www/html/bla/bli
+# cd /tmp/a
+# echo "pulling"
+# pijul pull localhost:/tmp/b
+# echo "-----------"
+# cat /tmp/a/file
+# echo "-----------"
 
-cd /tmp/http
-pijul pull http://localhost/bla/bli
-echo "-----------"
-cat /tmp/http/file
-echo "-----------"
+# pijul push /var/www/html/bla/bli
+
+# cd /tmp/http
+# pijul pull http://localhost/bla/bli
+# echo "-----------"
+# cat /tmp/http/file
+# echo "-----------"

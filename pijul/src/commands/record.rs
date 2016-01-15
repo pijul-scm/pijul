@@ -28,7 +28,6 @@ use std::sync::Arc;
 
 use std::thread;
 extern crate time;
-
 use commands::error::Error;
 use std::collections::HashSet;
 
@@ -38,7 +37,6 @@ use std::path::{Path};
 use std::io::{BufWriter};
 use std::fs::File;
 
-
 pub fn invocation() -> StaticSubcommand {
     return
         SubCommand::with_name("record")
@@ -46,16 +44,24 @@ pub fn invocation() -> StaticSubcommand {
         .arg(Arg::with_name("repository")
              .long("repository")
              .help("The repository where to record, defaults to the current directory.")
-             .required(false));
+             .required(false))
+        .arg(Arg::with_name("all")
+             .short("a")
+             .long("all")
+             .help("Answer 'y' to all questions")
+             .takes_value(false)
+             )
 }
 
 pub struct Params<'a> {
-    pub repository : &'a Path
+    pub repository : &'a Path,
+    pub yes_to_all : bool
 }
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 {
-    Params { repository : Path::new(args.value_of("repository").unwrap_or("."))}
+    Params { repository : Path::new(args.value_of("repository").unwrap_or(".")),
+             yes_to_all : args.is_present("all") }
 }
 
 pub fn run(params : &Params) -> Result<Option<()>, Error> {
@@ -67,11 +73,23 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
             let t0=time::precise_time_s();
             let (changes,syncs)= {
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                try!(repo.record(&r).map_err(Error::Repository))
+                let (changes,syncs)=try!(repo.record(&r).map_err(Error::Repository));
+                if !params.yes_to_all {
+                    let c=try!(super::ask::ask_record(&repo,&changes));
+                    let selected =
+                        changes.into_iter()
+                        .enumerate()
+                        .filter(|&(i,_)| { *(c.get(&i).unwrap_or(&false)) })
+                        .map(|(_,x)| x)
+                        .collect();
+
+                    (selected,syncs)
+                } else {
+                    (changes,syncs)
+                }
             };
             let t1=time::precise_time_s();
-            info!("computed patch in {}s", t1-t0);
-
+            debug!("record took {}s",t1-t0);
             //println!("recorded");
             if changes.is_empty() {
                 println!("Nothing to record");
@@ -108,7 +126,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 //info!("applied patch in {}s", t1-t0);
                 debug!(target:"pijul","synchronizing tree");
                 repo.sync_file_additions(&patch_arc.changes[..],&syncs, &internal);
-                if true || cfg!(debug_assertions){
+                if cfg!(debug_assertions){
                     let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
                     repo.debug(&mut buffer);
                 }

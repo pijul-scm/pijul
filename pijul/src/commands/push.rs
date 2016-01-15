@@ -29,67 +29,33 @@ use std::fs::File;
 use self::libpijul::patch::{Patch};
 extern crate rustc_serialize;
 use self::rustc_serialize::hex::{ToHex};
-use super::ask::{ask_apply,Command};
-use super::super::languages::{get_language,Translate,Language,Territory};
-
-#[derive(Clone,Copy)]
-enum Push {
-    About,
-    Remote,
-    Local,
-    Port
-}
-impl Translate for Push {
-    fn trans(&self,l:Language,v:Option<Territory>)-> &'static str {
-        match *self {
-            Push::About => {
-                match (l,v) {
-                    (Language::FR,_) => "Pousse des patchs locaux vers un dépôt distant",
-                    (Language::EN,_) => "Pushes local patches to a remote repository"
-                }
-            },
-            Push::Remote => {
-                match (l,v) {
-                    (Language::FR,_) => "Adresse du dépôt distant",
-                    (Language::EN,_) => "Location of the remote repository"
-                }
-            },
-            Push::Local => {
-                match (l,v) {
-                    (Language::FR,_) => "Chemin du dépôt local",
-                    (Language::EN,_) => "Path to the local repository"
-                }
-            },
-            Push::Port => {
-                match (l,v) {
-                    (Language::FR,_) => "Port du serveur SSH distant",
-                    (Language::EN,_) => "Port of the remote SSH host"
-                }
-            }
-        }
-    }
-}
 
 pub fn invocation() -> StaticSubcommand {
-    let (l,t)=get_language();
     return
         SubCommand::with_name("push")
-        .about(Push::About.trans(l,t))
+        .about("push to a remote repository")
         .arg(Arg::with_name("remote")
-             .help(Push::Remote.trans(l,t))
+             .help("Repository to push to.")
              )
         .arg(Arg::with_name("repository")
-             .help(Push::Local.trans(l,t))
+             .help("Local repository.")
+             )
+        .arg(Arg::with_name("all")
+             .short("a")
+             .long("all")
+             .help("Answer 'y' to all questions")
+             .takes_value(false)
              )
         .arg(Arg::with_name("port")
              .short("p")
              .long("port")
-             .help(Push::Port.trans(l,t))
+             .help("Port of the remote ssh server.")
              .takes_value(true)
              .validator(|val| { let x:Result<u16,_>=val.parse();
                                 match x { Ok(_)=>Ok(()),
                                           Err(_)=>Err(val) }
-             }))
+             })
+             )
 }
 
 #[derive(Debug)]
@@ -112,7 +78,6 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
 
 pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
     let pwd = args.repository;
-    let (l,t)=get_language();
     match find_repo_root(&pwd){
         None => return Err(Error::NotInARepository),
         Some(r) => {
@@ -129,7 +94,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                         };
                         patches.push((&i[..],patch));
                     }
-                    try!(ask_apply(Command::Push,l,t,&patches))
+                    try!(super::ask::ask_apply(super::ask::Command::Push,&patches))
                 };
                 pushable=selected;
             }

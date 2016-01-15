@@ -5,7 +5,7 @@ extern crate rustc_serialize;
 use self::rustc_serialize::hex::{ToHex};
 extern crate libpijul;
 //use self::libpijul::fs_representation::{patches_dir};
-use self::libpijul::patch::Patch;
+use self::libpijul::patch::{Change,Patch,LINE_SIZE,HASH_SIZE,KEY_SIZE};
 extern crate time;
 use self::time::{Duration};
 //use std::path::Path;
@@ -17,10 +17,11 @@ extern crate termios;
 use self::termios::{tcsetattr,ICANON,ECHO};
 
 use super::error::Error;
-
+use self::libpijul::{Repository,FOLDER_EDGE,DELETED_EDGE,PARENT_EDGE};
 use std::io::stdin;
 use std::char::from_u32_unchecked;
-use super::super::languages::*;
+use std::str;
+use std::ptr::copy_nonoverlapping;
 
 const EPOCH:time::Tm = time::Tm {
     tm_sec:0,
@@ -103,69 +104,18 @@ pub enum Command {
     Pull,
     Push
 }
-impl Translate for Command {
-    fn trans(&self,l:Language,v:Option<Territory>)->&'static str {
-        match *self {
-            Command::Pull => {
-                match (l,v) {
-                    (Language::FR,Some(Territory::BE)) => "Voulez-vous tirer ce patch, une fois ?",
-                    (Language::FR,_) => "Voulez-vous tirer ce patch ?",
-                    (Language::EN,_) => "Do you want to pull this patch?"
-                }
-            },
-            Command::Push => {
-                match (l,v) {
-                    (Language::FR,_) => "Voulez-vous pousser ce patch ?",
-                    (Language::EN,_) => "Do you want to push this patch?"
-                }
-            }
-        }
-    }
-}
 
-#[derive(Clone,Copy)]
-pub enum P {
-    Hash,
-    Authors,
-    Timestamp
-}
-impl Translate for P {
-    fn trans(&self,l:Language,v:Option<Territory>)->&'static str {
-        match *self {
-            P::Hash => {
-                match (l,v) {
-                    (Language::FR,_) => "Empreinte :",
-                    (Language::EN,_) => "Hash:"
-                }
-            },
-            P::Authors => {
-                match (l,v) {
-                    (Language::FR,_) => "Auteurs :",
-                    (Language::EN,_) => "Authors:"
-                }
-            },
-            P::Timestamp => {
-                match (l,v) {
-                    (Language::FR,_) => "Horodatage :",
-                    (Language::EN,_) => "Timestamp:"
-                }
-            }
-        }
-    }
-}
-
-
-fn print_patch_descr(l:Language,t:Option<Territory>,hash:&[u8],patch:&Patch) {
+fn print_patch_descr(hash:&[u8],patch:&Patch) {
     let time=EPOCH + Duration::seconds(patch.timestamp);
-    println!("{} {}",P::Hash.trans(l,t), hash.to_hex());
-    println!("{} {:?}",P::Authors.trans(l,t), patch.authors);
-    println!("{} {}",P::Timestamp.trans(l,t), time.to_local().rfc822z());
+    println!("Hash: {}",hash.to_hex());
+    println!("Authors: {:?}",patch.authors);
+    println!("Timestamp {}",time.to_local().rfc822z());
     println!("  * {}",patch.name);
     match patch.description { Some(ref d)=>println!("  {}",d), None=>{} };
 }
 
 /// Patches might have a dummy "changes" field here.
-pub fn ask_apply<'a>(command_name:Command, language:Language,territory:Option<Territory>,
+pub fn ask_apply<'a>(command_name:Command,
                      patches:&'a [(&'a[u8],Patch)])->Result<HashSet<Vec<u8>>,Error> {
     //let patches_path=patches_dir(repo_path);
     try!(init_getch());
@@ -197,8 +147,12 @@ pub fn ask_apply<'a>(command_name:Command, language:Language,territory:Option<Te
             None=>{
                 match final_decision {
                     None => {
-                        print_patch_descr(language,territory,a,b);
-                        print!("{} [ynkad] ",command_name.trans(language,territory));
+                        print_patch_descr(a,b);
+                        print!("{} [ynkad] ",
+                               match command_name {
+                                   Command::Push => "Shall I push this patch?",
+                                   Command::Pull => "Shall I pull this patch?"
+                               });
                         try!(stdout().flush());
                         match getch() {
                             Ok(e)=> {
@@ -253,4 +207,172 @@ pub fn ask_apply<'a>(command_name:Command, language:Language,territory:Option<Te
         }
     }
     Ok(selected)
+}
+
+
+fn change_deps(id:usize,c:&Change,provided_by:&mut HashMap<u32,usize>)->HashSet<u32> {
+    let mut s=HashSet::new();
+    match *c {
+        Change::NewNodes{ref up_context,ref down_context,ref line_num,ref nodes,..}=>{
+            for cont in up_context.iter().chain(down_context) {
+                if cont.len() == LINE_SIZE {
+                    let x=(cont[0] as u32)
+                        | ((cont[1] as u32) << 8)
+                        | ((cont[2] as u32) << 16)
+                        | ((cont[3] as u32) << 24);
+                    s.insert(x);
+                }
+            }
+            for i in *line_num..(*line_num+nodes.len() as u32) {
+                provided_by.insert(i,id);
+            }
+        },
+        Change::Edges { ref edges,.. } => {
+            for e in edges {
+                if e.from.len() == LINE_SIZE {
+                    let cont=&e.from;
+                    let x=(cont[0] as u32)
+                        | ((cont[1] as u32) << 8)
+                        | ((cont[2] as u32) << 16)
+                        | ((cont[3] as u32) << 24);
+                    s.insert(x);
+                }
+                if e.to.len() == LINE_SIZE {
+                    let cont=&e.to;
+                    let x=(cont[0] as u32)
+                        | ((cont[1] as u32) << 8)
+                        | ((cont[2] as u32) << 16)
+                        | ((cont[3] as u32) << 24);
+                    s.insert(x);
+                }
+            }
+        }
+    }
+    s
+}
+
+fn print_change<'a>(repo:&Repository<'a>,c:&Change)->Result<(),Error> {
+    match *c {
+        Change::NewNodes{/*ref up_context,ref down_context,ref line_num,*/ref flag,ref nodes,..}=>{
+            for n in nodes {
+                if *flag & FOLDER_EDGE != 0 {
+                    if n.len()>=2 {
+                        println!("new file {}",str::from_utf8(&n[2..]).unwrap_or(""));
+                    }
+                } else {
+                    print!("+ {}",str::from_utf8(n).unwrap_or(""));
+                }
+            }
+            Ok(())
+        },
+        Change::Edges {ref edges,ref flag,..}=>{
+            let mut h_targets=HashSet::with_capacity(edges.len());
+            for e in edges {
+                let target=
+                    if *flag & PARENT_EDGE == 0 {
+                        if h_targets.insert(&e.to) { Some(&e.to) } else { None }
+                    } else {
+                        if h_targets.insert(&e.from) { Some(&e.from) } else { None }
+                    };
+                if let Some(target)=target {
+                    let int=try!(repo.internal_hash(&target[0..target.len()-LINE_SIZE]));
+                    let mut internal=[0;KEY_SIZE];
+                    unsafe {
+                        copy_nonoverlapping(int.as_ptr(),internal.as_mut_ptr(),HASH_SIZE);
+                        copy_nonoverlapping(target.as_ptr().offset((target.len() - LINE_SIZE) as isize),
+                                            internal.as_mut_ptr().offset(HASH_SIZE as isize),
+                                            LINE_SIZE)
+                    };
+                    print!("- {}",str::from_utf8(repo.contents(&internal[..])).unwrap_or(""));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+pub fn ask_record<'a>(repository:&Repository<'a>,changes:&[Change])->Result<HashMap<usize,bool>,Error> {
+    try!(init_getch());
+    let mut i=0;
+    let mut choices:HashMap<usize,bool>=HashMap::new();
+    let mut final_decision=None;
+    let mut provided_by=HashMap::new();
+    let mut line_deps=Vec::with_capacity(changes.len());
+    for i in 0..changes.len() {
+        line_deps.push(change_deps(i,&changes[i],&mut provided_by));
+    }
+    let mut deps:HashMap<usize,Vec<usize>>=HashMap::new();
+    let mut rev_deps:HashMap<usize,Vec<usize>>=HashMap::new();
+    for i in 0..changes.len() {
+        for dep in line_deps[i].iter() {
+            println!("provided: i {}, dep {}",i,dep);
+            let p=provided_by.get(dep).unwrap();
+            println!("provided: p= {}",p);
+
+            let e=deps.entry(i).or_insert(Vec::new());
+            e.push(*p);
+
+            let e=rev_deps.entry(*p).or_insert(Vec::new());
+            e.push(i);
+        }
+    }
+    let empty_deps=Vec::new();
+    while i < changes.len() {
+        let decision=
+            // If one of our dependencies has been unselected (with "n")
+            if deps.get(&i).unwrap_or(&empty_deps).iter().any(|x| { ! *(choices.get(x).unwrap_or(&true)) }) {
+                Some(false)
+            } else if rev_deps.get(&i).unwrap_or(&empty_deps).iter().any(|x| { *(choices.get(x).unwrap_or(&false)) }) {
+                // If we are a dependency of someone selected (with "y").
+                Some(true)
+            } else {
+                None
+            };
+        let e=match decision {
+            Some(true)=>'Y',
+            Some(false)=>'N',
+            None=>{
+                match final_decision {
+                    None => {
+                        print_change(repository,&changes[i]);
+                        print!("Shall I record this change? [ynkad] ");
+                        try!(stdout().flush());
+                        match getch() {
+                            Ok(e)=> {
+                                let e= unsafe { from_u32_unchecked(e) };
+                                println!("{}",e);
+                                let e=e.to_uppercase().next().unwrap_or('\0');
+                                match e {
+                                    'A'=> { final_decision=Some('Y'); 'Y' },
+                                    'D'=> { final_decision=Some('N'); 'N' },
+                                    e=>e
+                                }
+                            },
+                            _=>{
+                                unsafe { from_u32_unchecked(0) }
+                            }
+                        }
+                    },
+                    Some(d)=>d
+                }
+            }
+        };
+        match e {
+            'Y' => {
+                choices.insert(i,true);
+                i+=1
+            },
+            'N' => {
+                choices.insert(i,false);
+                i+=1
+            },
+            'K' if i>0 => {
+                choices.remove(&i);
+                i-=1
+            },
+            _=>{}
+        }
+    }
+    try!(end_getch());
+    Ok(choices)
 }

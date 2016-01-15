@@ -31,7 +31,6 @@ use self::libpijul::patch::{Patch};
 use super::remote;
 use std::fs::File;
 use super::ask::{ask_apply,Command};
-use super::super::languages::get_language;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -82,7 +81,6 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
 pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
     let pwd = args.repository;
     debug!("pull args {:?}",args);
-    let (l,t)=get_language();
     match find_repo_root(&pwd){
         None => return Err(Error::NotInARepository),
         Some(r) => {
@@ -100,7 +98,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                         };
                         patches.push((&i[..],patch));
                     }
-                    try!(ask_apply(Command::Pull,l,t,&patches))
+                    try!(ask_apply(Command::Pull,&patches))
                 };
                 pullable.remote=selected;
             }

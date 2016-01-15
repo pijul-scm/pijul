@@ -21,22 +21,19 @@ use clap::{SubCommand, ArgMatches, Arg};
 
 extern crate libpijul;
 use commands::StaticSubcommand;
-use self::libpijul::{Repository};
-use self::libpijul::patch::{Patch,HASH_SIZE};
-use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root, branch_changes_file};
+use self::libpijul::{DEFAULT_BRANCH};
+use self::libpijul::patch::{read_changes_from_file};
+use self::libpijul::fs_representation::{find_repo_root, branch_changes_file};
 
 use commands::error::Error;
-use std::collections::{HashSet,HashMap};
+use std::collections::{HashSet};
 
-extern crate rand;
 use std::path::{Path};
 
-use std::io::{BufReader};
-use std::fs::File;
-
+extern crate time;
+use super::remote::apply_patches;
 extern crate rustc_serialize;
 use self::rustc_serialize::hex::{FromHex};
-extern crate time;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -54,46 +51,37 @@ pub fn invocation() -> StaticSubcommand {
 
 pub struct Params<'a> {
     pub repository : &'a Path,
-    pub hex_hash : &'a str
+    pub hex_hash : Vec<&'a str>
 }
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 {
     Params {
         repository : Path::new(args.value_of("repository").unwrap_or(".")),
-        hex_hash : args.value_of("patch").unwrap()
+        hex_hash : args.values_of("patch").unwrap()
     }
 }
 
 pub fn run(params : &Params) -> Result<Option<()>, Error> {
     match find_repo_root(&params.repository){
         None => return Err(Error::NotInARepository),
-        Some(r) =>
+        Some(target) =>
         {
-            let repo_dir=pristine_dir(r);
-            let t0=time::precise_time_s();
-            let patch={
-                let path=patches_dir(r).join(params.hex_hash).with_extension("cbor");
-                let file=try!(File::open(&path));
-                let mut r = BufReader::new(file);
-                try!(Patch::from_reader(&mut r))
-            };//Patch::new(changes);
-            let mut internal=[0;HASH_SIZE];
-            let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-            repo.new_internal(&mut internal);
-            debug!(target:"pijul","applying patch");
-
-            let mut repo=repo.apply(&patch, &internal, &HashSet::new()).unwrap();
-            repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);
-
-            let t2=time::precise_time_s();
-            info!("applied patch in {}s", t2-t0);
-            let hash=try!(params.hex_hash.from_hex());
-            repo.register_hash(&internal[..],&hash);
-            repo.write_changes_file(&branch_changes_file(r,repo.get_current_branch())).unwrap();
-            let t3=time::precise_time_s();
-            info!("changes files took {}s to write", t3-t2);
-            try!(repo.output_repository(&r,&Patch::empty()));
+            debug!("applying");
+            let remote:HashSet<Vec<u8>>={
+                let mut h=HashSet::new();
+                for i in params.hex_hash.iter() {
+                    h.insert(i.from_hex().unwrap());
+                }
+                h
+            };
+            debug!("remote={:?}",remote);
+            let local:HashSet<Vec<u8>>={
+                let changes_file=branch_changes_file(target,DEFAULT_BRANCH.as_bytes());
+                read_changes_from_file(&changes_file).unwrap_or(HashSet::new())
+            };
+            debug!("local={:?}",local);
+            try!(apply_patches(target,&remote,&local));
             Ok(Some(()))
         }
     }

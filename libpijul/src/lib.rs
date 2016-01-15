@@ -93,9 +93,9 @@ const ROOT_INODE:&'static[u8]=&[0;INODE_SIZE];
 pub const DEFAULT_BRANCH:&'static str="main";
 
 const PSEUDO_EDGE:u8=1;
-const FOLDER_EDGE:u8=2;
-const PARENT_EDGE:u8=4;
-const DELETED_EDGE:u8=8;
+pub const FOLDER_EDGE:u8=2;
+pub const PARENT_EDGE:u8=4;
+pub const DELETED_EDGE:u8=8;
 pub type Inode=Vec<u8>;
 const DIRECTORY_FLAG:usize = 0x200;
 
@@ -587,7 +587,7 @@ impl <'a> Repository<'a> {
         Ok(Graph { lines:lines, children:children })
     }
 
-    fn contents<'b>(&'a self,key:&'b[u8]) -> &'a[u8] {
+    pub fn contents<'b>(&'a self,key:&'b[u8]) -> &'a[u8] {
         debug_assert!(key.len() == KEY_SIZE);
         match self.mdb_txn.get(self.dbi_contents,key) {
             Ok(Some(v))=>v,
@@ -966,7 +966,7 @@ impl <'a> Repository<'a> {
     }
 
 
-    fn internal_hash(&'a self,key:&[u8])->Result<&'a [u8],Error> {
+    pub fn internal_hash(&'a self,key:&[u8])->Result<&'a [u8],Error> {
         debug!("internal_hash: {}, {}",to_hex(key), key.len());
         if key.len()==HASH_SIZE
             && unsafe { memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t) }==0 {
@@ -1106,7 +1106,7 @@ impl <'a> Repository<'a> {
                     Change::NewNodes {
                         up_context:vec!(repo.external_key(up_context)),
                         down_context:down_context.iter().map(|x|{repo.external_key(x)}).collect(),
-                        line_num: *line_num,
+                        line_num: *line_num as u32,
                         flag:0,
                         nodes:lines.iter().map(|x|{x.to_vec()}).collect()
                     });
@@ -1302,7 +1302,7 @@ impl <'a> Repository<'a> {
                                 actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
                                 actions.push(
                                     Change::NewNodes { up_context: vec!(self.external_key(parent_node.unwrap())),
-                                                       line_num: *line_num,
+                                                       line_num: *line_num as u32,
                                                        down_context: vec!(self.external_key(&current_node[3..])),
                                                        nodes: vec!(name),
                                                        flag:FOLDER_EDGE }
@@ -1402,7 +1402,7 @@ impl <'a> Repository<'a> {
                                         if parent_node.unwrap().len()>LINE_SIZE { self.external_key(parent_node.unwrap()) }
                                         else {parent_node.unwrap().to_vec()}
                                             ),
-                                                       line_num: *line_num,
+                                                       line_num: *line_num as u32,
                                                        down_context: vec!(),
                                                        nodes: vec!(name,vec!()),
                                                        flag:FOLDER_EDGE }
@@ -1425,7 +1425,7 @@ impl <'a> Repository<'a> {
                                     if !nodes.is_empty() {
                                         actions.push(
                                             Change::NewNodes { up_context:vec!(l2.to_vec()),
-                                                               line_num: *line_num,
+                                                               line_num: *line_num as u32,
                                                                down_context: vec!(),
                                                                nodes: nodes,
                                                                flag:0 }
