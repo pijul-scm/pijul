@@ -9,4 +9,5 @@ libpijul = { version = "*", path = "../libpijul" }
 libc="*"
 
 [lib]
+name="cpijul"
 crate-type=["staticlib"]

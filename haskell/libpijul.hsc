@@ -20,8 +20,14 @@ withRepository path f =
         (\p -> do { pijul_close_repository p })
         f
 
+foreign import ccall pijul_add_file :: Ptr CRepository -> CString->CInt-> IO ()
+
+addFile::Repository->String->Bool->IO ()
+addFile rep path isDir=
+    withCString path $ \cpath->pijul_add_file rep cpath (if isDir then 1 else 0)
 
 
 
 main=
-  withRepository "/tmp/a" $ \repo->print "bla"
+  withRepository "/tmp/a" $ \repo->
+      addFile repo "file" False
