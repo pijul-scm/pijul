@@ -6,6 +6,7 @@ use std::string;
 extern crate ssh;
 extern crate rustc_serialize;
 extern crate hyper;
+extern crate toml;
 #[derive(Debug)]
 pub enum Error{
     NotInARepository,
@@ -17,7 +18,8 @@ pub enum Error{
     UTF8(string::FromUtf8Error),
     Hex(rustc_serialize::hex::FromHexError),
     SSH(ssh::Error),
-    Hyper(hyper::error::Error)
+    Hyper(hyper::error::Error),
+    MetaDecoding
 }
 
 impl fmt::Display for Error {
@@ -32,7 +34,8 @@ impl fmt::Display for Error {
             Error::SSH(ref err) => write!(f, "SSH: {}",err),
             Error::Hex(ref err) => write!(f, "Hex: {}",err),
             Error::Hyper(ref err) => write!(f, "Hyper: {}",err),
-            Error::UTF8(ref err) => write!(f, "UTF8Error: {}",err)
+            Error::UTF8(ref err) => write!(f, "UTF8Error: {}",err),
+            Error::MetaDecoding => write!(f, "MetaDecoding"),
         }
     }
 }
@@ -49,7 +52,8 @@ impl error::Error for Error {
             Error::SSH(ref err) => err.description(),
             Error::Hex(ref err) => err.description(),
             Error::Hyper(ref err) => err.description(),
-            Error::UTF8(ref err) => err.description()
+            Error::UTF8(ref err) => err.description(),
+            Error::MetaDecoding => "Error in the decoding of metadata"
         }
     }
 
@@ -64,7 +68,8 @@ impl error::Error for Error {
             Error::SSH(ref err) => Some(err),
             Error::Hex(ref err) => Some(err),
             Error::Hyper(ref err) => Some(err),
-            Error::UTF8(ref err) => Some(err)
+            Error::UTF8(ref err) => Some(err),
+            Error::MetaDecoding => None
         }
     }
 }

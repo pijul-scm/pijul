@@ -37,6 +37,8 @@ use std::path::{Path};
 use std::io::{BufWriter};
 use std::fs::File;
 
+use super::super::meta::{Meta};
+
 pub fn invocation() -> StaticSubcommand {
     return
         SubCommand::with_name("record")
@@ -69,6 +71,11 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
         None => return Err(Error::NotInARepository),
         Some(r) =>
         {
+            let mut meta=Meta::load(r).unwrap_or(Meta::new());
+            println!("{:?}",meta);
+            let pe="pmeunier".to_string();
+            meta.authors=vec!(pe.clone());
+            meta.save(r);
             let repo_dir=pristine_dir(r);
             let t0=time::precise_time_s();
             let (changes,syncs)= {

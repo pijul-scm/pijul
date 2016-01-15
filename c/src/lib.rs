@@ -21,11 +21,12 @@ extern crate libc;
 use libc::{c_char,c_int,c_void,malloc,size_t};
 extern crate libpijul;
 use libpijul::*;
+use libpijul::patch::{HASH_SIZE,LocalKey,Patch,Change};
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::path::{Path};
 use std::ptr::copy_nonoverlapping;
-use std::collections::HashMap;
+use std::collections::{HashMap,HashSet};
 #[no_mangle]
 pub extern "C" fn pijul_open_repository(path:*const c_char,repository:*mut *mut c_void) -> c_int {
     unsafe {
@@ -154,7 +155,9 @@ pub extern "C" fn pijul_has_patch(repository:*mut c_void,branch:*const c_char, e
 pub extern "C" fn pijul_new_patch(changes:*const c_void)->*const c_void {
     unsafe {
         let changes:Box<Vec<Change>>=std::mem::transmute(changes);
-        std::mem::transmute(Box::new(Patch::new(*changes)))
+        let mut patch=Patch::empty();
+        patch.changes= *changes;
+        std::mem::transmute(Box::new(patch))
     }
 }
 
@@ -165,8 +168,9 @@ pub extern "C" fn pijul_apply(repository:*mut c_void,patch:*const c_void,interna
         let repository:&mut Repository=std::mem::transmute(repository);
         let patch:&Patch=std::mem::transmute(patch);
         let internal:&[u8]=std::slice::from_raw_parts(internal as *const u8, HASH_SIZE as usize);
-        match repository.apply(patch,internal) {
-            Ok(())=>0,
+        let local_only=HashSet::new(); // Incorrect
+        match repository.apply(patch,internal,&local_only) {
+            Ok(_)=>0,
             Err(_)=>(-1)
         }
     }
@@ -179,7 +183,7 @@ pub extern "C" fn pijul_write_changes_file(repository:*mut c_void,path:*const c_
         let p=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(path).to_bytes());
         let path=Path::new(p);
         match repository.write_changes_file(path) {
-            Ok(())=>0,
+            Ok(_)=>0,
             Err(_)=>(-1)
         }
     }
@@ -207,7 +211,7 @@ pub extern "C" fn pijul_output_repository(repository:*mut c_void,working_copy:*c
         let pending:&Patch=std::mem::transmute(pending);
 
         match repository.output_repository(path,pending) {
-            Ok(())=>0,
+            Ok(_)=>0,
             Err(_)=>(-1)
         }
     }

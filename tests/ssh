@@ -1,5 +1,9 @@
 #!/bin/bash
 
+RECORD_FLAGS=
+PULL_FLAGS=
+PUSH_FLAGS=
+
 cd /tmp
 rm -Rf a b http
 
@@ -16,7 +20,7 @@ EOF
 
 pijul add file
 echo "----------- Record a"
-pijul record -a
+pijul record $RECORD_FLAGS
 
 
 cd /tmp
@@ -43,9 +47,9 @@ X
 U
 Y
 EOF
-pijul record -a
+pijul record $RECORD_FLAGS
 cd /tmp/a
-pijul push -a localhost:/tmp/b
+pijul push localhost:/tmp/b $PUSH_FLAGS
 
 echo "-----------"
 cat /tmp/b/file
@@ -58,10 +62,10 @@ X
 blabla
 Y
 EOF
-pijul record -a
+pijul record $RECORD_FLAGS
 
 echo "pushing"
-pijul push /tmp/b -a
+pijul push /tmp/b $PUSH_FLAGS
 echo "-----------"
 cat /tmp/b/file
 echo "-----------"
@@ -73,11 +77,11 @@ blabla
 Y
 encore un coup
 EOF
-pijul record -a
+pijul record
 
 cd /tmp/a
 echo "pulling"
-pijul pull localhost:/tmp/b -a
+pijul pull localhost:/tmp/b
 echo "-----------"
 cat /tmp/a/file
 echo "-----------"
@@ -85,10 +89,10 @@ echo "-----------"
 dot -Tpdf -o /tmp/a/a.pdf /tmp/a/debug
 
 
-# pijul push /var/www/html/bla/bli -a
+pijul push /var/www/html/bla/bli $PUSH_FLAGS
 
-# cd /tmp/http
-# pijul pull http://localhost/bla/bli -a
-# echo "-----------"
-# cat /tmp/http/file
-# echo "-----------"
+cd /tmp/http
+pijul pull http://localhost/bla/bli $PULL_FLAGS
+echo "-----------"
+cat /tmp/http/file
+echo "-----------"

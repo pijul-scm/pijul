@@ -1821,7 +1821,7 @@ impl <'a> Repository<'a> {
     }
 
     /// Applies a patch to a repository. "new_patches" are patches that just this repository has, and the remote repository doesn't have.
-    pub fn apply<'b>(mut self, patch:&Patch, internal:&'b [u8], new_patches:&HashSet<&[u8]>)->Result<Repository<'a>,Error> {
+    pub fn apply<'b>(&mut self, patch:&Patch, internal:&'b [u8], new_patches:&HashSet<&[u8]>)->Result<(),Error> {
         let current=self.get_current_branch().to_vec();
         {
             let curs=self.mdb_txn.cursor(self.dbi_branches).unwrap();
@@ -1901,8 +1901,8 @@ impl <'a> Repository<'a> {
                                                             LINE_SIZE);
                                     }
                                 }
-                                repair_missing_context(&mut self,(*flag)&PARENT_EDGE != 0,&u[..]);
-                                repair_missing_context(&mut self,(*flag)&PARENT_EDGE == 0,&v[..]);
+                                repair_missing_context(self,(*flag)&PARENT_EDGE != 0,&u[..]);
+                                repair_missing_context(self,(*flag)&PARENT_EDGE == 0,&v[..]);
                             }
                         } else // DELETED_EDGE
                             if (*flag) & FOLDER_EDGE != 0 {
@@ -1932,10 +1932,10 @@ impl <'a> Repository<'a> {
                     Change::NewNodes { ref up_context,ref down_context, .. } => {
                         // Handle missing contexts.
                         for c in up_context {
-                            repair_missing_context(&mut self,true,c)
+                            repair_missing_context(self,true,c)
                         }
                         for c in down_context {
-                            repair_missing_context(&mut self,false,c)
+                            repair_missing_context(self,false,c)
                         }
                         debug!(target:"libpijul","apply: newnodes, done");
                     }
@@ -1953,7 +1953,7 @@ impl <'a> Repository<'a> {
         }
         let time3=time::precise_time_s();
         info!(target:"libpijul","deps took: {}", time3-time2);
-        Ok(self)
+        Ok(())
     }
 
 
@@ -2375,7 +2375,7 @@ impl <'a> Repository<'a> {
     }
 
 
-    pub fn output_repository(mut self, working_copy:&Path, pending:&Patch) -> Result<Repository<'a>,Error>{
+    pub fn output_repository(&mut self, working_copy:&Path, pending:&Patch) -> Result<(),Error>{
         debug!(target:"output_repository","begin output repository");
         unsafe {
             let mut internal=[0;HASH_SIZE];
@@ -2389,13 +2389,13 @@ impl <'a> Repository<'a> {
             self.mdb_txn.txn=txn;
             self.new_internal(&mut internal[..]);
             debug!(target:"output_repository","pending patch: {}",to_hex(&internal[..]));
-            let mut repository=self.apply(pending,&internal[..],&HashSet::new()).unwrap();
-            let updates=try!(repository.unsafe_output_repository(working_copy));
+            self.apply(pending,&internal[..],&HashSet::new()).unwrap();
+            let updates=try!(self.unsafe_output_repository(working_copy));
             lmdb::mdb_txn_abort(txn);
-            repository.mdb_txn.txn=parent_txn;
-            try!(repository.update_tree(updates));
+            self.mdb_txn.txn=parent_txn;
+            try!(self.update_tree(updates));
             debug!(target:"output_repository","end output repository");
-            Ok(repository)
+            Ok(())
         }
     }
 

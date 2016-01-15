@@ -8,6 +8,9 @@ mod commands;
 extern crate time;
 
 extern crate env_logger;
+extern crate rustc_serialize;
+
+mod meta;
 
 macro_rules! pijul_subcommand_dispatch {
     ($p:expr => $($subcommand_name:expr => $subcommand:ident),*) => {{

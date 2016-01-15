@@ -305,9 +305,9 @@ pub fn ask_record<'a>(repository:&Repository<'a>,changes:&[Change])->Result<Hash
     let mut rev_deps:HashMap<usize,Vec<usize>>=HashMap::new();
     for i in 0..changes.len() {
         for dep in line_deps[i].iter() {
-            println!("provided: i {}, dep {}",i,dep);
+            debug!("provided: i {}, dep {}",i,dep);
             let p=provided_by.get(dep).unwrap();
-            println!("provided: p= {}",p);
+            debug!("provided: p= {}",p);
 
             let e=deps.entry(i).or_insert(Vec::new());
             e.push(*p);

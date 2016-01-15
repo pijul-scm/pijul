@@ -47,6 +47,10 @@ pub fn branch_changes_file(p : &Path, b: &[u8]) -> PathBuf {
     p.join(PIJUL_DIR_NAME).join(branch_changes_base_path(b))
 }
 
+pub fn meta_file(p : &Path) -> PathBuf {
+    p.join(PIJUL_DIR_NAME).join("meta.toml")
+}
+
 pub fn find_repo_root(dir : &Path) -> Option<&Path> {
     let pijul_dir = repo_dir(dir);
     match metadata(pijul_dir) {
