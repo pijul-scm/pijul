@@ -249,9 +249,9 @@ pub extern "C" fn pijul_load_patches(path:*const c_char,branch:*const c_char,
                                      p_hash:*mut *mut c_void,
                                      p_iter:*mut *mut c_void) {
     unsafe {
-        let path=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(path).to_bytes());
-        let branch=std::ffi::CStr::from_ptr(branch).to_bytes();
-        let changes_file=branch_changes_file(Path::new(path),branch);
+        //let path=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(path).to_bytes());
+        let branch_file=std::ffi::CStr::from_ptr(branch).to_bytes();
+        //let changes_file=branch_changes_file(Path::new(path),branch);
         let changes:Box<HashSet<Vec<u8>>>=Box::new(read_changes_from_file(&changes_file).unwrap_or(HashSet::new()));
         {
             let iter:Box<Iter<Vec<u8>>>=Box::new(changes.iter());

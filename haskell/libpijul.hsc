@@ -41,6 +41,9 @@ foreign import ccall pijul_load_patches :: CString -> CString-> Ptr (Ptr HashSet
 foreign import ccall pijul_unload_patches :: Ptr HashSet -> Ptr Iter -> IO ()
 foreign import ccall pijul_next_patch :: Ptr Iter -> Ptr CString -> Ptr CInt-> IO CInt
 
+
+-- path is the path of the changes file. Changes files are in .pijul/changes.hex(branch).
+-- for instance, for the default branch "main", .pijul/changes.6d61696e
 loadPatchList::String->String->IO [B.ByteString]
 loadPatchList path branch=
     withCString path $ \path->

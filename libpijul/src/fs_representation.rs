@@ -25,18 +25,18 @@ use std;
 
 pub const PIJUL_DIR_NAME:&'static str=".pijul";
 
-pub fn repo_dir(p : &Path) -> PathBuf {
-    p.join(PIJUL_DIR_NAME)
+pub fn repo_dir<P:AsRef<Path>>(p : P) -> PathBuf {
+    p.as_ref().join(PIJUL_DIR_NAME)
 }
 
-pub fn pristine_dir(p : &Path) -> PathBuf {
-    return p.join(PIJUL_DIR_NAME).join("pristine")
+pub fn pristine_dir<P:AsRef<Path>>(p : P) -> PathBuf {
+    return p.as_ref().join(PIJUL_DIR_NAME).join("pristine")
 }
 
 pub const PATCHES_DIR_NAME:&'static str="patches";
 
-pub fn patches_dir(p : &Path) -> PathBuf {
-    return p.join(PIJUL_DIR_NAME).join(PATCHES_DIR_NAME)
+pub fn patches_dir<P:AsRef<Path>>(p : P) -> PathBuf {
+    return p.as_ref().join(PIJUL_DIR_NAME).join(PATCHES_DIR_NAME)
 }
 
 pub fn branch_changes_base_path(b:&[u8])->String {
