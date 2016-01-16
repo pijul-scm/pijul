@@ -24,7 +24,7 @@ use super::StaticSubcommand;
 use super::init;
 
 use super::error::Error;
-use super::remote::{Remote,parse_remote,pull,push,pullable_patches,pushable_patches};
+use super::remote::{Remote,Session,parse_remote};
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -69,17 +69,17 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             debug!("remote init");
             try!(to_session.remote_init());
             debug!("pushable?");
-            let pushable=try!(pushable_patches(path,&mut to_session));
+            let pushable=try!(to_session.pushable_patches(path));
             debug!("pushable = {:?}",pushable);
-            push(path,&mut to_session,&pushable)
+            to_session.push(path,&pushable)
         },
         _=>match args.to {
             Remote::Local{ref path} =>{
                 // This is "darcs get"
                 try!(init::run(&init::Params { location:path, allow_nested:false }));
                 let mut session=try!(args.from.session());
-                let pullable=try!(pullable_patches(path,&mut session));
-                pull(path,&mut session,&pullable)
+                let pullable=try!(session.pullable_patches(path));
+                session.pull(path,&pullable)
             },
             _=>unimplemented!()
         }

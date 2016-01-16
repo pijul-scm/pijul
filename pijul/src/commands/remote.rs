@@ -217,6 +217,7 @@ impl<'a> Session<'a> {
             _=>{panic!("upload to URI impossible")}
         }
     }
+
     // patch hash in binary
     /// Apply patches that have been uploaded.
     pub fn remote_apply(&mut self, patch_hashes:&HashSet<Vec<u8>>)->Result<(),Error> {
@@ -240,7 +241,10 @@ impl<'a> Session<'a> {
             },
             Session::Local{path} =>{
                 let applied_patches:HashSet<Vec<u8>>=try!(self.changes(DEFAULT_BRANCH.as_bytes()));
-                apply_patches(path,&patch_hashes,&applied_patches)
+                let repo_dir=pristine_dir(path);
+                let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
+                try!(repo.apply_patches(path,&patch_hashes,&applied_patches));
+                Ok(())
             }
             _=>{panic!("remote apply not possible")}
         }
@@ -266,6 +270,46 @@ impl<'a> Session<'a> {
             }
             _=>{panic!("remote init not possible")}
         }
+    }
+
+    pub fn pullable_patches(&mut self,target:&Path) -> Result<Pullable, Error> {
+        let remote_patches:HashSet<Vec<u8>>=try!(self.changes(DEFAULT_BRANCH.as_bytes()));
+        let local_patches:HashSet<Vec<u8>>={
+            let changes_file=branch_changes_file(target,DEFAULT_BRANCH.as_bytes());
+            read_changes_from_file(&changes_file).unwrap_or(HashSet::new())
+        };
+        Ok(Pullable { local:local_patches, remote: remote_patches })
+    }
+
+    pub fn pull(&mut self,target:&Path,pullable:&Pullable) -> Result<(), Error> {
+        for i in pullable.iter() {
+            try!(self.download_patch(&patches_dir(target),i));
+        }
+        let repo_dir=pristine_dir(target);
+        let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
+        try!(repo.apply_patches(target,&pullable.remote,&pullable.local));
+        Ok(())
+    }
+
+    pub fn pushable_patches(&mut self, source:&Path) -> Result<HashSet<Vec<u8>>,Error> {
+        debug!("source: {:?}",source);
+        let mut from_changes:HashSet<Vec<u8>>={
+            let changes_file=branch_changes_file(source,DEFAULT_BRANCH.as_bytes());
+            debug!("changes_file: {:?}",changes_file);
+            read_changes_from_file(&changes_file).unwrap_or(HashSet::new()) // empty repositories don't have this file
+        };
+        debug!("pushing: {:?}",from_changes);
+        let to_changes=try!(self.changes(DEFAULT_BRANCH.as_bytes()));
+        for i in to_changes.iter() {
+            from_changes.remove(i);
+        }
+        Ok(from_changes)
+    }
+
+    pub fn push(&mut self, source:&Path,pushable:&HashSet<Vec<u8>>) -> Result<(), Error> {
+        try!(self.upload_patches(&patches_dir(source),pushable));
+        try!(self.remote_apply(pushable));
+        Ok(())
     }
 }
 
@@ -349,107 +393,4 @@ impl <'a> Iterator for PullableIter<'a> {
             }
         }
     }
-}
-
-
-pub fn pullable_patches<'a>(target:&Path,session:&mut Session<'a>) -> Result<Pullable, Error> {
-    let remote_patches:HashSet<Vec<u8>>=try!(session.changes(DEFAULT_BRANCH.as_bytes()));
-    let local_patches:HashSet<Vec<u8>>={
-        let changes_file=branch_changes_file(target,DEFAULT_BRANCH.as_bytes());
-        read_changes_from_file(&changes_file).unwrap_or(HashSet::new())
-    };
-    Ok(Pullable { local:local_patches, remote: remote_patches })
-}
-
-pub fn pull<'a>(target:&Path,session:&mut Session<'a>,pullable:&Pullable) -> Result<(), Error> {
-    for i in pullable.iter() {
-        try!(session.download_patch(&patches_dir(target),i));
-    }
-    apply_patches(target,&pullable.remote,&pullable.local)
-}
-
-pub fn pushable_patches<'a>(source:&Path,to_session:&mut Session<'a>) -> Result<HashSet<Vec<u8>>,Error> {
-    debug!("source: {:?}",source);
-    let mut from_changes:HashSet<Vec<u8>>={
-        let changes_file=branch_changes_file(source,DEFAULT_BRANCH.as_bytes());
-        debug!("changes_file: {:?}",changes_file);
-        read_changes_from_file(&changes_file).unwrap_or(HashSet::new()) // empty repositories don't have this file
-    };
-    debug!("pushing: {:?}",from_changes);
-    let to_changes=try!(to_session.changes(DEFAULT_BRANCH.as_bytes()));
-    for i in to_changes.iter() {
-        from_changes.remove(i);
-    }
-    Ok(from_changes)
-}
-
-pub fn push<'a>(source:&Path,to_session:&mut Session<'a>,pushable:&HashSet<Vec<u8>>) -> Result<(), Error> {
-    try!(to_session.upload_patches(&patches_dir(source),pushable));
-    try!(to_session.remote_apply(pushable));
-    Ok(())
-}
-
-
-/// Assumes all patches have been downloaded. Only pull, push locally, and apply need this.
-pub fn apply_patches<'a>(r:&Path,
-                         remote_patches:&HashSet<Vec<u8>>,
-                         local_patches:&HashSet<Vec<u8>>) -> Result<(), Error> {
-    debug!("local {}, remote {}",local_patches.len(),remote_patches.len());
-    let pullable=remote_patches.difference(&local_patches);
-    let only_local={
-        let mut only_local:HashSet<&[u8]>=HashSet::new();
-        for i in local_patches.difference(&remote_patches) { only_local.insert(&i[..]); };
-        only_local
-    };
-    fn apply_patches<'a>(mut repo:Repository<'a>, branch:&[u8], local_patches:&Path, patch_hash:&[u8], patches_were_applied:&mut bool, only_local:&HashSet<&[u8]>)->Result<Repository<'a>,Error>{
-        if !try!(repo.has_patch(branch,patch_hash)) {
-            let local_patch=local_patches.join(patch_hash.to_hex()).with_extension("cbor");
-            debug!("local_patch={:?}",local_patch);
-            let mut buffer = BufReader::new(try!(File::open(local_patch)));
-            let patch=try!(Patch::from_reader(&mut buffer));
-            for dep in patch.dependencies.iter() {
-                repo= try!(apply_patches(repo,branch,local_patches,&dep,patches_were_applied,
-                                         only_local))
-            }
-            let mut internal=[0;HASH_SIZE];
-            repo.new_internal(&mut internal);
-            //println!("pulling and applying patch {}",to_hex(patch_hash));
-            let mut repo=try!(repo.apply(&patch, &internal,only_local));
-            *patches_were_applied=true;
-            repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);
-            repo.register_hash(&internal[..],patch_hash);
-            Ok(repo)
-        } else {
-            Ok(repo)
-        }
-    }
-    let repo_dir=pristine_dir(r);
-    let mut repo = try!(Repository::new(&repo_dir));
-    let local_patches=patches_dir(r);
-    let current_branch=repo.get_current_branch().to_vec();
-    let pending={
-        let (changes,_)= {
-            let mut repo = try!(Repository::new(&repo_dir));
-            try!(repo.record(&r))
-        };
-        let mut p=Patch::empty();
-        p.changes=changes;
-        p
-    };
-    let mut patches_were_applied=false;
-    for p in pullable {
-        repo=try!(apply_patches(repo,&current_branch,
-                                &local_patches,p,&mut patches_were_applied,&only_local))
-    }
-    debug!(target:"pull","patches applied? {}",patches_were_applied);
-    let mut repo = if patches_were_applied {
-        try!(repo.write_changes_file(&branch_changes_file(r,&current_branch)));
-        debug!(target:"pull","output_repository");
-        try!(repo.output_repository(&r,&pending))
-    } else { repo };
-    if cfg!(debug_assertions){
-        let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
-        repo.debug(&mut buffer);
-    }
-    Ok(())
 }

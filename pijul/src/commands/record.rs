@@ -127,7 +127,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 repo.new_internal(&mut internal);
                 debug!(target:"pijul","applying patch");
-                let mut repo=repo.apply(&patch_arc, &internal, &HashSet::new()).unwrap();
+                try!(repo.apply(&patch_arc, &internal, &HashSet::new()));
                 //println!("sync");
                 //let t1=time::precise_time_s();
                 //info!("applied patch in {}s", t1-t0);

@@ -56,6 +56,8 @@ use std::fs;
 extern crate rand;
 
 use std::marker::PhantomData;
+use std::io::{BufWriter,BufReader};
+use std::fs::File;
 
 /// The repository structure, on which most functions work.
 pub struct Repository<'a> {
@@ -2178,6 +2180,76 @@ impl <'a> Repository<'a> {
             lmdb::mdb_cursor_close(cursor);
         }
     }
+
+
+
+
+    /// Assumes all patches have been downloaded. The second argument
+    /// `remote_patches` needs to contain at least all the patches we want
+    /// to apply, and the third one `local_patches` at least all the patches the other
+    /// party doesn't have.
+    pub fn apply_patches(&mut self,
+                         r:&Path,
+                         remote_patches:&HashSet<Vec<u8>>,
+                         local_patches:&HashSet<Vec<u8>>) -> Result<(), Error> {
+        debug!("local {}, remote {}",local_patches.len(),remote_patches.len());
+        let pullable=remote_patches.difference(&local_patches);
+        let only_local={
+            let mut only_local:HashSet<&[u8]>=HashSet::new();
+            for i in local_patches.difference(&remote_patches) { only_local.insert(&i[..]); };
+            only_local
+        };
+        fn apply_patches<'a>(repo:&mut Repository<'a>, branch:&[u8], local_patches:&Path, patch_hash:&[u8], patches_were_applied:&mut bool, only_local:&HashSet<&[u8]>)->Result<(),Error>{
+            if !try!(repo.has_patch(branch,patch_hash)) {
+                let local_patch=local_patches.join(to_hex(patch_hash)).with_extension("cbor");
+                debug!("local_patch={:?}",local_patch);
+                let mut buffer = BufReader::new(try!(File::open(local_patch)));
+                let patch=try!(Patch::from_reader(&mut buffer));
+                for dep in patch.dependencies.iter() {
+                    try!(apply_patches(repo,branch,local_patches,&dep,patches_were_applied, only_local))
+                }
+                let mut internal=[0;HASH_SIZE];
+                repo.new_internal(&mut internal);
+                //println!("pulling and applying patch {}",to_hex(patch_hash));
+                try!(repo.apply(&patch, &internal,only_local));
+                *patches_were_applied=true;
+                repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);
+                repo.register_hash(&internal[..],patch_hash);
+                Ok(())
+            } else {
+                Ok(())
+            }
+        }
+        let local_patches=patches_dir(r);
+        let current_branch=self.get_current_branch().to_vec();
+        let pending={
+            let (changes,_)= try!(self.record(&r));
+            let mut p=Patch::empty();
+            p.changes=changes;
+            p
+        };
+        let mut patches_were_applied=false;
+        for p in pullable {
+            try!(apply_patches(self,&current_branch,&local_patches,p,&mut patches_were_applied,&only_local))
+        }
+        debug!(target:"pull","patches applied? {}",patches_were_applied);
+        if patches_were_applied {
+            try!(self.write_changes_file(&branch_changes_file(r,&current_branch)));
+            debug!(target:"pull","output_repository");
+            try!(self.output_repository(&r,&pending))
+        }
+        if cfg!(debug_assertions){
+            let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
+            self.debug(&mut buffer);
+        }
+        Ok(())
+    }
+
+
+
+
+
+
 
 
     // Climp up the tree (using revtree).

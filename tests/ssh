@@ -1,8 +1,8 @@
 #!/bin/bash
 
-RECORD_FLAGS=
-PULL_FLAGS=
-PUSH_FLAGS=
+RECORD_FLAGS=-a
+PULL_FLAGS=-a
+PUSH_FLAGS=-a
 
 cd /tmp
 rm -Rf a b http
@@ -77,11 +77,11 @@ blabla
 Y
 encore un coup
 EOF
-pijul record
+pijul record $RECORD_FLAGS
 
 cd /tmp/a
 echo "pulling"
-pijul pull localhost:/tmp/b
+pijul pull localhost:/tmp/b $PULL_FLAGS
 echo "-----------"
 cat /tmp/a/file
 echo "-----------"

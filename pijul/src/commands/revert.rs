@@ -53,7 +53,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error> {
         Some(r) =>
         {
             let repo_dir=pristine_dir(r);
-            let repo = try!(Repository::new(&repo_dir));
+            let mut repo = try!(Repository::new(&repo_dir));
             try!(repo.output_repository(&r,&Patch::empty()));
             Ok(())
         }

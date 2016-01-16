@@ -85,7 +85,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
         None => return Err(Error::NotInARepository),
         Some(r) => {
             let mut session=try!(args.remote.session());
-            let mut pullable=try!(remote::pullable_patches(r,&mut session));
+            let mut pullable=try!(session.pullable_patches(r));
             // Loading a patch's dependencies
             if !args.yes_to_all {
                 let selected={
@@ -103,7 +103,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 pullable.remote=selected;
             }
             // Pulling and applying
-            remote::pull(r,&mut session,&pullable)
+            session.pull(r,&pullable)
         }
     }
 }

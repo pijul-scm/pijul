@@ -1,4 +1,4 @@
-.PHONY:libpijul
+.PHONY:pijul
 
 LD_LIBRARY_PATH=../c/target/debug:$LD_LIBRARY_PATH
 
@@ -7,3 +7,6 @@ pijul:libpijul.hs
 
 libpijul.hs:libpijul.hsc
 	hsc2hs $<
+
+clean:
+	rm -f *.o *.hi pijul libpijul.hs

@@ -20,10 +20,11 @@ extern crate clap;
 use clap::{SubCommand, ArgMatches, Arg};
 
 extern crate libpijul;
+use libpijul::{Repository};
 use commands::StaticSubcommand;
 use self::libpijul::{DEFAULT_BRANCH};
 use self::libpijul::patch::{read_changes_from_file};
-use self::libpijul::fs_representation::{find_repo_root, branch_changes_file};
+use self::libpijul::fs_representation::{pristine_dir, find_repo_root, branch_changes_file};
 
 use commands::error::Error;
 use std::collections::{HashSet};
@@ -31,7 +32,7 @@ use std::collections::{HashSet};
 use std::path::{Path};
 
 extern crate time;
-use super::remote::apply_patches;
+
 extern crate rustc_serialize;
 use self::rustc_serialize::hex::{FromHex};
 
@@ -81,7 +82,9 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 read_changes_from_file(&changes_file).unwrap_or(HashSet::new())
             };
             debug!("local={:?}",local);
-            try!(apply_patches(target,&remote,&local));
+            let repo_dir=pristine_dir(target);
+            let mut repo = try!(Repository::new(&repo_dir));
+            try!(repo.apply_patches(target,&remote,&local));
             Ok(Some(()))
         }
     }

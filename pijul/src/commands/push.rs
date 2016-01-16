@@ -82,7 +82,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
         None => return Err(Error::NotInARepository),
         Some(r) => {
             let mut session=try!(args.remote.session());
-            let mut pushable=try!(remote::pushable_patches(r,&mut session));
+            let mut pushable=try!(session.pushable_patches(r));
             if !args.yes_to_all {
                 let selected={
                     let mut patches=Vec::new();
@@ -98,7 +98,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 };
                 pushable=selected;
             }
-            remote::push(r,&mut session,&pushable)
+            session.push(r,&pushable)
         }
     }
 }
