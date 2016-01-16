@@ -21,7 +21,8 @@ term="0.2"
 
 termios="0.2"
 
-libpijul = {path="../libpijul"}
+[dependencies.libpijul]
+path="../libpijul"
 
 [dev-dependencies]
 tempdir="0.3"

@@ -25,13 +25,14 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
     Params { repository : repository, touched_files : paths }
 }
 
-
+#[derive(Debug)]
 pub enum Operation { Add,
                      Move,
                      Remove }
 
 pub fn run<'a>(args : &Params<'a>, op : Operation)
                -> Result<Option<()>, error::Error> {
+    debug!(target:"mv","fs_operation {:?}",op);
     let files = &args.touched_files;
     let pwd = args.repository;
     match find_repo_root(&pwd){
@@ -65,7 +66,7 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                                 return Err(error::Error::MoveTargetNotDirectory)
                             } else {
                                 let mut i=0;
-                                while i<args.touched_files.len()-2 {
+                                while i<args.touched_files.len()-1 {
                                     let file=args.touched_files[i];
                                     let p=pwd.join(file);
                                     let file=iter_after(p.components(), r.components()).unwrap();
@@ -81,7 +82,7 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                                     i+=1
                                 }
                                 i=0;
-                                while i<args.touched_files.len()-2 {
+                                while i<args.touched_files.len()-1 {
                                     let target_basename = args.touched_files[i].file_name().unwrap();
                                     let full_target_name = (args.touched_files.last().unwrap()).join(&target_basename);
                                     try!(rename(&args.touched_files[i],

@@ -335,7 +335,7 @@ impl <'a> Repository<'a> {
 
 
     pub fn move_file(&mut self, path:&std::path::Path, path_:&std::path::Path,is_dir:bool) -> Result<(), Error>{
-
+        debug!(target:"mv","move_file: {:?},{:?}",path,path_);
         let inode= &mut (Vec::new());
         let parent= &mut (Vec::new());
 
@@ -1300,17 +1300,30 @@ impl <'a> Repository<'a> {
                                 lmdb::mdb_cursor_close(curs_parents);
                                 lmdb::mdb_cursor_close(curs_grandparents);
                             }
+                            debug!(target:"record_all", "edges:{:?}",edges);
                             if !edges.is_empty(){
                                 actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
+                                //debug!(target:"record_all","parent_node: {:?}",parent_node.unwrap());
+                                //debug!(target:"record_all","ext key: {:?}",self.external_key(parent_node.unwrap()));
+                                //debug!(target:"record_all","ext key: {:?}",self.external_key(&current_node[3..]));
                                 actions.push(
-                                    Change::NewNodes { up_context: vec!(self.external_key(parent_node.unwrap())),
+                                    Change::NewNodes { up_context:{
+                                        let p=parent_node.unwrap();
+                                        vec!(if p.len()>LINE_SIZE { self.external_key(&p) }
+                                             else { p.to_vec() })
+                                    },
                                                        line_num: *line_num as u32,
-                                                       down_context: vec!(self.external_key(&current_node[3..])),
+                                                       down_context:{
+                                                           let p=&current_node[3..];
+                                                           vec!(if p.len()>LINE_SIZE { self.external_key(&p) }
+                                                                else { p.to_vec() })
+                                                       },
                                                        nodes: vec!(name),
                                                        flag:FOLDER_EDGE }
                                     );
                             }
                             *line_num += 1;
+                            debug!(target:"record_all", "directory_flag:{}",old_attr&DIRECTORY_FLAG);
                             if old_attr & DIRECTORY_FLAG == 0 {
                                 info!("retrieving");
                                 let time0=time::precise_time_s();
@@ -2279,6 +2292,32 @@ impl <'a> Repository<'a> {
         true
     }
 
+    pub fn retrieve_paths<'b>(&'b self, key:&[u8], flag:u8) -> Result<Vec<(usize,&'b [u8],&'b[u8])>,Error> {
+        let mut result=Vec::new();
+        let mut curs_b= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()};
+        for b in CursIter::new(curs_b,key,flag,true,true) {
+            debug!(target:"retrieve_paths","b={:?}",to_hex(b));
+            let cont_b=
+                match try!(self.mdb_txn.get(self.dbi_contents,&b[1..(1+KEY_SIZE)])) {
+                    Some(cont_b)=>cont_b,
+                    None=>&[][..]
+                };
+            if cont_b.len()<2 {
+                //panic!("node (b) too short")
+            } else {
+                let filename=&cont_b[2..];
+                let perms= ((cont_b[0] as usize) << 8) | (cont_b[1] as usize);
+                let mut curs_c= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()};
+                for c in CursIter::new(curs_c,&b[1..(1+KEY_SIZE)],flag,true,true) {
+                    debug!(target:"retrieve_paths","c={:?}",to_hex(c));
+                    let cv=&c[1..(1+KEY_SIZE)];
+
+                    result.push((perms,filename,cv))
+                }
+            }
+        }
+        Ok(result)
+    }
 
 
     fn unsafe_output_repository(&mut self, working_copy:&Path) -> Result<Vec<(Vec<u8>,Vec<u8>)>,Error>{

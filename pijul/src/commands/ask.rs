@@ -376,3 +376,18 @@ pub fn ask_record<'a>(repository:&Repository<'a>,changes:&[Change])->Result<Hash
     try!(end_getch());
     Ok(choices)
 }
+
+pub fn ask_authors()->Result<Vec<String>,Error> {
+    print!("What is your name <and email address>? ");
+    let mut input = String::new();
+    try!(stdin().read_line(&mut input));
+    Ok(vec!(input))
+}
+
+
+pub fn ask_patch_name()->Result<String,Error> {
+    print!("What is the name of this patch? ");
+    let mut input = String::new();
+    try!(stdin().read_line(&mut input));
+    Ok(input)
+}

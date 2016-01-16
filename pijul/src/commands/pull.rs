@@ -84,6 +84,13 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
     match find_repo_root(&pwd){
         None => return Err(Error::NotInARepository),
         Some(r) => {
+            /*let mut meta=Meta::load(r).unwrap_or(Meta::new());
+
+            let pe="pmeunier".to_string();
+            meta.authors=vec!(pe.clone());
+            meta.save(r);
+            */
+
             let mut session=try!(args.remote.session());
             let mut pullable=try!(session.pullable_patches(r));
             // Loading a patch's dependencies
