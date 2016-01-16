@@ -1,6 +1,6 @@
 extern crate tempdir;
 
-use commands::{init, info, record, add, remove, pull};
+use commands::{init, info, record, add, remove, pull, remote};
 use commands::error;
 use std::fs;
 
@@ -132,13 +132,17 @@ fn add_record_pull() {
         Some (()) => (),
         None => panic!("no file added")        
     };
-    let record_params = record::Params { repository : &dir_a, yes_to_all : true };
+    let record_params = record::Params { repository : &dir_a, yes_to_all : true  };
     match record::run(&record_params).unwrap() {
         None => panic!("file add is not going to be recorded"),
         Some(()) => ()
     }
-    // let pull_params = pull::Params { repository : &dir_b,
-    //                                  remote_id : "test_repository_a",
-    //                                  remote : pull::Remote::Local{ path: &dir_a}};
-    // pull::run(&pull_params).unwrap()
+    let pull_params = pull::Params { repository : &dir_b,
+                                     remote_id : "test_repository_a",
+                                     remote : remote::Remote::Local{ path: &dir_a},
+                                     yes_to_all : true };
+    pull::run(&pull_params).unwrap();
+    let fpath_b = &dir_b.join("toto");
+    let metadata = fs::metadata(fpath_b).unwrap();
+    assert!(metadata.is_file());
 }
