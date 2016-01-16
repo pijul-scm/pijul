@@ -9,6 +9,8 @@ import Foreign.Storable
 import Data.Typeable
 import qualified Data.ByteString as B
 
+#include <pijul.h>
+
 data CRepository
 
 foreign import ccall pijul_open_repository :: CString -> Ptr (Ptr CRepository) -> IO CInt
