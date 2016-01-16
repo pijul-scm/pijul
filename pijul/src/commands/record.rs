@@ -110,7 +110,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 }
             };
             let t1=time::precise_time_s();
-            debug!("record took {}s",t1-t0);
+            debug!("creating patch took {}s",t1-t0);
             //println!("recorded");
             if changes.is_empty() {
                 println!("Nothing to record");
@@ -146,54 +146,9 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                                changes)
                 };
                 // save patch
-                info!("patch ready: {} changes", patch.changes.len());
-                let patch_arc=Arc::new(patch);
-                let child_patch=patch_arc.clone();
-                let patches_dir=patches_dir(r);
-                let hash_child=thread::spawn(move || {
-                    let t0=time::precise_time_s();
-                    let hash=child_patch.save(&patches_dir);
-                    let t1=time::precise_time_s();
-                    info!("saved patch in {}s", t1-t0);
-                    hash
-                });
-
-                let t0=time::precise_time_s();
-
-                let mut internal=[0;HASH_SIZE];
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                repo.new_internal(&mut internal);
-                debug!(target:"pijul","applying patch");
-                try!(repo.apply(&patch_arc, &internal, &HashSet::new()));
-                //println!("sync");
-                //let t1=time::precise_time_s();
-                //info!("applied patch in {}s", t1-t0);
-                debug!(target:"pijul","synchronizing tree");
-                repo.sync_file_additions(&patch_arc.changes[..],&syncs, &internal);
-                if cfg!(debug_assertions){
-                    let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
-                    repo.debug(&mut buffer);
-                }
-                let t2=time::precise_time_s();
-                info!("applied patch in {}s", t2-t0);
-
-                match hash_child.join() {
-                    Ok(Ok(hash))=> {
-                        repo.register_hash(&internal[..],&hash[..]);
-                        debug!(target:"record","hash={}, local={}",to_hex(&hash),to_hex(&internal));
-                        //println!("writing changes {:?}",internal);
-                        repo.write_changes_file(&branch_changes_file(r,repo.get_current_branch())).unwrap();
-                        let t3=time::precise_time_s();
-                        info!("changes files took {}s to write", t3-t2);
-                        Ok(Some(()))
-                    },
-                    Ok(Err(x)) => {
-                        Err(Error::Repository(x))
-                    },
-                    Err(_)=>{
-                        panic!("saving patch")
-                    }
-                }
+                let () = try!(repo.register_patch(r, patch, &syncs).map_err(Error::Repository));
+                Ok(Some(()))
             }
         }
     }

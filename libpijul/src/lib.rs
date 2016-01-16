@@ -28,6 +28,8 @@ use self::libc::{c_char,c_uchar,c_void,size_t};
 use self::libc::{memcmp};
 use std::ptr::{copy_nonoverlapping};
 use std::ptr;
+use std::sync::Arc;
+use std::thread;
 
 use std::str;
 
@@ -2485,6 +2487,54 @@ impl <'a> Repository<'a> {
         Ok(())
     }
 
+
+    pub fn register_patch(&mut self, location: &Path, patch: Patch, inode_updates:&HashMap<LocalKey,Inode>)
+                          -> Result<(), Error>{
+        info!("registering a patch with {} changes", patch.changes.len());
+        let patch = Arc::new(patch);
+        let child_patch = patch.clone();
+        let patches_dir = patches_dir(location);
+        let hash_child = thread::spawn(move || {
+            let t0 = time::precise_time_s();
+            let hash = child_patch.save(&patches_dir);
+            let t1 = time::precise_time_s();
+            info!("hashed patch in {}s", t1-t0);
+            hash
+        });
+
+        let t0 = time::precise_time_s();
+
+        let mut internal=[0;HASH_SIZE];
+        self.new_internal(&mut internal);
+        debug!(target:"pijul", "applying patch");
+        try!(self.apply(&patch, &internal, &HashSet::new()));
+        debug!(target:"pijul", "synchronizing tree");
+        self.sync_file_additions(&patch.changes[..], &inode_updates, &internal);
+        if cfg!(debug_assertions){
+            let mut buffer = BufWriter::new(File::create(location.join("debug")).unwrap());
+            self.debug(&mut buffer);
+        }
+        let t2 = time::precise_time_s();
+        info!("applied patch in {}s", t2 - t0);
+
+        match hash_child.join() {
+            Ok(Ok(hash))=> {
+                self.register_hash(&internal[..],&hash[..]);
+                debug!(target:"record","hash={}, local={}",to_hex(&hash),to_hex(&internal));
+                //println!("writing changes {:?}",internal);
+                self.write_changes_file(&branch_changes_file(location,self.get_current_branch())).unwrap();
+                let t3=time::precise_time_s();
+                info!("changes files took {}s to write", t3-t2);
+                Ok(())
+            },
+            Ok(Err(x)) => {
+                Err(x)
+            },
+            Err(_)=>{
+                panic!("saving patch")
+            }
+        }
+    }
 
     pub fn output_repository(&mut self, working_copy:&Path, pending:&Patch) -> Result<(),Error>{
         debug!(target:"output_repository","begin output repository");
