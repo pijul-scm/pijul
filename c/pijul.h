@@ -26,3 +26,4 @@ int pijul_apply(pijul_repository,pijul_patch_t,char*);
 int pijul_write_changes_file(pijul_repository,char*);
 void pijul_sync_file_additions(pijul_repository,pijul_changes_t,pijul_updates_t,char*);
 int pijul_output_repository(pijul_repository,char*,pijul_patch_t);
+void pijul_create_repository(char *);

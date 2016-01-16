@@ -288,3 +288,13 @@ pub extern "C" fn pijul_unload_patches(p_hash:*mut c_void,
     }
 }
 
+
+#[no_mangle]
+pub extern "C" fn pijul_create_repository(p: *const c_char) -> () {
+    unsafe {
+        println!("10:26");
+        let p = std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(p).to_bytes());
+        let path = Path::new(p);
+        fs_representation::create(&path).unwrap();
+    }
+}
