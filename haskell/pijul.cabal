@@ -2,7 +2,7 @@
 --  see http://haskell.org/cabal/users-guide/
 
 name:                pijul
-version:             0.1.0.0
+version:             0.1.1.0
 -- synopsis:            
 -- description:         
 homepage:            http://pijul.org

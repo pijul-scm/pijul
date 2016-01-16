@@ -1,4 +1,4 @@
-module Pijul( createRepository ) where
+module Pijul( createRepository, withRepository ) where
 
 import Foreign.C.Types
 import Foreign.C.String
