@@ -37,8 +37,39 @@ addFile::Repository->String->Bool->IO ()
 addFile rep path isDir=
     withCString path $ \cpath->pijul_add_file rep cpath (if isDir then 1 else 0)
 
+data HashSet
+data Iter
+foreign import ccall pijul_load_patches :: CString -> CString-> Ptr (Ptr HashSet) ->Ptr (Ptr Iter) -> IO ()
+foreign import ccall pijul_unload_patches :: Ptr HashSet -> Ptr Iter -> IO ()
+foreign import ccall pijul_next_patch :: Ptr Iter -> Ptr CString -> Ptr CInt-> IO CInt
 
 
-main=
-  withRepository "/tmp/a" $ \repo->
-      addFile repo "file" False
+-- path is the path of the changes file. Changes files are in .pijul/changes.hex(branch).
+-- for instance, for the default branch "main", .pijul/changes.6d61696e
+loadPatchList::String->String->IO [B.ByteString]
+loadPatchList path branch=
+    withCString path $ \path->
+        withCString branch $ \branch ->
+            bracket
+            (alloca $ \h->alloca $ \i->do {pijul_load_patches path branch h i;
+                  hh<-peek h; ii<-peek i; return (hh,ii) })
+            (\(h,i)->do {pijul_unload_patches h i})
+            (\(_,i)->
+                 let get patches=alloca $ \str -> alloca $ \len -> do {
+                                   r<-pijul_next_patch i str len;
+                                   if r==0 then do {
+                                                  str_<-peek str;
+                                                  len_<-peek len;
+                                                  bs<-B.packCStringLen (str_,fromIntegral len_);
+                                                  get (bs:patches)
+                                                } else return patches
+                                 } in get [])
+
+
+
+
+foreign import ccall pijul_create_repository :: CString -> IO ()
+
+createRepository :: String -> IO ()
+createRepository path =
+  withCString path $ \cpath -> pijul_create_repository cpath
