@@ -47,7 +47,7 @@ fn in_empty_dir_nothing_to_record() {
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let init_params = init::Params { location : &dir.path(), allow_nested : false};
     init::run(&init_params).unwrap();
-    let record_params = record::Params { repository : &dir.path() };
+    let record_params = record::Params { repository : &dir.path(), yes_to_all : true };
     match record::run(&record_params).unwrap() {
         None => (),
         Some(()) => panic!("found something to record in an empty repository")
@@ -66,7 +66,7 @@ fn with_changes_sth_to_record() {
         Some (()) => (),
         None => panic!("no file added")        
     };
-    let record_params = record::Params { repository : &dir.path() };
+    let record_params = record::Params { repository : &dir.path(), yes_to_all : true };
     match record::run(&record_params).unwrap() {
         None => panic!("file add is not going to be recorded"),
         Some(()) => ()
@@ -91,7 +91,7 @@ fn add_remove_nothing_to_record() {
         None => panic!("no file removed")
     };
 
-    let record_params = record::Params { repository : &dir.path() };
+    let record_params = record::Params { repository : &dir.path(), yes_to_all : true };
     match record::run(&record_params).unwrap() {
         None => (),
         Some(()) => panic!("add remove left a trace")
@@ -132,13 +132,13 @@ fn add_record_pull() {
         Some (()) => (),
         None => panic!("no file added")        
     };
-    let record_params = record::Params { repository : &dir_a };
+    let record_params = record::Params { repository : &dir_a, yes_to_all : true };
     match record::run(&record_params).unwrap() {
         None => panic!("file add is not going to be recorded"),
         Some(()) => ()
     }
-    let pull_params = pull::Params { repository : &dir_b,
-                                     remote_id : "test_repository_a",
-                                     remote : pull::Remote::Local{ path: &dir_a}};
-    pull::run(&pull_params).unwrap()
+    // let pull_params = pull::Params { repository : &dir_b,
+    //                                  remote_id : "test_repository_a",
+    //                                  remote : pull::Remote::Local{ path: &dir_a}};
+    // pull::run(&pull_params).unwrap()
 }
