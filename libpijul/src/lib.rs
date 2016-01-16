@@ -2199,9 +2199,9 @@ impl <'a> Repository<'a> {
 
 
 
-    /// Assumes all patches have been downloaded. The second argument
+    /// Assumes all patches have been downloaded. The third argument
     /// `remote_patches` needs to contain at least all the patches we want
-    /// to apply, and the third one `local_patches` at least all the patches the other
+    /// to apply, and the fourth one `local_patches` at least all the patches the other
     /// party doesn't have.
     pub fn apply_patches(&mut self,
                          r:&Path,
