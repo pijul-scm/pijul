@@ -24,8 +24,7 @@ extern crate log;
 
 mod lmdb;
 
-use self::libc::{c_char,c_uchar,c_void,size_t};
-use self::libc::{memcmp};
+use self::libc::{memcmp, c_void, size_t, c_char};
 use std::ptr::{copy_nonoverlapping};
 use std::ptr;
 use std::sync::Arc;
@@ -41,6 +40,12 @@ use std::path::{PathBuf,Path};
 use std::io::{Write,BufRead,Read};
 use std::collections::HashSet;
 use std::fs::{metadata};
+
+pub mod contents;
+use self::contents::{Inode, Line, Graph, LineBuffer};
+use self::contents::{PSEUDO_EDGE, FOLDER_EDGE, PARENT_EDGE, DELETED_EDGE, LINE_HALF_DELETED};
+use self::contents::{LINE_ONSTACK, LINE_VISITED, DIRECTORY_FLAG};
+
 pub mod fs_representation;
 use self::fs_representation::*;
 pub mod patch;
@@ -96,42 +101,6 @@ const ROOT_INODE:&'static[u8]=&[0;INODE_SIZE];
 /// The name of the default branch, "main".
 pub const DEFAULT_BRANCH:&'static str="main";
 
-const PSEUDO_EDGE:u8=1;
-pub const FOLDER_EDGE:u8=2;
-pub const PARENT_EDGE:u8=4;
-pub const DELETED_EDGE:u8=8;
-pub type Inode=Vec<u8>;
-const DIRECTORY_FLAG:usize = 0x200;
-
-const LINE_HALF_DELETED:c_uchar=4;
-const LINE_VISITED:c_uchar=2;
-const LINE_ONSTACK:c_uchar=1;
-
-impl <'a>Line<'a> {
-    fn is_zombie(&self)->bool {
-        self.flags & LINE_HALF_DELETED != 0
-    }
-}
-
-struct Line<'a> {
-    key:&'a[u8],
-    flags:u8,
-    children:usize,
-    n_children:usize,
-    index:usize,
-    lowlink:usize,
-    scc:usize
-}
-
-struct Graph<'a> {
-    lines:Vec<Line<'a>>,
-    children:Vec<(*const u8,usize)> // raw pointer because we might need the edge address. We need the first element anyway, replace "*const u8" by "u8" if the full address is not needed.
-}
-
-
-trait LineBuffer<'a> {
-    fn output_line(&mut self,&'a[u8],&'a[u8]) -> ();
-}
 
 struct Diff<'a> {
     lines_a:Vec<&'a[u8]>,
