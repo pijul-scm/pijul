@@ -1,3 +1,6 @@
+// This file contains general bindings to lmdb.
+// These are unsafe, but allow efficient operation in most circumstances.
+
 #![allow(dead_code)]
 
 extern crate libc;
