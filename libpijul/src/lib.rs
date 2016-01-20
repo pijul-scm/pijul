@@ -939,7 +939,7 @@ impl <'a> Repository<'a> {
     }
 
 
-    pub fn internal_hash(&'a self,key:&[u8])->Result<&'a [u8],Error> {
+    pub fn internal_hash<'b>(&'b self,key:&[u8])->Result<&'b [u8],Error> {
         debug!("internal_hash: {}, {}",to_hex(key), key.len());
         if key.len()==HASH_SIZE
             && unsafe { memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t) }==0 {
