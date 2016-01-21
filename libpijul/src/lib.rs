@@ -560,7 +560,7 @@ impl <'a> Repository<'a> {
         Ok(Graph { lines:lines, children:children })
     }
 
-    pub fn contents<'b>(&'a self,key:&'b[u8]) -> &'a[u8] {
+    pub fn contents<'b>(&'b self,key:&[u8]) -> &'b[u8] {
         debug_assert!(key.len() == KEY_SIZE);
         match self.mdb_txn.get(self.dbi_contents,key) {
             Ok(Some(v))=>v,
