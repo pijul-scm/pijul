@@ -17,7 +17,8 @@ extern crate termios;
 use self::termios::{tcsetattr,ICANON,ECHO};
 
 use super::error::Error;
-use self::libpijul::{Repository,FOLDER_EDGE,DELETED_EDGE,PARENT_EDGE};
+use self::libpijul::Repository;
+use self::libpijul::contents::{FOLDER_EDGE,DELETED_EDGE,PARENT_EDGE};
 use std::io::stdin;
 use std::char::from_u32_unchecked;
 use std::str;
