@@ -83,7 +83,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
     debug!("pull args {:?}",args);
     match find_repo_root(&pwd){
         None => return Err(Error::NotInARepository),
-        Some(r) => {
+        Some(ref r) => {
             /*let mut meta=Meta::load(r).unwrap_or(Meta::new());
 
             let pe="pmeunier".to_string();

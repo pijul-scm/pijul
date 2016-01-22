@@ -66,7 +66,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 pub fn run(params : &Params) -> Result<Option<()>, Error> {
     match find_repo_root(&params.repository){
         None => return Err(Error::NotInARepository),
-        Some(target) =>
+        Some(ref target) =>
         {
             debug!("applying");
             let remote:HashSet<Vec<u8>>={

@@ -7,6 +7,7 @@ use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
 use std::path::{Path};
 use std::fs::{metadata,rename};
 use commands::error;
+use std;
 
 #[derive(Debug)]
 pub struct Params<'a> {
@@ -34,11 +35,18 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                -> Result<Option<()>, error::Error> {
     debug!(target:"mv","fs_operation {:?}",op);
     let files = &args.touched_files;
-    let pwd = args.repository;
+    let pwd = {
+        if args.repository.is_relative() {
+            try!(std::env::current_dir()).join(args.repository)
+        } else {
+            args.repository.to_path_buf()
+        }
+    };
     match find_repo_root(&pwd){
         None => return Err(error::Error::NotInARepository),
-        Some(r) =>
+        Some(ref r) =>
         {
+            debug!(target:"mv","repo {:?}",r);
             let repo_dir=pristine_dir(r);
             let mut repo = try!(Repository::new(&repo_dir).map_err(error::Error::Repository));
             match op {

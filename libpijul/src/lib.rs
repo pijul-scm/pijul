@@ -2296,6 +2296,42 @@ impl <'a> Repository<'a> {
         Ok(result)
     }
 
+    /// Returns the path's inode
+    pub fn follow_path<'b>(&'b self, path:&[&[u8]])->Result<Option<Vec<u8>>,Error> {
+        // follow in tree, return inode
+        let mut buf=vec![0;INODE_SIZE];
+        let mut first=true;
+        for p in path {
+            buf.extend(*p);
+            println!("follow: {:?}",buf);
+            match try!(self.mdb_txn.get(self.dbi_tree,&buf)) {
+                Some(v)=> {
+                    println!("some: {:?}",buf);
+                    first=false;
+                    buf.clear();
+                    buf.extend(v)
+                },
+                None => {
+                    println!("none");
+                    if first { buf.truncate(INODE_SIZE); return Ok(Some(buf)) } else { return Ok(None) }
+                }
+            }
+        }
+        Ok(Some(buf))
+    }
+    /// Returns the node's properties
+    pub fn node_of_inode<'b>(&'b self, inode:&[u8])->Result<Option<&'b [u8]>,Error> {
+        // follow in tree, return inode
+        if unsafe { memcmp(inode.as_ptr() as *const c_void,
+                           ROOT_INODE.as_ptr() as *const c_void,
+                           INODE_SIZE as size_t) } == 0 {
+            Ok(Some(ROOT_KEY))
+        } else {
+            let node=try!(self.mdb_txn.get(self.dbi_inodes,&inode));
+            Ok(node)
+        }
+    }
+
 
     fn unsafe_output_repository(&mut self, working_copy:&Path) -> Result<Vec<(Vec<u8>,Vec<u8>)>,Error>{
         fn retrieve_paths<'a> (repo:&'a Repository,
@@ -2445,6 +2481,12 @@ impl <'a> Repository<'a> {
         }
         debug!(target:"output_repository","unsafe_output done");
         Ok(updates)
+    }
+
+    pub fn retrieve_and_output<L:LineBuffer<'a>>(&'a self,key:&'a [u8],l:&mut L) {
+        let mut redundant_edges=vec!();
+        let graph=self.retrieve(key).unwrap();
+        self.output_file(l,graph,&mut redundant_edges);
     }
 
     /// This is relatively suboptimal right now: in the future, we should carefully delete outdated parts of the tree database in unsafe_output_repository, and then reinsert them here.

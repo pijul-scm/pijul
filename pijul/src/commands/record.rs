@@ -29,13 +29,9 @@ use std::sync::Arc;
 use std::thread;
 extern crate time;
 use commands::error::Error;
-use std::collections::HashSet;
 
 extern crate rand;
 use std::path::{Path};
-
-use std::io::{BufWriter};
-use std::fs::File;
 
 use super::super::meta::{Meta};
 use super::ask;
@@ -88,7 +84,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 pub fn run(params : &Params) -> Result<Option<()>, Error> {
     match find_repo_root(&params.repository){
         None => return Err(Error::NotInARepository),
-        Some(r) =>
+        Some(ref r) =>
         {
             let repo_dir=pristine_dir(r);
             let t0=time::precise_time_s();

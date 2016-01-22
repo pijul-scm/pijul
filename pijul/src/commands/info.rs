@@ -47,7 +47,7 @@ pub fn parse_args<'a>(args : &'a ArgMatches) -> Params<'a>
 
 pub fn run(request: &Params) -> Result<(),&'static str> {
     match find_repo_root(request.directory) {
-        Some(r) =>
+        Some(ref r) =>
         { println!("Current repository location: '{}'", r.display());
           Ok(())
         },

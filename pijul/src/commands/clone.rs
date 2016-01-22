@@ -24,7 +24,7 @@ use super::StaticSubcommand;
 use super::init;
 
 use super::error::Error;
-use super::remote::{Remote,Session,parse_remote};
+use super::remote::{Remote,parse_remote};
 
 pub fn invocation() -> StaticSubcommand {
     return

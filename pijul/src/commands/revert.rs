@@ -50,7 +50,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error> {
     let pwd = args.repository;
     match find_repo_root(&pwd){
         None => return Err(error::Error::NotInARepository),
-        Some(r) =>
+        Some(ref r) =>
         {
             let repo_dir=pristine_dir(r);
             let mut repo = try!(Repository::new(&repo_dir));

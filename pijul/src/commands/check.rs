@@ -49,7 +49,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 pub fn run(args: &Params) -> Result<(),Error> {
     match find_repo_root(args.repository)
     {
-        Some(repo_base) => {
+        Some(ref repo_base) => {
             let _repository = Repository::new(&pristine_dir(&repo_base)).unwrap(); //.expect("Repository error");
             println!("Your repo looks alright Ma'am/Sir");
             Ok(())

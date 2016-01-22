@@ -51,14 +51,26 @@ pub fn meta_file(p : &Path) -> PathBuf {
     p.join(PIJUL_DIR_NAME).join("meta.toml")
 }
 
-pub fn find_repo_root(dir : &Path) -> Option<&Path> {
-    let pijul_dir = repo_dir(dir);
-    match metadata(pijul_dir) {
-        Ok (attr) =>
-            if attr.is_dir() {Some(dir)} else {None},
-        Err(_) =>
-            dir.parent().and_then(find_repo_root)
+pub fn find_repo_root<'a>(dir : &'a Path) -> Option<PathBuf> {
+    let c:Vec<&std::ffi::OsStr>=dir.iter().collect();
+    let mut i=c.len()-1;
+    while i>0 {
+        let mut p=PathBuf::new();
+        for j in 0..i {
+            p.push(c[j])
+        }
+        p.push(PIJUL_DIR_NAME);
+        match metadata(&p) {
+            Ok (ref attr) if attr.is_dir() => {
+                p.pop();
+                return Some(p)
+            },
+            _=>{}
+        }
+        p.pop();
+        i-=1;
     }
+    None
 }
 
 pub fn create(dir : &Path) -> std::io::Result<()> {

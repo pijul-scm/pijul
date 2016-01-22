@@ -80,7 +80,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
     let pwd = args.repository;
     match find_repo_root(&pwd){
         None => return Err(Error::NotInARepository),
-        Some(r) => {
+        Some(ref r) => {
             let mut session=try!(args.remote.session());
             let mut pushable=try!(session.pushable_patches(r));
             if !args.yes_to_all {
