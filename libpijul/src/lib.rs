@@ -101,7 +101,6 @@ const ROOT_INODE:&'static[u8]=&[0;INODE_SIZE];
 /// The name of the default branch, "main".
 pub const DEFAULT_BRANCH:&'static str="main";
 
-
 struct Diff<'a> {
     lines_a:Vec<&'a[u8]>,
     contents_a:Vec<&'a[u8]>
@@ -759,12 +758,20 @@ impl <'a> Repository<'a> {
                     if x.scc[i].len() == 1 && x.first_visit[i] <= x.first_visit[0] && x.last_visit[i] >= x.last_visit[0] && x.g.lines[x.scc[i][0]].flags & LINE_HALF_DELETED == 0 {
                         // End of conflict.
                         debug!(target:"conflict","end of conflict");
-                        if ! x.is_first {x.b.output_line(&[],b"================================\n");}
-                        else{
-                            x.is_first=false
-                        }
+                        let mut first=false; // Detect the first line
                         for key in x.nodes.iter() {
-                            x.b.output_line(key,x.repo.contents(key))
+                            let cont=x.repo.contents(key);
+                            if cont.len() > 0 && !first { // If this is the first non-empty line of this side of the conflict
+                                first=true;
+                                // Either we've had another side of the conflict before
+                                if ! x.is_first {x.b.conflict_next();}
+                                // Or not
+                                else {
+                                    x.b.begin_conflict();
+                                    x.is_first=false
+                                }
+                            }
+                            x.b.output_line(key,cont)
                         }
                         x.next=i
                     } else {
@@ -851,9 +858,8 @@ impl <'a> Repository<'a> {
                         permutations(x,i,0,&mut next);
                     }
                 }
-                buf.output_line(&[],b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
                 nodes.clear();
-                let next={
+                let (next,is_first)={
                     let mut conflict= A {
                         repo:self,
                         scc:&mut scc,
@@ -868,9 +874,9 @@ impl <'a> Repository<'a> {
                         cursor:cursor
                     };
                     get_conflict(&mut conflict,i);
-                    conflict.next
+                    (conflict.next,conflict.is_first)
                 };
-                buf.output_line(&[],b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n");
+                if !is_first { buf.end_conflict() }
                 if i==0 { break } else { i=std::cmp::min(i-1,next) }
             }
         }

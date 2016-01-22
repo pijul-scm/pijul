@@ -56,8 +56,15 @@ pub struct Graph<'a> {
     pub children:Vec<(*const u8,usize)> // raw pointer because we might need the edge address. We need the first element anyway, replace "*const u8" by "u8" if the full address is not needed.
 }
 
-
 pub trait LineBuffer<'a> {
-    fn output_line(&mut self,&'a[u8],&'a[u8]) -> ();
+    fn output_line(&mut self,&'a[u8],&'a[u8]);
+    fn begin_conflict(&mut self) {
+        self.output_line(&[],b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
+    }
+    fn conflict_next(&mut self) {
+        self.output_line(&[],b"================================\n");
+    }
+    fn end_conflict(&mut self) {
+        self.output_line(&[],b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n");
+    }
 }
-
