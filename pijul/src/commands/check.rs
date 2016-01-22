@@ -19,15 +19,17 @@
 extern crate clap;
 use clap::{SubCommand, Arg, ArgMatches};
 use std::path::Path;
-use std::io::{Error, ErrorKind};
 
 use commands::StaticSubcommand;
 extern crate libpijul;
 use self::libpijul::Repository;
-use self::libpijul::fs_representation::{find_repo_root,pristine_dir};
+use self::libpijul::fs_representation::{pristine_dir,find_repo_root};
+use super::get_wd;
+use std;
+use super::error::Error;
 
 pub struct Params<'a> {
-    pub repository : &'a Path
+    pub repository : Option<&'a Path>
 }
 
 pub fn invocation() -> StaticSubcommand {
@@ -41,14 +43,13 @@ pub fn invocation() -> StaticSubcommand {
              );
 }
 
-pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
-{
-    Params {repository : Path::new(args.value_of("repository").unwrap_or("."))}
+pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
+    Params {repository : args.value_of("repository").and_then(|x| { Some(Path::new(x)) }) }
 }
 
 pub fn run(args: &Params) -> Result<(),Error> {
-    match find_repo_root(args.repository)
-    {
+    let wd=try!(get_wd(args.repository));
+    match find_repo_root(&wd) {
         Some(ref repo_base) => {
             let _repository = Repository::new(&pristine_dir(&repo_base)).unwrap(); //.expect("Repository error");
             println!("Your repo looks alright Ma'am/Sir");
@@ -56,7 +57,7 @@ pub fn run(args: &Params) -> Result<(),Error> {
         },
 
         None => {
-            Err(Error::new(ErrorKind::NotFound, "not in a repository"))
+            Err(Error::NotInARepository)
         }
     }
 }

@@ -9,7 +9,7 @@ pijul init
 echo "blabla" > /tmp/alice/blibli/blublu/blabla
 pijul add blibli/blublu/blabla
 echo "--------------- Initial record in a"
-pijul record -a
+pijul record -a --author "x" -m "msg"
 
 cd /tmp
 echo "--------------- Get a b"
@@ -17,16 +17,16 @@ pijul clone alice bob
 
 cd /tmp/bob
 pijul mv blibli xyzw
-echo "blibli" > /tmp/b/blibli
+echo "blibli" > /tmp/bob/blibli
 pijul add blibli
 echo "--------------- Record in b"
-pijul record -a
+pijul record -a --author "x" -m ""
 echo "--------------- /record in b"
 
 cd /tmp/alice
 echo "--------------- Record in a"
 pijul mv blibli blzaaaa
-pijul record -a
+pijul record -a --author "x" -m ""
 echo "--------------- /record in a"
 echo "--------------- Final pull from a"
 pijul pull ../bob -a

@@ -53,13 +53,14 @@ pub fn meta_file(p : &Path) -> PathBuf {
 
 pub fn find_repo_root<'a>(dir : &'a Path) -> Option<PathBuf> {
     let c:Vec<&std::ffi::OsStr>=dir.iter().collect();
-    let mut i=c.len()-1;
+    let mut i=c.len();
     while i>0 {
         let mut p=PathBuf::new();
         for j in 0..i {
             p.push(c[j])
         }
         p.push(PIJUL_DIR_NAME);
+        debug!("trying {:?}",p);
         match metadata(&p) {
             Ok (ref attr) if attr.is_dir() => {
                 p.pop();

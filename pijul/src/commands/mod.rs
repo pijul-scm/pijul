@@ -23,6 +23,12 @@ pub mod revert;
 #[cfg(test)]
 mod test;
 pub mod error;
+use std::fs::{canonicalize};
+use std::path::{Path,PathBuf};
+use std::env::{current_dir};
+
+extern crate libpijul;
+use self::error::Error;
 
 pub fn all_command_invocations() -> Vec<StaticSubcommand> {
     return vec![
@@ -42,3 +48,20 @@ pub fn all_command_invocations() -> Vec<StaticSubcommand> {
         ];
 }
 
+pub fn get_wd(repository_path:Option<&Path>)->Result<PathBuf,Error> {
+    match repository_path {
+        None =>{
+            let p=try!(canonicalize(try!(current_dir())));
+            Ok(p)
+        },
+        Some(a) if a.is_relative() => {
+            let mut p=try!(canonicalize(try!(current_dir())));
+            p.push(a);
+            Ok(p)
+        },
+        Some(a)=>{
+            let p=try!(canonicalize(a));
+            Ok(p)
+        }
+    }
+}

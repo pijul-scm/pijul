@@ -35,6 +35,8 @@ use std::path::{Path};
 
 use super::super::meta::{Meta};
 use super::ask;
+use std;
+use super::get_wd;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -66,7 +68,7 @@ pub fn invocation() -> StaticSubcommand {
 }
 
 pub struct Params<'a> {
-    pub repository : &'a Path,
+    pub repository : Option<&'a Path>,
     pub patch_name : Option<&'a str>,
     pub authors : Option<Vec<&'a str>>,
     pub yes_to_all : bool
@@ -74,15 +76,16 @@ pub struct Params<'a> {
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 {
-    Params { repository : Path::new(args.value_of("repository").unwrap_or(".")),
+    Params { repository : args.value_of("repository").and_then(|x| { Some(Path::new(x)) }),
              yes_to_all : args.is_present("all"),
              authors : args.values_of("author"),
-             patch_name : args.value_of("mesage")
+             patch_name : args.value_of("message")
     }
 }
 
-pub fn run(params : &Params) -> Result<Option<()>, Error> {
-    match find_repo_root(&params.repository){
+pub fn run(args : &Params) -> Result<Option<()>, Error> {
+    let wd=try!(get_wd(args.repository));
+    match find_repo_root(&wd){
         None => return Err(Error::NotInARepository),
         Some(ref r) =>
         {
@@ -91,7 +94,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
             let (changes,syncs)= {
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 let (changes,syncs)=try!(repo.record(&r).map_err(Error::Repository));
-                if !params.yes_to_all {
+                if !args.yes_to_all {
                     let c=try!(super::ask::ask_record(&repo,&changes));
                     let selected =
                         changes.into_iter()
@@ -113,12 +116,12 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                 Ok(None)
             } else {
                 //println!("patch: {:?}",changes);
-
                 let patch={
+                    debug!("loading meta");
                     let mut meta=Meta::load(r).unwrap_or(Meta::new());
                     let mut save_meta=false;
                     let authors :Vec<String>=
-                        if let Some(ref authors)=params.authors {
+                        if let Some(ref authors)=args.authors {
                             authors.iter().map(|x| x.to_string()).collect()
                         } else if meta.authors.len()>0 {
                             meta.authors.iter().map(|x| x.to_string()).collect()
@@ -127,7 +130,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                             try!(ask::ask_authors())
                         };
                     let patch_name=
-                        if let Some(ref m)=params.patch_name {
+                        if let Some(ref m)=args.patch_name {
                             m.to_string()
                         } else {
                             try!(ask::ask_patch_name())
@@ -135,12 +138,14 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
                     if save_meta {
                         try!(meta.save(r))
                     }
+                    debug!("new");
                     Patch::new(authors,
                                patch_name,
                                None,
                                self::time::now().to_timespec().sec,
                                changes)
                 };
+                debug!("register_patch");
                 // save patch
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 let () = try!(repo.register_patch(r, patch, &syncs).map_err(Error::Repository));

@@ -8,11 +8,11 @@ use std::path::{Path};
 use std::fs::{metadata,rename};
 use commands::error;
 use std;
-
+use super::get_wd;
 #[derive(Debug)]
 pub struct Params<'a> {
     pub touched_files : Vec<&'a Path>,
-    pub repository : &'a Path
+    pub repository : Option<&'a Path>
 }
 
 
@@ -22,7 +22,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
             Some(l) => l.iter().map(|&p| { Path::new(p) }).collect(),
             None => vec!()
         };
-    let repository = Path::new(args.value_of("repository").unwrap_or("."));
+    let repository = args.value_of("repository").and_then(|x| {Some(Path::new(x))});
     Params { repository : repository, touched_files : paths }
 }
 
@@ -35,14 +35,8 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                -> Result<Option<()>, error::Error> {
     debug!(target:"mv","fs_operation {:?}",op);
     let files = &args.touched_files;
-    let pwd = {
-        if args.repository.is_relative() {
-            try!(std::env::current_dir()).join(args.repository)
-        } else {
-            args.repository.to_path_buf()
-        }
-    };
-    match find_repo_root(&pwd){
+    let wd=try!(get_wd(args.repository));
+    match find_repo_root(&wd) {
         None => return Err(error::Error::NotInARepository),
         Some(ref r) =>
         {
@@ -53,7 +47,7 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                 Operation::Add =>{
                     for file in &files[..] {
                         let m=try!(metadata(file));
-                        let p=pwd.join(*file);
+                        let p=(&wd).join(*file);
                         let file=iter_after(p.components(), r.components()).unwrap();
                         repo.add_file(file.as_path(),m.is_dir()).unwrap()
                     }
@@ -64,7 +58,7 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                         return Err(error::Error::NotEnoughArguments)
                     } else {
                         let target_file=args.touched_files.last().unwrap();
-                        let p=pwd.join(&target_file);
+                        let p=wd.join(&target_file);
                         let target={
                             iter_after(p.components(), r.components()).unwrap()
                         };
@@ -76,7 +70,7 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                                 let mut i=0;
                                 while i<args.touched_files.len()-1 {
                                     let file=args.touched_files[i];
-                                    let p=pwd.join(file);
+                                    let p=wd.join(file);
                                     let file=iter_after(p.components(), r.components()).unwrap();
 
                                     let full_target_name ={
@@ -100,11 +94,11 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                             }
                         } else {
                             let file=args.touched_files[0];
-                            let p=pwd.join(file);
+                            let p=wd.join(file);
                             let file=iter_after(p.components(), r.components()).unwrap();
 
                             let file_=args.touched_files[1];
-                            let p_=pwd.join(file_);
+                            let p_=wd.join(file_);
                             let file_=iter_after(p_.components(), r.components()).unwrap();
 
                             try!(repo.move_file(&file.as_path(),&file_.as_path(),target_is_dir));
@@ -115,7 +109,7 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                 },
                 Operation::Remove => {
                     for file in &files[..] {
-                        let p=pwd.join(*file);
+                        let p=wd.join(*file);
                         let file=iter_after(p.components(), r.components()).unwrap();
                         try!(repo.remove_file(file.as_path()))
                     }

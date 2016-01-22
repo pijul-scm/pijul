@@ -24,9 +24,11 @@ use clap::{SubCommand, Arg, ArgMatches};
 use commands;
 extern crate libpijul;
 use self::libpijul::fs_representation::find_repo_root;
-
+use std;
+use commands::error::Error;
+use super::get_wd;
 pub struct Params<'a> {
-    pub directory : &'a Path
+    pub repository : Option<&'a Path>
 }
 
 pub fn invocation() -> commands::StaticSubcommand {
@@ -42,16 +44,17 @@ pub fn invocation() -> commands::StaticSubcommand {
 
 pub fn parse_args<'a>(args : &'a ArgMatches) -> Params<'a>
 {
-    Params{ directory : Path::new(args.value_of("dir").unwrap_or(".")) }
+    Params{ repository : args.value_of("dir").and_then(|x| { Some(Path::new(x)) }) }
 }
 
-pub fn run(request: &Params) -> Result<(),&'static str> {
-    match find_repo_root(request.directory) {
+pub fn run(args: &Params) -> Result<(),Error> {
+    let wd = try!(get_wd(args.repository));
+    match find_repo_root(&wd) {
         Some(ref r) =>
         { println!("Current repository location: '{}'", r.display());
           Ok(())
         },
-        None => Err("not in a repository")
+        None => Err(Error::NotInARepository)
     }
 }
 

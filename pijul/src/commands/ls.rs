@@ -23,6 +23,8 @@ use commands::error;
 use self::libpijul::{Repository};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
 use std::path::Path;
+use std;
+use super::get_wd;
 
 pub fn invocation() -> StaticSubcommand {
     return 
@@ -39,16 +41,16 @@ pub fn invocation() -> StaticSubcommand {
 }
 
 pub struct Params<'a> {
-    pub repository : &'a Path
+    pub repository : Option<&'a Path>
 }
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
-    Params { repository:Path::new(args.value_of("repository").unwrap_or(".")) }
+    Params { repository:args.value_of("repository").and_then(|x| { Some(Path::new(x)) }) }
 }
 
 pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error> {
-    let pwd = args.repository;
-    match find_repo_root(&pwd){
+    let wd=try!(get_wd(args.repository));
+    match find_repo_root(&wd){
         None => return Err(error::Error::NotInARepository),
         Some(ref r) =>
         {

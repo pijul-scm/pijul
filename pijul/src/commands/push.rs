@@ -29,6 +29,8 @@ use std::fs::File;
 use self::libpijul::patch::{Patch};
 extern crate rustc_serialize;
 use self::rustc_serialize::hex::{ToHex};
+use std;
+use super::get_wd;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -60,14 +62,14 @@ pub fn invocation() -> StaticSubcommand {
 
 #[derive(Debug)]
 pub struct Params<'a> {
-    pub repository : &'a Path,
+    pub repository : Option<&'a Path>,
     pub remote : remote::Remote<'a>,
     pub remote_id : &'a str,
     pub yes_to_all : bool
 }
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
-    let repository = Path::new(args.value_of("repository").unwrap_or("."));
+    let repository = args.value_of("repository").and_then(|x| { Some(Path::new(x)) });
     let remote_id = args.value_of("remote").unwrap();
     let remote=remote::parse_remote(&remote_id,args);
     Params { repository : repository,
@@ -77,8 +79,8 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
 }
 
 pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
-    let pwd = args.repository;
-    match find_repo_root(&pwd){
+    let wd=try!(get_wd(args.repository));
+    match find_repo_root(&wd){
         None => return Err(Error::NotInARepository),
         Some(ref r) => {
             let mut session=try!(args.remote.session());

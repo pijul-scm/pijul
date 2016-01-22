@@ -23,6 +23,7 @@ use std::io::stdin;
 use std::char::from_u32_unchecked;
 use std::str;
 use std::ptr::copy_nonoverlapping;
+use std;
 
 const EPOCH:time::Tm = time::Tm {
     tm_sec:0,
@@ -380,6 +381,7 @@ pub fn ask_record<'a>(repository:&Repository<'a>,changes:&[Change])->Result<Hash
 
 pub fn ask_authors()->Result<Vec<String>,Error> {
     print!("What is your name <and email address>? ");
+    std::io::stdout().flush();
     let mut input = String::new();
     try!(stdin().read_line(&mut input));
     Ok(vec!(input))
@@ -388,6 +390,7 @@ pub fn ask_authors()->Result<Vec<String>,Error> {
 
 pub fn ask_patch_name()->Result<String,Error> {
     print!("What is the name of this patch? ");
+    std::io::stdout().flush();
     let mut input = String::new();
     try!(stdin().read_line(&mut input));
     Ok(input)

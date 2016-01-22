@@ -95,7 +95,7 @@ impl <'a>Drop for Repository<'a> {
 }
 
 
-const INODE_SIZE:usize=16;
+const INODE_SIZE:usize=20;
 /// The size of internal patch id. Allocate a buffer of this size when calling e.g. apply.
 const ROOT_INODE:&'static[u8]=&[0;INODE_SIZE];
 /// The name of the default branch, "main".
