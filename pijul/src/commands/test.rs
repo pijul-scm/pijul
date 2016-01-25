@@ -10,7 +10,7 @@ fn init_creates_repo() -> ()
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let init_params = init::Params { location : &dir.path(), allow_nested : false};
     init::run(&init_params).unwrap();
-    let info_params = info::Params { directory : &dir.path() };
+    let info_params = info::Params { repository : Some(&dir.path()) };
     info::run(&info_params).unwrap();
 }
 
@@ -47,7 +47,7 @@ fn in_empty_dir_nothing_to_record() {
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let init_params = init::Params { location : &dir.path(), allow_nested : false};
     init::run(&init_params).unwrap();
-    let record_params = record::Params { repository : &dir.path(),
+    let record_params = record::Params { repository : Some(&dir.path()),
                                          yes_to_all : true,
                                          patch_name : Some(""),
                                          authors : Some(vec![]) };
@@ -64,12 +64,12 @@ fn with_changes_sth_to_record() {
     init::run(&init_params).unwrap();
     let fpath = &dir.path().join("toto");
     let file = fs::File::create(&fpath).unwrap();
-    let add_params = add::Params { repository : &dir.path(), touched_files : vec![&fpath] };
+    let add_params = add::Params { repository : Some(&dir.path()), touched_files : vec![&fpath] };
     match add::run(&add_params).unwrap() {
         Some (()) => (),
         None => panic!("no file added")        
     };
-    let record_params = record::Params { repository : &dir.path(),
+    let record_params = record::Params { repository : Some(&dir.path()),
                                          yes_to_all : true,
                                          patch_name : Some(""),
                                          authors : Some(vec![])
@@ -88,7 +88,7 @@ fn add_remove_nothing_to_record() {
     init::run(&init_params).unwrap();
     let fpath = &dir.path().join("toto");
     let file = fs::File::create(&fpath).unwrap();
-    let add_params = add::Params { repository : &dir.path(), touched_files : vec![&fpath] };
+    let add_params = add::Params { repository : Some(&dir.path()), touched_files : vec![&fpath] };
     match add::run(&add_params).unwrap() {
         Some (()) => (),
         None => panic!("no file added")        
@@ -98,7 +98,7 @@ fn add_remove_nothing_to_record() {
         None => panic!("no file removed")
     };
 
-    let record_params = record::Params { repository : &dir.path(),
+    let record_params = record::Params { repository : Some(&dir.path()),
                                          yes_to_all : true,
                                          authors : Some(vec![]),
                                          patch_name : Some("")
@@ -116,7 +116,7 @@ fn no_remove_without_add() {
     init::run(&init_params).unwrap();
     let fpath = &dir.path().join("toto");
     let file = fs::File::create(&fpath).unwrap();
-    let rem_params = remove::Params { repository : &dir.path(), touched_files : vec![&fpath] };
+    let rem_params = remove::Params { repository : Some(&dir.path()), touched_files : vec![&fpath] };
     match remove::run(&rem_params) {
         Ok(_) => panic!("inexistant file can be removed"),
         Err(error::Error::Repository(FileNotInRepo)) => (),
@@ -137,13 +137,13 @@ fn add_record_pull() {
     init::run(&init_params_b).unwrap();
     let fpath = &dir_a.join("toto");
     let file = fs::File::create(&fpath).unwrap();
-    let add_params = add::Params { repository : &dir_a,
+    let add_params = add::Params { repository : Some(&dir_a),
                                    touched_files : vec![&fpath] };
     match add::run(&add_params).unwrap() {
         Some (()) => (),
         None => panic!("no file added")        
     };
-    let record_params = record::Params { repository : &dir_a,
+    let record_params = record::Params { repository : Some(&dir_a),
                                          yes_to_all : true,
                                          authors : Some(vec![]),
                                          patch_name : Some("nothing")
@@ -152,7 +152,7 @@ fn add_record_pull() {
         None => panic!("file add is not going to be recorded"),
         Some(()) => ()
     }
-    let pull_params = pull::Params { repository : &dir_b,
+    let pull_params = pull::Params { repository : Some(&dir_b),
                                      remote_id : "test_repository_a",
                                      remote : remote::Remote::Local{ path: &dir_a},
                                      yes_to_all : true };
