@@ -280,7 +280,7 @@ fn print_change<'a>(repo:&Repository<'a>,c:&Change)->Result<(),Error> {
                     let int=try!(repo.internal_hash(&target[0..target.len()-LINE_SIZE]));
                     let mut internal=[0;KEY_SIZE];
                     unsafe {
-                        copy_nonoverlapping(int.as_ptr(),internal.as_mut_ptr(),HASH_SIZE);
+                        copy_nonoverlapping(int.contents.as_ptr(),internal.as_mut_ptr(),HASH_SIZE);
                         copy_nonoverlapping(target.as_ptr().offset((target.len() - LINE_SIZE) as isize),
                                             internal.as_mut_ptr().offset(HASH_SIZE as isize),
                                             LINE_SIZE)

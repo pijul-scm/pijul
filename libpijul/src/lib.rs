@@ -101,6 +101,21 @@ const ROOT_INODE:&'static[u8]=&[0;INODE_SIZE];
 /// The name of the default branch, "main".
 pub const DEFAULT_BRANCH:&'static str="main";
 
+#[derive(Copy, Clone)]
+pub struct InternalKey<'a> {
+    pub contents : &'a[u8]
+}
+
+impl <'a> InternalKey<'a> {
+    pub fn new(b : &'a[u8]) -> Self {
+        InternalKey { contents : b}
+    }
+
+    pub fn to_hex(&self) -> String {
+        to_hex(self.contents)
+    }
+}
+
 struct Diff<'a> {
     lines_a:Vec<&'a[u8]>,
     contents_a:Vec<&'a[u8]>
@@ -945,14 +960,14 @@ impl <'a> Repository<'a> {
     }
 
 
-    pub fn internal_hash<'b>(&'b self,key:&[u8])->Result<&'b [u8],Error> {
+    pub fn internal_hash<'b>(&'b self,key:&[u8])->Result<InternalKey<'b>,Error> {
         debug!("internal_hash: {}, {}",to_hex(key), key.len());
         if key.len()==HASH_SIZE
             && unsafe { memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t) }==0 {
-                Ok(ROOT_KEY)
+                Ok(InternalKey::new(ROOT_KEY))
             } else {
                 match try!(self.mdb_txn.get(self.dbi_internal,key)) {
-                    Some(k)=>Ok(k),
+                    Some(k)=>Ok(InternalKey::new(k)),
                     None=>Err(Error::InternalHashNotFound(key.to_vec()))
                 }
             }
@@ -974,17 +989,17 @@ impl <'a> Repository<'a> {
     }
      */
     /// "intro" is the internal patch number of the patch that introduced this edge.
-    fn internal_edge(&'a self,flag:u8,to:&[u8],intro:&[u8],result:&mut [u8])->Result<(),Error> {
+    fn internal_edge(&'a self,flag:u8,to:&[u8],intro:InternalKey,result:&mut [u8])->Result<(),Error> {
         debug_assert!(result.len()>=1+KEY_SIZE+HASH_SIZE);
-        debug_assert!(intro.len() == HASH_SIZE);
+        debug_assert!(intro.contents.len() == HASH_SIZE);
         result[0]=flag;
         let int_to=try!(self.internal_hash(&to[0..(to.len()-LINE_SIZE)]));
         unsafe {
-            copy_nonoverlapping(int_to.as_ptr(),result.as_mut_ptr().offset(1),HASH_SIZE);
+            copy_nonoverlapping(int_to.contents.as_ptr(),result.as_mut_ptr().offset(1),HASH_SIZE);
             copy_nonoverlapping(to.as_ptr().offset((to.len()-LINE_SIZE) as isize),
                                 result.as_mut_ptr().offset((1+HASH_SIZE) as isize),
                                 LINE_SIZE);
-            copy_nonoverlapping(intro.as_ptr(),result.as_mut_ptr().offset(1+KEY_SIZE as isize),HASH_SIZE);
+            copy_nonoverlapping(intro.contents.as_ptr(),result.as_mut_ptr().offset(1+KEY_SIZE as isize),HASH_SIZE);
         }
         Ok(())
     }
@@ -1490,11 +1505,11 @@ impl <'a> Repository<'a> {
     }
 
     /// Test whether a node has edges unknown to the patch we're applying.
-    fn has_exclusive_edge(&self,cursor:&mut lmdb::MdbCursor,internal_patch_id:&[u8],key:&[u8],flag0:u8,include_folder:bool,include_pseudo:bool,dependencies:&HashSet<Vec<u8>>)->bool {
+    fn has_exclusive_edge(&self,cursor:&mut lmdb::MdbCursor,internal_patch_id:InternalKey,key:&[u8],flag0:u8,include_folder:bool,include_pseudo:bool,dependencies:&HashSet<Vec<u8>>)->bool {
         for neighbor in CursIter::new(cursor,&key[1..(1+KEY_SIZE)],flag0,include_folder,include_pseudo) {
             if unsafe {
                 memcmp(neighbor.as_ptr().offset(1+KEY_SIZE as isize) as *const c_void,
-                       internal_patch_id.as_ptr() as *const c_void,
+                       internal_patch_id.contents.as_ptr() as *const c_void,
                        HASH_SIZE as size_t)
                     != 0 } {
                 debug!(target:"exclusive","exclusive_edge: {}",to_hex(&neighbor));
@@ -1513,7 +1528,7 @@ impl <'a> Repository<'a> {
     }
 
 
-    fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:&[u8],dependencies:&HashSet<Vec<u8>>)->Result<(),Error>{
+    fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:InternalKey,dependencies:&HashSet<Vec<u8>>)->Result<(),Error>{
         debug!(target:"conflictdiff","unsafe_apply");
         let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
@@ -1521,7 +1536,7 @@ impl <'a> Repository<'a> {
         let cursor= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let mut parents:Vec<u8>=Vec::new();
         let mut children:Vec<u8>=Vec::new();
-        debug!(target:"apply","unsafe_apply (patch {})",to_hex(internal_patch_id));
+        debug!(target:"apply","unsafe_apply (patch {})",to_hex(internal_patch_id.contents));
         for ch in changes {
             match *ch {
                 Change::Edges{ref flag, ref edges} => {
@@ -1556,7 +1571,7 @@ impl <'a> Repository<'a> {
                     }
                     // Then add the new edges.
                     // Then add zombies and pseudo-edges if needed.
-                    debug!(target:"apply","edges (patch {})",to_hex(internal_patch_id));
+                    debug!(target:"apply","edges (patch {})",internal_patch_id.to_hex());
                     parents.clear();
                     children.clear();
                     for e in edges {
@@ -1639,13 +1654,13 @@ impl <'a> Repository<'a> {
                     let mut lnum0= *line_num;
                     for i in 0..LINE_SIZE { pv[1+HASH_SIZE+i]=(lnum0 & 0xff) as u8; lnum0>>=8 }
                     unsafe {
-                        copy_nonoverlapping(internal_patch_id.as_ptr(),
+                        copy_nonoverlapping(internal_patch_id.contents.as_ptr(),
                                             pu.as_mut_ptr().offset(1+KEY_SIZE as isize),
                                             HASH_SIZE);
-                        copy_nonoverlapping(internal_patch_id.as_ptr(),
+                        copy_nonoverlapping(internal_patch_id.contents.as_ptr(),
                                             pv.as_mut_ptr().offset(1+KEY_SIZE as isize),
                                             HASH_SIZE);
-                        copy_nonoverlapping(internal_patch_id.as_ptr(),
+                        copy_nonoverlapping(internal_patch_id.contents.as_ptr(),
                                             pv.as_mut_ptr().offset(1),
                                             HASH_SIZE);
                     };
@@ -1661,7 +1676,7 @@ impl <'a> Repository<'a> {
                             pu[0]= (*flag) ^ PARENT_EDGE;
                             pv[0]= *flag;
                             unsafe {
-                                copy_nonoverlapping(u.as_ptr() as *const c_char,
+                                copy_nonoverlapping(u.contents.as_ptr() as *const c_char,
                                                     pu.as_mut_ptr().offset(1) as *mut c_char,
                                                     HASH_SIZE);
                                 copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
@@ -1673,7 +1688,7 @@ impl <'a> Repository<'a> {
                         self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA).unwrap();
                     }
                     unsafe {
-                        copy_nonoverlapping(internal_patch_id.as_ptr() as *const c_char,
+                        copy_nonoverlapping(internal_patch_id.contents.as_ptr() as *const c_char,
                                             pu.as_ptr().offset(1) as *mut c_char,
                                             HASH_SIZE);
                     }
@@ -1703,7 +1718,7 @@ impl <'a> Repository<'a> {
                                 } else {
                                     internal_patch_id
                                 };
-                                copy_nonoverlapping(u.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE);
+                                copy_nonoverlapping(u.contents.as_ptr(), pu.as_mut_ptr().offset(1), HASH_SIZE);
                                 copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize) as *const c_char,
                                                     pu.as_ptr().offset((1+HASH_SIZE) as isize) as *mut c_char,
                                                     LINE_SIZE);
@@ -1732,7 +1747,7 @@ impl <'a> Repository<'a> {
             match self.internal_hash(hash) {
                 Ok(internal)=>{
                     let curs=try!(self.mdb_txn.cursor(self.dbi_branches).map_err(Error::IoError));
-                    match curs.get(branch,Some(internal),lmdb::Op::MDB_GET_BOTH) {
+                    match curs.get(branch,Some(internal.contents),lmdb::Op::MDB_GET_BOTH) {
                         Ok(_)=>Ok(true),
                         Err(_)=>Ok(false)
                     }
@@ -1823,7 +1838,7 @@ impl <'a> Repository<'a> {
             }
         }
         self.mdb_txn.put(self.dbi_branches,&current,&internal,lmdb::MDB_NODUPDATA).unwrap();
-        try!(self.unsafe_apply(&patch.changes,internal,&patch.dependencies));
+        try!(self.unsafe_apply(&patch.changes,InternalKey::new(internal),&patch.dependencies));
         let cursor= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let cursor_= unsafe {&mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         {
@@ -1832,12 +1847,12 @@ impl <'a> Repository<'a> {
             let mut repair_missing_context= |repo:&mut Repository,direction_up:bool,c:&[u8] | {
                 let mut context:[u8;KEY_SIZE]=[0;KEY_SIZE];
                 unsafe {
-                    let u= if c.len()>LINE_SIZE {
+                    let u : InternalKey = if c.len()>LINE_SIZE {
                         repo.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
                     } else {
-                        internal as &[u8]
+                        InternalKey::new(internal) // as &[u8]
                     };
-                    copy_nonoverlapping(u.as_ptr(), context.as_mut_ptr(), HASH_SIZE);
+                    copy_nonoverlapping(u.contents.as_ptr(), context.as_mut_ptr(), HASH_SIZE);
                     copy_nonoverlapping(c.as_ptr().offset((c.len()-LINE_SIZE) as isize),
                                         context.as_mut_ptr().offset(HASH_SIZE as isize),
                                         LINE_SIZE);
@@ -1883,11 +1898,11 @@ impl <'a> Repository<'a> {
                                     let int_from=try!(self.internal_hash(&e.from[0..(e.from.len()-LINE_SIZE)]));
                                     let int_to=try!(self.internal_hash(&e.to[0..(e.to.len()-LINE_SIZE)]));
                                     unsafe {
-                                        copy_nonoverlapping(int_from.as_ptr(),u.as_mut_ptr(),HASH_SIZE);
+                                        copy_nonoverlapping(int_from.contents.as_ptr(),u.as_mut_ptr(),HASH_SIZE);
                                         copy_nonoverlapping(e.from.as_ptr().offset((e.from.len()-LINE_SIZE) as isize),
                                                             u.as_mut_ptr().offset(HASH_SIZE as isize),
                                                             LINE_SIZE);
-                                        copy_nonoverlapping(int_to.as_ptr(),v.as_mut_ptr(),HASH_SIZE);
+                                        copy_nonoverlapping(int_to.contents.as_ptr(),v.as_mut_ptr(),HASH_SIZE);
                                         copy_nonoverlapping(e.to.as_ptr().offset((e.to.len()-LINE_SIZE) as isize),
                                                             v.as_mut_ptr().offset(HASH_SIZE as isize),
                                                             LINE_SIZE);
@@ -1903,7 +1918,7 @@ impl <'a> Repository<'a> {
                                         let dest= if *flag & PARENT_EDGE != 0 { &e.from } else { &e.to };
                                         let int_dest=try!(self.internal_hash(&dest[0..(dest.len()-LINE_SIZE)]));
                                         unsafe {
-                                            copy_nonoverlapping(int_dest.as_ptr(),u.as_mut_ptr(),HASH_SIZE);
+                                            copy_nonoverlapping(int_dest.contents.as_ptr(),u.as_mut_ptr(),HASH_SIZE);
                                             copy_nonoverlapping(dest.as_ptr().offset((dest.len()-LINE_SIZE) as isize),
                                                                 u.as_mut_ptr().offset(HASH_SIZE as isize),
                                                                 LINE_SIZE);
@@ -1940,7 +1955,7 @@ impl <'a> Repository<'a> {
         }
         let time2=time::precise_time_s();
         for ref dep in patch.dependencies.iter() {
-            let dep_internal=try!(self.internal_hash(&dep)).to_vec();
+            let dep_internal=try!(self.internal_hash(&dep)).contents.to_vec();
             self.mdb_txn.put(self.dbi_revdep,&dep_internal,internal,0).unwrap();
         }
         let time3=time::precise_time_s();
@@ -2124,9 +2139,9 @@ impl <'a> Repository<'a> {
                             {
                                 let no= if flag&PARENT_EDGE==0 { &e.to } else { &e.from };
                                 let to= self.internal_hash(&no[0..(no.len()-LINE_SIZE)]).unwrap();
-                                debug!(target:"sync","to={}",to_hex(&to));
+                                debug!(target:"sync","to={}",to.to_hex());
                                 unsafe {
-                                    copy_nonoverlapping(to.as_ptr(),node.as_mut_ptr().offset(3),HASH_SIZE);
+                                    copy_nonoverlapping(to.contents.as_ptr(),node.as_mut_ptr().offset(3),HASH_SIZE);
                                     copy_nonoverlapping(no.as_ptr().offset((no.len()-LINE_SIZE) as isize),
                                                         node.as_mut_ptr().offset((3+HASH_SIZE) as isize),
                                                         LINE_SIZE);
