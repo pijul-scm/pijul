@@ -94,6 +94,12 @@ impl <'a>Drop for Repository<'a> {
     }
 }
 
+// Used between functions of unsafe_output_repository (Rust does not allow enum inside the class)
+enum Tree {
+    Move((Vec<u8>,Vec<u8>)),
+    Addition((Vec<u8>,Vec<u8>)),
+    Deletion(())
+}
 
 const INODE_SIZE:usize=20;
 /// The size of internal patch id. Allocate a buffer of this size when calling e.g. apply.
@@ -1224,8 +1230,6 @@ impl <'a> Repository<'a> {
         }
     }
 
-
-
     fn record_all(&self,
                   actions:&mut Vec<Change>,
                   line_num:&mut usize,
@@ -1247,15 +1251,21 @@ impl <'a> Repository<'a> {
                     Ok(Some(current_node))=>{
                         let old_attr=((current_node[1] as usize) << 8) | (current_node[2] as usize);
                         // Add the new name.
-                        let int_attr={
-                            let attr=try!(metadata(&realpath));
-                            let p=(permissions(&attr)) & 0o777;
-                            let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
-                            (if p==0 { old_attr } else { p }) | is_dir
+                        let (int_attr,deleted)={
+                            match metadata(&realpath) {
+                                Ok(attr)=>{
+                                    let p=(permissions(&attr)) & 0o777;
+                                    let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
+                                    ((if p==0 { old_attr } else { p }) | is_dir,false)
+                                },
+                                Err(_)=>{
+                                    (old_attr,true)
+                                }
+                            }
                         };
                         debug!(target:"record_all","current_node[0]={},old_attr={},int_attr={}",
                                current_node[0],old_attr,int_attr);
-                        if current_node[0]==1 || old_attr!=int_attr {
+                        if !deleted && (current_node[0]==1 || old_attr!=int_attr) {
                             // file moved
 
                             // Delete all former names.
@@ -1327,13 +1337,15 @@ impl <'a> Repository<'a> {
                                 info!("total diff took {}s", time2-time1);
                             }
 
-                        } else if current_node[0]==2 {
+                        } else if deleted || current_node[0]==2 {
+
                             let mut edges=Vec::new();
                             // Now take all grandparents of l2, delete them.
                             let mut curs_parents= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
                             let mut curs_grandparents= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
                             for parent in CursIter::new(curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true,false) {
                                 for grandparent in CursIter::new(curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true,false) {
+                                    // Deletes the name
                                     edges.push(Edge {
                                         from:self.external_key(&parent[1..(1+KEY_SIZE)]),
                                         to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
@@ -1341,8 +1353,7 @@ impl <'a> Repository<'a> {
                                     });
                                 }
                             }
-
-                            // file deleted. delete recursively
+                            // Delete the file recursively
                             let mut file_edges=vec!();
                             {
                                 debug!(target:"record_all","del={}",to_hex(current_node));
@@ -1445,7 +1456,8 @@ impl <'a> Repository<'a> {
                                 }
                             },
                             Err(_)=>{
-                                panic!("error adding a file (metadata failed)")
+                                println!("error adding file {:?} (metadata failed)",realpath);
+                                None
                             }
                         }
                     },
@@ -2266,6 +2278,9 @@ impl <'a> Repository<'a> {
         loop {
             match self.mdb_txn.get(self.dbi_revtree,current) {
                 Ok(Some(v))=>{
+                    debug!(target:"output_repository","filename_of_inode {}{}",
+                           to_hex(&v[0..INODE_SIZE]),
+                           std::str::from_utf8(&v[INODE_SIZE..]).unwrap());
                     components.push(&v[INODE_SIZE..]);
                     current=&v[0..INODE_SIZE];
                     if unsafe { memcmp(current.as_ptr() as *const c_void,
@@ -2318,16 +2333,17 @@ impl <'a> Repository<'a> {
         let mut first=true;
         for p in path {
             buf.extend(*p);
-            println!("follow: {:?}",buf);
+            println!("follow: {:?}",to_hex(&buf));
             match try!(self.mdb_txn.get(self.dbi_tree,&buf)) {
                 Some(v)=> {
-                    println!("some: {:?}",buf);
+                    println!("some: {:?}",to_hex(&v));
                     first=false;
                     buf.clear();
                     buf.extend(v)
                 },
                 None => {
                     println!("none");
+                    dump_table(&self.mdb_txn,self.dbi_tree);
                     if first { buf.truncate(INODE_SIZE); return Ok(Some(buf)) } else { return Ok(None) }
                 }
             }
@@ -2347,156 +2363,118 @@ impl <'a> Repository<'a> {
         }
     }
 
-
-    fn unsafe_output_repository(&mut self, working_copy:&Path) -> Result<Vec<(Vec<u8>,Vec<u8>)>,Error>{
-        fn retrieve_paths<'a> (repo:&'a Repository,
-                               working_copy:&Path,
-                               key:&'a [u8],path:&mut PathBuf,parent_inode:&'a [u8],
-                               paths:&mut BTreeMap<PathBuf,Vec<(Vec<u8>,Vec<u8>,Vec<u8>,Option<PathBuf>,usize)>>,
-                               cache:&mut HashSet<&'a [u8]>,
-                               nfiles:&mut usize)-> Result<(),Error> {
-            if !cache.contains(key) {
-                cache.insert(key);
-                let mut curs_b= unsafe { &mut *repo.mdb_txn.unsafe_cursor(repo.dbi_nodes).unwrap()};
-                debug!(target:"output_repository","key={}",to_hex(key));
-                for b in CursIter::new(curs_b,key,FOLDER_EDGE,true,true) {
-                    debug!(target:"output_repository","b={}",to_hex(b));
-                    let cont_b=
-                        match try!(repo.mdb_txn.get(repo.dbi_contents,&b[1..(1+KEY_SIZE)])) {
-                            Some(cont_b)=>cont_b,
-                            None=>&[][..]
-                        };
-                    debug!(target:"output_repository","path:{:?} cont_b={}",path,std::str::from_utf8(&cont_b[2..]).unwrap());
-                    if cont_b.len()<2 { panic!("node (b) too short") } else {
-                        let filename=&cont_b[2..];
-                        let perms= ((cont_b[0] as usize) << 8) | (cont_b[1] as usize);
-                        let mut curs_c= unsafe { &mut *repo.mdb_txn.unsafe_cursor(repo.dbi_nodes).unwrap()};
-                        for c in CursIter::new(curs_c,&b[1..(1+KEY_SIZE)],FOLDER_EDGE,true,true) {
-                            debug!(target:"output_repository","c={}",to_hex(c));
-                            let cv=&c[1..(1+KEY_SIZE)];
-                            match try!(repo.mdb_txn.get(repo.dbi_revinodes,cv)) {
-                                Some(inode)=>{
-                                    path.push(std::str::from_utf8(filename).unwrap());
-                                    {
-                                        let vec=paths.entry(path.clone()).or_insert(Vec::new());
-                                        let mut buf=PathBuf::from(working_copy);
-                                        *nfiles+=1;
-                                        vec.push((cv.to_vec(),parent_inode.to_vec(),inode.to_vec(),
-                                                  if repo.filename_of_inode(inode,&mut buf) {Some(buf)} else { None },
-                                                  perms))
+    fn unsafe_output_repository(&mut self,working_copy:&Path)->Result<Vec<Tree>,Error> {
+        fn output<'a>(repo:&'a mut Repository,working_copy:&Path,
+                      visited:&mut HashMap<Vec<u8>,Vec<PathBuf>>,
+                      path:&mut PathBuf,
+                      key:&[u8],
+                      inode:&[u8],
+                      moves:&mut Vec<Tree>,
+                      curs_b:*mut lmdb::MdbCursor,
+                      curs_c:*mut lmdb::MdbCursor)->Result<(),Error>{
+            debug!(target:"output_repository","visited {}",to_hex(key));
+            let first_move=moves.len();
+            let mut recursive_calls=Vec::new();
+            for b in CursIter::new(curs_b,key,FOLDER_EDGE,true,true) {
+                //debug!(target:"output_repository","b={}",to_hex(b));
+                let cont_b=
+                    match try!(repo.mdb_txn.get(repo.dbi_contents,&b[1..(1+KEY_SIZE)])) {
+                        Some(cont_b)=>cont_b,
+                        None=>&[][..]
+                    };
+                debug!(target:"output_repository","path:{:?} cont_b={}",path,std::str::from_utf8(&cont_b[2..]).unwrap());
+                if cont_b.len()<2 { panic!("node (b) too short") } else {
+                    let filename_bytes=&cont_b[2..];
+                    let filename=std::str::from_utf8(filename_bytes).unwrap();
+                    let perms= ((cont_b[0] as usize) << 8) | (cont_b[1] as usize);
+                    for c in CursIter::new(curs_c,&b[1..(1+KEY_SIZE)],FOLDER_EDGE,true,true) {
+                        let cv=&c[1..(1+KEY_SIZE)];
+                        debug!(target:"output_repository","cv={}",to_hex(cv));
+                        match try!(repo.mdb_txn.get(repo.dbi_revinodes,cv)) {
+                            Some(c_inode) => {
+                                path.push(filename);
+                                match visited.entry(cv.to_vec()){
+                                    Entry::Occupied(mut e)=>{
+                                        // Help! A name conflict!
+                                        e.get_mut().push(path.clone());
+                                        println!("Name conflict between {:?}",e.get());
+                                        unimplemented!()
                                     }
-                                    if perms & DIRECTORY_FLAG != 0 { // is_directory
-                                        try!(retrieve_paths(repo,working_copy,cv,path,inode,paths,cache,nfiles));
+                                    Entry::Vacant(e)=>{
+                                        e.insert(vec!(path.clone()));
+                                        debug!(target:"output_repository","inode={}",to_hex(c_inode));
+                                        {
+                                            let mut buf=PathBuf::from(working_copy);
+                                            let mut inode_v=inode.to_vec();
+                                            inode_v.extend(filename_bytes);
+                                            if repo.filename_of_inode(c_inode,&mut buf) {
+                                                debug!(target:"output_repository","former_path={:?}",buf);
+                                                if buf.as_os_str() != path.as_os_str() {
+                                                    // move on filesystem
+                                                    debug!(target:"output_repository","moving {:?} to {:?}",buf,path);
+                                                    fs::rename(&buf,&path).unwrap();
+                                                    debug!(target:"output_repository","done");
+                                                    moves.push(Tree::Move((inode_v,c_inode.to_vec())))
+                                                }
+                                            } else {
+                                                debug!(target:"output_repository","no former_path");
+                                                moves.push(Tree::Addition((inode_v,c_inode.to_vec())));
+                                                if perms&DIRECTORY_FLAG==0 {
+                                                    std::fs::File::create(&path).unwrap();
+                                                } else {
+                                                    std::fs::create_dir_all(&path).unwrap();
+                                                }
+                                            };
+                                        }
+                                        if perms&DIRECTORY_FLAG==0 {
+                                            let mut redundant_edges=vec!();
+                                            let l=repo.retrieve(&key).unwrap();
+                                            debug!(target:"output_repository","creating file {:?}",path);
+                                            let mut f=std::fs::File::create(&path).unwrap();
+                                            debug!(target:"output_repository","done");
+                                            repo.output_file(&mut f,l,&mut redundant_edges);
+                                        } else {
+                                            recursive_calls.push((filename.to_string(),cv.to_vec(),c_inode.to_vec()));
+                                        }
                                     }
-                                    path.pop();
-                                },
-                                None =>{
-                                    panic!("inodes not synchronized")
-                                }
+                                };
+                                path.pop();
+                            },
+                            None =>{
+                                panic!("inodes not synchronized")
                             }
                         }
-                        unsafe { lmdb::mdb_cursor_close(curs_c) }
                     }
-                    debug!(target:"output_repository","/b");
                 }
-                unsafe { lmdb::mdb_cursor_close(curs_b) }
+                debug!(target:"output_repository","/b");
+            }
+
+            // Update the tree (needed for next level)
+            try!(repo.update_tree(&moves[first_move..]));
+            // Now do all the recursive calls
+            for (filename,cv,c_inode) in recursive_calls {
+                path.push(filename);
+                debug!(target:"output_repository","> {:?}",path);
+                try!(output(repo,working_copy,visited,path,&cv,&c_inode,moves,curs_b,curs_c));
+                debug!(target:"output_repository","< {:?}",path);
+                path.pop();
             }
             Ok(())
         }
-        let mut paths=BTreeMap::new();
-        let mut nfiles=0;
-        {
-            let mut cache=HashSet::new();
-            let mut buf=PathBuf::from(working_copy);
-            try!(retrieve_paths(self,working_copy,&ROOT_KEY,&mut buf,ROOT_INODE,&mut paths,&mut cache,&mut nfiles));
-        }
-        debug!(target:"output_repository","collection done");
-        //println!("dropping tree");
-        {
-            try!(self.mdb_txn.drop(self.dbi_tree,false));
-            try!(self.mdb_txn.drop(self.dbi_revtree,false));
-        };
-        let mut updates=Vec::with_capacity(nfiles);
-        let mut new_paths:HashMap<&Path,PathBuf>=HashMap::new();
-        // First pass: create and move everything needed.
-        for (k,a) in paths.iter() {
-            let alen=a.len();
-            debug!(target:"output_repository","output: k={:?}, alen={}",k,alen);
-            let mut i=0;
-            for x in a.iter() {
-                let (_,ref parent_inode,ref inode,ref oldpath,ref perms) = *x;
-                let mut filename=k.file_name().unwrap().to_os_string();
-                if alen>1 { filename.push(format!("~{}",i)) }
-                let mut kk=k.clone();
-                debug!(target:"output_repository","output: {:?}",filename);
-                kk.set_file_name(&filename);
-                match *oldpath {
-                    Some(ref oldpath) if i==0 => {
-                        debug!(target:"output_repository","oldpath: {:?}, newpath: {:?}",oldpath,kk);
-                        {
-                            let oldpath_=oldpath.as_path();
-                            debug!(target:"output_repository","oldpath.parent(): {:?} {:?}",oldpath.parent(),new_paths.get(oldpath.parent().unwrap()));
-                            let oldpath_=match new_paths.get(oldpath.parent().unwrap()) {
-                                None=>PathBuf::from(oldpath_),
-                                Some(dirname)=>{
-                                    let base:&std::ffi::OsStr=oldpath.file_name().unwrap();
-                                    dirname.as_path().join(base)
-                                }
-                            };
-                            debug!(target:"output_repository","oldpath_: {:?}",oldpath_);
-                            let _ = fs::rename(&oldpath_,&kk).map_err(Error::IoError);
-                        }
-                        new_paths.insert(oldpath,kk);
-                    },
-                    _ =>{
-                        if perms & DIRECTORY_FLAG != 0 {
-                            try!(std::fs::create_dir_all(&k).map_err(Error::IoError));
-                        }
-                    }
-                }
-                let mut par=parent_inode.to_vec();
-                par.extend(filename.to_str().unwrap().as_bytes());
-                updates.push((par,inode.to_vec()));
-                i+=1
-            }
-        }
-        debug!(target:"output_repository","now outputting files");
-        for (k,a) in paths.iter() {
-            let alen=a.len();
-            debug!(target:"output_repository","output: k={:?}, alen={}",k,alen);
-            let mut i=0;
-            for x in a.iter() {
-                let mut filename=k.file_name().unwrap().to_os_string();
-                if alen>1 { filename.push(format!("~{}",i)) }
-                let mut kk=k.clone();
-                kk.set_file_name(&filename);
-                let (ref node,_,_,_,ref perms) = *x;
-                // Then (if file) output file
-                if perms & DIRECTORY_FLAG == 0 { // this is a real file, not a directory
-                    let mut redundant_edges=vec!();
-                    {
-                        let time0=time::precise_time_s();
-                        let l=self.retrieve(&node).unwrap();
-                        let time1=time::precise_time_s();
-                        info!(target:"output_repository","unsafe_output_repository: retrieve took {}s", time1-time0);
-                        debug!(target:"output_repository","create file: {:?}",kk);
-                        if fs::metadata(k.parent().unwrap()).is_err() {
-                            println!("Output repository: there is probably a name conflict on directory {:?} and something else, this version of Pijul doesn't say (even though it would be easy).", kk.parent().unwrap());
-                            try!(std::fs::create_dir_all(kk.parent().unwrap()).map_err(Error::IoError));
-                        }
-                        let mut f=std::fs::File::create(&kk).unwrap();
-                        self.output_file(&mut f,l,&mut redundant_edges);
-                        let time2=time::precise_time_s();
-                        info!(target:"output_repository","unsafe_output_repository: output_file took {}s", time2-time1);
-                    }
-                    self.remove_redundant_edges(&mut redundant_edges);
-                }
-                i+=1
-            }
-        }
-        debug!(target:"output_repository","unsafe_output done");
-        Ok(updates)
+        let mut visited=HashMap::new();
+        let mut p=PathBuf::from(working_copy);
+        let mut curs_b= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()};
+        let mut curs_c= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()};
+
+        let mut moves=Vec::new();
+        try!(output(self,working_copy,&mut visited,&mut p,ROOT_KEY,ROOT_INODE,&mut moves,curs_b,curs_c,));
+
+        unsafe { lmdb::mdb_cursor_close(curs_c) }
+        unsafe { lmdb::mdb_cursor_close(curs_b) }
+        Ok(moves)
     }
+
+
 
     pub fn retrieve_and_output<L:LineBuffer<'a>>(&'a self,key:&'a [u8],l:&mut L) {
         let mut redundant_edges=vec!();
@@ -2505,16 +2483,31 @@ impl <'a> Repository<'a> {
     }
 
     /// This is relatively suboptimal right now: in the future, we should carefully delete outdated parts of the tree database in unsafe_output_repository, and then reinsert them here.
-    fn update_tree(&mut self,updates:Vec<(Vec<u8>,Vec<u8>)>)->Result<(),Error>{
-        try!(self.mdb_txn.drop(self.dbi_tree,false));
-        try!(self.mdb_txn.drop(self.dbi_revtree,false));
-        for (par,inode) in updates {
-            debug!(target:"output_repository","update_tree:{},{},{}",
-                   to_hex(&par[0..INODE_SIZE]),
-                   to_hex(&inode),
-                   std::str::from_utf8(&par[INODE_SIZE..]).unwrap());
-            try!(self.mdb_txn.put(self.dbi_tree,&par,&inode,0));
-            try!(self.mdb_txn.put(self.dbi_revtree,&inode,&par,0));
+    fn update_tree(&mut self,updates:&[Tree])->Result<(),Error>{
+        for update in &updates[..] {
+            match update {
+                &Tree::Move((ref inode_v,ref c_inode))=>{
+                    debug!(target:"output_repository","updating move {}{} {}{}",
+                           to_hex(&inode_v[0..INODE_SIZE]),std::str::from_utf8(&inode_v[INODE_SIZE..]).unwrap(),
+                           to_hex(&c_inode[0..INODE_SIZE]),std::str::from_utf8(&c_inode[INODE_SIZE..]).unwrap());
+
+                    let current_parent_inode = self.mdb_txn.get(self.dbi_revtree,&c_inode).unwrap().unwrap().to_vec();
+                    debug!(target:"output_repository","current parent {}{}",
+                           to_hex(&current_parent_inode[0..INODE_SIZE]),
+                           std::str::from_utf8(&current_parent_inode[INODE_SIZE..]).unwrap());
+                    try!(self.mdb_txn.del(self.dbi_tree,&current_parent_inode,None));
+                    try!(self.mdb_txn.del(self.dbi_revtree,&c_inode,None));
+                    try!(self.mdb_txn.put(self.dbi_tree,&inode_v,&c_inode,0));
+                    try!(self.mdb_txn.put(self.dbi_revtree,&c_inode,&inode_v,0));
+                }
+                &Tree::Addition((ref inode_v,ref c_inode))=>{
+                    try!(self.mdb_txn.put(self.dbi_tree,&inode_v,&c_inode,0));
+                    try!(self.mdb_txn.put(self.dbi_revtree,&c_inode,&inode_v,0));
+                }
+                &Tree::Deletion(_)=>{
+
+                }
+            }
         }
         Ok(())
     }
@@ -2586,7 +2579,7 @@ impl <'a> Repository<'a> {
             let updates=try!(self.unsafe_output_repository(working_copy));
             lmdb::mdb_txn_abort(txn);
             self.mdb_txn.txn=parent_txn;
-            try!(self.update_tree(updates));
+            try!(self.update_tree(&updates));
             debug!(target:"output_repository","end output repository");
             Ok(())
         }
@@ -2627,21 +2620,17 @@ impl <'a> Repository<'a> {
         w.write(b"}\n").unwrap();
     }
 }
-/*
-fn dump_table(txn:*mut MdbTxn,dbi:MdbDbi){
+
+fn dump_table(txn:&lmdb::Txn,dbi:lmdb::Dbi){
     println!("dumping table");
     unsafe {
-        let mut k:MDB_val=std::mem::zeroed();
-        let mut v:MDB_val=std::mem::zeroed();
-        let c=Cursor::new(txn,dbi).unwrap();
-        let mut e=mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_FIRST as c_uint);
-        while e==0 {
-            let kk=std::slice::from_raw_parts(k.mv_data as *const u8, k.mv_size as usize);
-            let vv=std::slice::from_raw_parts(v.mv_data as *const u8, v.mv_size as usize);
-            println!("key:{:?}, value={:?}",to_hex(kk),to_hex(vv));
-            e=mdb_cursor_get(c.cursor,&mut k,&mut v,Op::MDB_NEXT as c_uint)
+        let cursor= &mut *txn.unsafe_cursor(dbi).unwrap();
+        let mut op=lmdb::Op::MDB_FIRST;
+        while let Ok((k,v))= lmdb::cursor_get(cursor,&b""[..],None,op ) {
+            println!("key:{:?}, value={:?}",to_hex(k),to_hex(v));
+            op=lmdb::Op::MDB_NEXT_DUP;
         }
+        lmdb::mdb_cursor_close(cursor);
     }
     println!("/dumping table");
 }
-*/
