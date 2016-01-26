@@ -33,7 +33,6 @@ use std::thread;
 use std::str;
 
 use std::collections::HashMap;
-use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
 use std::path::{PathBuf,Path};
 
@@ -96,9 +95,9 @@ impl <'a>Drop for Repository<'a> {
 
 // Used between functions of unsafe_output_repository (Rust does not allow enum inside the class)
 enum Tree {
-    Move((Vec<u8>,Vec<u8>)),
-    Addition((Vec<u8>,Vec<u8>)),
-    Deletion(())
+    Move { tree_key:Vec<u8>,tree_value:Vec<u8> },
+    Addition { tree_key:Vec<u8>,tree_value:Vec<u8> },
+    NameConflict { inode:Vec<u8> }
 }
 
 const INODE_SIZE:usize=20;
@@ -255,7 +254,7 @@ impl <'a> Repository<'a> {
 
 
 
-    fn create_new_inode(&mut self,buf:&mut [u8]){
+    fn create_new_inode(&self,buf:&mut [u8]){
         let curs_revtree=self.mdb_txn.cursor(self.dbi_revtree).unwrap();
         for i in 0..INODE_SIZE { buf[i]=rand::random() }
         while let Ok((_,x))=curs_revtree.get(&buf,None,lmdb::Op::MDB_SET_RANGE) {
@@ -1243,6 +1242,7 @@ impl <'a> Repository<'a> {
 
         if parent_inode.is_some() { realpath.push(str::from_utf8(&basename).unwrap()) }
         debug!(target:"record_all","realpath:{:?}",realpath);
+        debug!(target:"record_all","inode:{:?}",to_hex(current_inode));
 
         let mut l2=[0;LINE_SIZE];
         let current_node=
@@ -1415,6 +1415,12 @@ impl <'a> Repository<'a> {
                                 name.push(((int_attr >> 8) & 0xff) as u8);
                                 name.push((int_attr & 0xff) as u8);
                                 name.extend(basename);
+                                {
+                                    let mut l2_=Vec::with_capacity(LINE_SIZE+2);
+                                    l2_.extend(&name[0..2]);
+                                    l2_.extend(&l2);
+                                    updatables.insert(l2_,current_inode.to_vec());
+                                }
                                 actions.push(
                                     Change::NewNodes { up_context: vec!(
                                         if parent_node.unwrap().len()>LINE_SIZE { self.external_key(parent_node.unwrap()) }
@@ -1426,7 +1432,6 @@ impl <'a> Repository<'a> {
                                                        flag:FOLDER_EDGE }
                                     );
                                 *line_num += 2;
-                                updatables.insert(l2.to_vec(),current_inode.to_vec());
                                 // Reading the file
                                 if !attr.is_dir() {
                                     nodes.clear();
@@ -1500,7 +1505,7 @@ impl <'a> Repository<'a> {
         Ok(())
     }
 
-    /// Records,i.e. produce a patch and a HashMap mapping line numbers to inodes.
+    /// Records,i.e. produce a patch and a HashMap mapping line numbers to "permissions(2 bytes)+inodes".
     pub fn record(&mut self,working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<LocalKey,Inode>),Error>{
         let mut actions:Vec<Change>=Vec::new();
         let mut line_num=1;
@@ -2108,99 +2113,6 @@ impl <'a> Repository<'a> {
     }
 
 
-
-
-    pub fn sync_file_additions(&mut self, changes:&[Change], updates:&HashMap<LocalKey,Inode>, internal_patch_id:&[u8]){
-        let mut node=[0;3+KEY_SIZE];
-        let mut node_=[0;3+KEY_SIZE];
-        let mut inode=[0;INODE_SIZE];
-        let mut cursor= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
-        for change in changes {
-            match *change {
-                Change::NewNodes { ref line_num,ref flag,ref nodes,.. } => {
-                    if flag&FOLDER_EDGE != 0 {
-                        debug!(target:"sync_file_additions","nodes.len()={}",nodes.len());
-                        unsafe { let _=copy_nonoverlapping(internal_patch_id.as_ptr(), node.as_mut_ptr().offset(3), HASH_SIZE); }
-                        let mut l0=*line_num + 1;
-                        for i in 0..LINE_SIZE { node[3+HASH_SIZE+i]=(l0&0xff) as u8; l0 = l0>>8 }
-                        match updates.get(&node[(3+HASH_SIZE)..]) {
-                            None => {
-                                // This file comes from a remote patch
-                                self.create_new_inode(&mut inode);
-                                debug!(target:"sync_file_additions","create {}",to_hex(&inode[..]));
-                            },
-                            Some(ref up_inode)=> {
-                                // This file comes from a local patch
-                                debug!(target:"sync_file_additions","needs update {}",to_hex(&up_inode[..]));
-                                unsafe {
-                                    copy_nonoverlapping(up_inode.as_ptr(),inode.as_mut_ptr(),INODE_SIZE);
-                                }
-                            }
-                        };
-                        //println!("adding inode: {:?} for node {:?}",inode,node);
-                        node[0]=0;
-                        node[1]=(nodes[0][0] & 0xff) as u8;
-                        node[2]=(nodes[0][1] & 0xff) as u8;
-                        self.mdb_txn.put(self.dbi_inodes,&inode,&node,0).unwrap();
-                        self.mdb_txn.put(self.dbi_revinodes,&node[3..],&inode,0).unwrap();
-                    }
-                },
-                Change::Edges{ ref flag, ref edges} => {
-                    if flag&FOLDER_EDGE != 0 {
-                        for e in edges {
-                            {
-                                let no= if flag&PARENT_EDGE==0 { &e.to } else { &e.from };
-                                let to= self.internal_hash(&no[0..(no.len()-LINE_SIZE)]).unwrap();
-                                debug!(target:"sync","to={}",to.to_hex());
-                                unsafe {
-                                    copy_nonoverlapping(to.contents.as_ptr(),node.as_mut_ptr().offset(3),HASH_SIZE);
-                                    copy_nonoverlapping(no.as_ptr().offset((no.len()-LINE_SIZE) as isize),
-                                                        node.as_mut_ptr().offset((3+HASH_SIZE) as isize),
-                                                        LINE_SIZE);
-                                }
-                            }
-                            let mut unique_child= true;
-                            for child in CursIter::new(cursor,&node[3..],FOLDER_EDGE,true,false) {
-                                // Invariant: there "should be" only one child here.
-                                debug_assert!(unique_child);
-                                unique_child=false;
-                                //
-                                let needs_update= {
-                                    match self.mdb_txn.get(self.dbi_revinodes,&child[1..(1+KEY_SIZE)]).unwrap() {
-                                        None=>false,
-                                        Some(inode_)=> {
-                                            let old_node = self.mdb_txn.get(self.dbi_inodes,&inode_).unwrap().unwrap();
-                                            unsafe {
-                                                copy_nonoverlapping(inode_.as_ptr(),
-                                                                    inode.as_mut_ptr(),
-                                                                    INODE_SIZE);
-                                                copy_nonoverlapping(old_node.as_ptr(),
-                                                                    node_.as_mut_ptr(),
-                                                                    3+KEY_SIZE);
-                                                node_[0]=0;
-                                            }
-                                            true
-                                        }
-                                    }
-                                };
-                                if needs_update {
-                                    self.mdb_txn.put(self.dbi_inodes,&inode,&node_,0).unwrap();
-                                    self.mdb_txn.put(self.dbi_revinodes,&node_[3..],&inode,0).unwrap();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        unsafe {
-            lmdb::mdb_cursor_close(cursor);
-        }
-    }
-
-
-
-
     /// Assumes all patches have been downloaded. The third argument
     /// `remote_patches` needs to contain at least all the patches we want
     /// to apply, and the fourth one `local_patches` at least all the patches the other
@@ -2230,7 +2142,7 @@ impl <'a> Repository<'a> {
                 //println!("pulling and applying patch {}",to_hex(patch_hash));
                 try!(repo.apply(&patch, &internal,only_local));
                 *patches_were_applied=true;
-                repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);
+                //repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);
                 repo.register_hash(&internal[..],patch_hash);
                 Ok(())
             } else {
@@ -2363,8 +2275,10 @@ impl <'a> Repository<'a> {
         }
     }
 
-    fn unsafe_output_repository(&mut self,working_copy:&Path)->Result<Vec<Tree>,Error> {
-        fn output<'a>(repo:&'a mut Repository,working_copy:&Path,
+    fn unsafe_output_repository(&mut self,working_copy:&Path,do_output:bool)->Result<(),Error> {
+        fn output<'a>(repo:&'a mut Repository,
+                      working_copy:&Path,
+                      do_output:bool,
                       visited:&mut HashMap<Vec<u8>,Vec<PathBuf>>,
                       path:&mut PathBuf,
                       key:&[u8],
@@ -2373,8 +2287,16 @@ impl <'a> Repository<'a> {
                       curs_b:*mut lmdb::MdbCursor,
                       curs_c:*mut lmdb::MdbCursor)->Result<(),Error>{
             debug!(target:"output_repository","visited {}",to_hex(key));
-            let first_move=moves.len();
+
+            moves.clear();
             let mut recursive_calls=Vec::new();
+            let mut new_inodes:HashMap<Vec<u8>,(usize,&[u8])>=HashMap::new();
+            // This function is globally a DFS, but has two phases,
+            // one for collecting actions (and moving files around on
+            // the filesystem), and the other one for updating and
+            // preparing the next level.
+            //
+            // This is because the database cannot be updated while being iterated over.
             for b in CursIter::new(curs_b,key,FOLDER_EDGE,true,true) {
                 //debug!(target:"output_repository","b={}",to_hex(b));
                 let cont_b=
@@ -2390,72 +2312,138 @@ impl <'a> Repository<'a> {
                     for c in CursIter::new(curs_c,&b[1..(1+KEY_SIZE)],FOLDER_EDGE,true,true) {
                         let cv=&c[1..(1+KEY_SIZE)];
                         debug!(target:"output_repository","cv={}",to_hex(cv));
-                        match try!(repo.mdb_txn.get(repo.dbi_revinodes,cv)) {
-                            Some(c_inode) => {
-                                path.push(filename);
-                                match visited.entry(cv.to_vec()){
-                                    Entry::Occupied(mut e)=>{
-                                        // Help! A name conflict!
-                                        e.get_mut().push(path.clone());
-                                        println!("Name conflict between {:?}",e.get());
-                                        unimplemented!()
+                        let c_inode=
+                            match try!(repo.mdb_txn.get(repo.dbi_revinodes,cv)) {
+                                Some(c_inode) => c_inode.to_vec(),
+                                None => {
+                                    let mut v=vec![0;INODE_SIZE];
+                                    loop {
+                                        repo.create_new_inode(&mut v);
+                                        if new_inodes.get(&v).is_none() { break }
                                     }
-                                    Entry::Vacant(e)=>{
-                                        e.insert(vec!(path.clone()));
-                                        debug!(target:"output_repository","inode={}",to_hex(c_inode));
-                                        {
-                                            let mut buf=PathBuf::from(working_copy);
-                                            let mut inode_v=inode.to_vec();
-                                            inode_v.extend(filename_bytes);
-                                            if repo.filename_of_inode(c_inode,&mut buf) {
-                                                debug!(target:"output_repository","former_path={:?}",buf);
-                                                if buf.as_os_str() != path.as_os_str() {
-                                                    // move on filesystem
-                                                    debug!(target:"output_repository","moving {:?} to {:?}",buf,path);
-                                                    fs::rename(&buf,&path).unwrap();
-                                                    debug!(target:"output_repository","done");
-                                                    moves.push(Tree::Move((inode_v,c_inode.to_vec())))
+                                    new_inodes.insert(v.clone(),(perms,cv));
+                                    v
+                                }
+                            };
+                        path.push(filename);
+                        let mut inode_v=inode.to_vec();
+                        inode_v.extend(filename_bytes);
+                        match visited.entry(cv.to_vec()){
+                            Entry::Occupied(mut e)=>{
+                                // Help! A name conflict!
+                                e.get_mut().push(path.clone());
+                                println!("Name conflict between {:?}",e.get());
+                                inode_v.truncate(INODE_SIZE);
+                                if inode_v.iter().any(|&x| { x!=0 }) {
+                                    moves.push(Tree::NameConflict {
+                                        inode:inode_v,
+                                    })
+                                }
+                            }
+                            Entry::Vacant(e)=>{
+                                e.insert(vec!(path.clone()));
+                                debug!(target:"output_repository","inode={}",to_hex(&c_inode));
+                                {
+                                    let mut buf=PathBuf::from(working_copy);
+                                    if repo.filename_of_inode(&c_inode,&mut buf) {
+                                        debug!(target:"output_repository","former_path={:?}",buf);
+                                        if buf.as_os_str() != path.as_os_str() {
+                                            // move on filesystem
+                                            debug!(target:"output_repository","moving {:?} to {:?}",buf,path);
+                                            if fs::rename(&buf,&path).is_err() {
+                                                let mut filename=path.file_name().unwrap().to_str().unwrap().to_string();
+                                                let l=filename.len();
+                                                let mut i=0;
+                                                loop {
+                                                    filename.truncate(l);
+                                                    filename = filename + &format!("~{}",i);
+                                                    path.set_file_name(&filename);
+                                                    if fs::rename(&buf,&path).is_ok() { break }
+                                                    i+=1
                                                 }
-                                            } else {
-                                                debug!(target:"output_repository","no former_path");
-                                                moves.push(Tree::Addition((inode_v,c_inode.to_vec())));
-                                                if perms&DIRECTORY_FLAG==0 {
-                                                    std::fs::File::create(&path).unwrap();
-                                                } else {
-                                                    std::fs::create_dir_all(&path).unwrap();
-                                                }
-                                            };
-                                        }
-                                        if perms&DIRECTORY_FLAG==0 {
-                                            let mut redundant_edges=vec!();
-                                            let l=repo.retrieve(&key).unwrap();
-                                            debug!(target:"output_repository","creating file {:?}",path);
-                                            let mut f=std::fs::File::create(&path).unwrap();
+                                            }
                                             debug!(target:"output_repository","done");
-                                            repo.output_file(&mut f,l,&mut redundant_edges);
-                                        } else {
-                                            recursive_calls.push((filename.to_string(),cv.to_vec(),c_inode.to_vec()));
+                                            moves.push(Tree::Move { tree_key:inode_v,tree_value:c_inode.to_vec() })
                                         }
+                                    } else {
+                                        debug!(target:"output_repository","no former_path");
+                                        moves.push(Tree::Addition { tree_key:inode_v,tree_value:c_inode.to_vec() });
+                                        if perms&DIRECTORY_FLAG==0 {
+                                            std::fs::File::create(&path).unwrap();
+                                        } else {
+                                            std::fs::create_dir_all(&path).unwrap();
+                                        }
+                                    };
+                                }
+                                if perms&DIRECTORY_FLAG==0 {
+                                    if do_output {
+                                        let mut redundant_edges=vec!();
+                                        let l=repo.retrieve(&cv).unwrap();
+                                        debug!(target:"output_repository","creating file {:?}",path);
+                                        let mut f=std::fs::File::create(&path).unwrap();
+                                        debug!(target:"output_repository","done");
+                                        repo.output_file(&mut f,l,&mut redundant_edges);
                                     }
-                                };
-                                path.pop();
-                            },
-                            None =>{
-                                panic!("inodes not synchronized")
+                                } else {
+                                    recursive_calls.push((filename.to_string(),cv.to_vec(),c_inode.to_vec()));
+                                }
                             }
                         }
+                        path.pop();
                     }
                 }
                 debug!(target:"output_repository","/b");
             }
+            // Update inodes: add files that were not on the filesystem before this output.
+            let mut key=[0;3+KEY_SIZE];
+            for (inode,&(perm,k)) in new_inodes.iter() {
+                unsafe {
+                    copy_nonoverlapping(k.as_ptr(),key.as_mut_ptr().offset(3),KEY_SIZE)
+                }
+                key[0]=0;
+                key[1]=((perm>>8) & 0xff) as u8;
+                key[2]=(perm & 0xff) as u8;
+                debug!(target:"output_repository","updating dbi_(rev)inodes: {} {}",to_hex(&inode),to_hex(k));
+                try!(repo.mdb_txn.put(repo.dbi_inodes,&inode,&key,0));
+                try!(repo.mdb_txn.put(repo.dbi_revinodes,&key[3..],&inode,0));
+            }
+            // Update the tree: add the last file moves.
+            for update in &moves[..] {
+                match update {
+                    &Tree::Move { ref tree_key,ref tree_value } => { // tree_key = inode_v
+                        debug!(target:"output_repository","updating move {}{} {}{}",
+                               to_hex(&tree_key[0..INODE_SIZE]),std::str::from_utf8(&tree_key[INODE_SIZE..]).unwrap(),
+                               to_hex(&tree_value[0..INODE_SIZE]),std::str::from_utf8(&tree_value[INODE_SIZE..]).unwrap());
 
-            // Update the tree (needed for next level)
-            try!(repo.update_tree(&moves[first_move..]));
+                        let current_parent_inode = repo.mdb_txn.get(repo.dbi_revtree,&tree_value).unwrap().unwrap().to_vec();
+                        debug!(target:"output_repository","current parent {}{}",
+                               to_hex(&current_parent_inode[0..INODE_SIZE]),
+                               std::str::from_utf8(&current_parent_inode[INODE_SIZE..]).unwrap());
+                        try!(repo.mdb_txn.del(repo.dbi_tree,&current_parent_inode,Some(&tree_value)));
+                        try!(repo.mdb_txn.del(repo.dbi_revtree,&tree_value,Some(&current_parent_inode)));
+                        try!(repo.mdb_txn.put(repo.dbi_tree,&tree_key,&tree_value,0));
+                        try!(repo.mdb_txn.put(repo.dbi_revtree,&tree_value,&tree_key,0));
+                    }
+                    &Tree::Addition { ref tree_key,ref tree_value } =>{
+                        try!(repo.mdb_txn.put(repo.dbi_tree,&tree_key,&tree_value,0));
+                        try!(repo.mdb_txn.put(repo.dbi_revtree,&tree_value,&tree_key,0));
+                    }
+                    &Tree::NameConflict { ref inode } => {
+                        // Mark the file as moved.
+                        let mut current_key={
+                            repo.mdb_txn.get(repo.dbi_inodes,&inode).unwrap().unwrap().to_vec()
+                        };
+                        current_key[0]=1;
+                        try!(repo.mdb_txn.put(repo.dbi_inodes,&current_key,&inode,0));
+                    }
+                }
+            }
+
             // Now do all the recursive calls
             for (filename,cv,c_inode) in recursive_calls {
                 path.push(filename);
                 debug!(target:"output_repository","> {:?}",path);
-                try!(output(repo,working_copy,visited,path,&cv,&c_inode,moves,curs_b,curs_c));
+                try!(output(repo,working_copy,do_output,visited,path,&cv,&c_inode,moves,curs_b,curs_c));
                 debug!(target:"output_repository","< {:?}",path);
                 path.pop();
             }
@@ -2463,15 +2451,66 @@ impl <'a> Repository<'a> {
         }
         let mut visited=HashMap::new();
         let mut p=PathBuf::from(working_copy);
-        let mut curs_b= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()};
-        let mut curs_c= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()};
+        let mut curs_b= unsafe { &mut *try!(self.mdb_txn.unsafe_cursor(self.dbi_nodes)) };
+        let mut curs_c= unsafe { &mut *try!(self.mdb_txn.unsafe_cursor(self.dbi_nodes)) };
 
         let mut moves=Vec::new();
-        try!(output(self,working_copy,&mut visited,&mut p,ROOT_KEY,ROOT_INODE,&mut moves,curs_b,curs_c,));
-
+        try!(output(self,working_copy,do_output,&mut visited,&mut p,ROOT_KEY,ROOT_INODE,&mut moves,curs_b,curs_c,));
         unsafe { lmdb::mdb_cursor_close(curs_c) }
+
+        // Now, garbage collect dead inodes.
+        let mut dead=Vec::new();
+        {
+            let curs = try!(self.mdb_txn.cursor(self.dbi_inodes));
+            let mut op=lmdb::Op::MDB_FIRST;
+            while let Ok((u,v))=curs.get(&[],None,op) {
+                // test whether v is still alive.
+                if ! has_edge(curs_b,&v[3..],PARENT_EDGE|FOLDER_EDGE,true,true) {
+                    // v is dead.
+                    debug!(target:"output_repository","dead:{:?} {:?}",to_hex(u),to_hex(v));
+                    dead.push((u.to_vec(),(&v[3..]).to_vec()))
+                }
+                op=lmdb::Op::MDB_NEXT;
+            }
+        }
         unsafe { lmdb::mdb_cursor_close(curs_b) }
-        Ok(moves)
+
+        // Now, "kill the deads"
+        {
+            let mut curs_tree= unsafe { &mut *try!(self.mdb_txn.unsafe_cursor(self.dbi_tree)) };
+            let mut curs_revtree= unsafe { &mut *try!(self.mdb_txn.unsafe_cursor(self.dbi_revtree)) };
+
+            let mut uu=Vec::new();
+            let mut vv=Vec::new();
+            for (ref inode,ref key) in dead {
+                try!(self.mdb_txn.del(self.dbi_inodes,inode,None));
+                try!(self.mdb_txn.del(self.dbi_revinodes,key,None));
+                // iterate through inode's relatives.
+                while let Ok((_,v))=unsafe {lmdb::cursor_get(curs_revtree,inode,None,lmdb::Op::MDB_SET)} {
+                    vv.clear();
+                    vv.extend(v);
+                    unsafe {
+                        try!(lmdb::cursor_del(curs_revtree,0));
+                    }
+                    try!(self.mdb_txn.del(self.dbi_tree,&vv,Some(inode)));
+                }
+                while let Ok((u,v)) = unsafe {lmdb::cursor_get(curs_tree,inode,None,lmdb::Op::MDB_SET_RANGE)} {
+                    if unsafe { memcmp(u.as_ptr() as *const c_void,inode.as_ptr() as *const c_void,INODE_SIZE as size_t)} != 0 {
+                        break
+                    } else {
+                        uu.clear();
+                        uu.extend(u);
+                        vv.clear();
+                        vv.extend(v);
+                        unsafe {
+                            try!(lmdb::cursor_del(curs_tree,0));
+                        }
+                        try!(self.mdb_txn.del(self.dbi_revtree,&vv,Some(&uu)));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
 
@@ -2482,39 +2521,9 @@ impl <'a> Repository<'a> {
         self.output_file(l,graph,&mut redundant_edges);
     }
 
-    /// This is relatively suboptimal right now: in the future, we should carefully delete outdated parts of the tree database in unsafe_output_repository, and then reinsert them here.
-    fn update_tree(&mut self,updates:&[Tree])->Result<(),Error>{
-        for update in &updates[..] {
-            match update {
-                &Tree::Move((ref inode_v,ref c_inode))=>{
-                    debug!(target:"output_repository","updating move {}{} {}{}",
-                           to_hex(&inode_v[0..INODE_SIZE]),std::str::from_utf8(&inode_v[INODE_SIZE..]).unwrap(),
-                           to_hex(&c_inode[0..INODE_SIZE]),std::str::from_utf8(&c_inode[INODE_SIZE..]).unwrap());
-
-                    let current_parent_inode = self.mdb_txn.get(self.dbi_revtree,&c_inode).unwrap().unwrap().to_vec();
-                    debug!(target:"output_repository","current parent {}{}",
-                           to_hex(&current_parent_inode[0..INODE_SIZE]),
-                           std::str::from_utf8(&current_parent_inode[INODE_SIZE..]).unwrap());
-                    try!(self.mdb_txn.del(self.dbi_tree,&current_parent_inode,None));
-                    try!(self.mdb_txn.del(self.dbi_revtree,&c_inode,None));
-                    try!(self.mdb_txn.put(self.dbi_tree,&inode_v,&c_inode,0));
-                    try!(self.mdb_txn.put(self.dbi_revtree,&c_inode,&inode_v,0));
-                }
-                &Tree::Addition((ref inode_v,ref c_inode))=>{
-                    try!(self.mdb_txn.put(self.dbi_tree,&inode_v,&c_inode,0));
-                    try!(self.mdb_txn.put(self.dbi_revtree,&c_inode,&inode_v,0));
-                }
-                &Tree::Deletion(_)=>{
-
-                }
-            }
-        }
-        Ok(())
-    }
-
-
-    pub fn register_patch(&mut self, location: &Path, patch: Patch, inode_updates:&HashMap<LocalKey,Inode>)
-                          -> Result<(), Error>{
+    /// Apply a patch from a local record: register it, give it a hash, and then apply.
+    pub fn apply_local_patch(&mut self, location: &Path, patch: Patch, inode_updates:&HashMap<LocalKey,Inode>)
+                           -> Result<(), Error>{
         info!("registering a patch with {} changes", patch.changes.len());
         let patch = Arc::new(patch);
         let child_patch = patch.clone();
@@ -2534,7 +2543,26 @@ impl <'a> Repository<'a> {
         debug!(target:"pijul", "applying patch");
         try!(self.apply(&patch, &internal, &HashSet::new()));
         debug!(target:"pijul", "synchronizing tree");
-        self.sync_file_additions(&patch.changes[..], &inode_updates, &internal);
+        //unimplemented!(); // synchronize here, by iterating on inode_updates.
+        {
+            let mut key=[0;3+KEY_SIZE];
+            unsafe {copy_nonoverlapping(internal.as_ptr(),key.as_mut_ptr().offset(3),HASH_SIZE)}
+            for (local_key,inode) in inode_updates.iter() {
+                unsafe {
+                    copy_nonoverlapping(local_key.as_ptr().offset(2),
+                                        key.as_mut_ptr().offset(3+HASH_SIZE as isize),LINE_SIZE);
+                    copy_nonoverlapping(local_key.as_ptr(),
+                                        key.as_mut_ptr().offset(1),2);
+                }
+                // If this file addition was finally recorded (i.e. in dbi_nodes)
+                debug!(target:"record_all","apply_local_patch: {:?}",to_hex(&key[..]));
+                if try!(self.mdb_txn.get(self.dbi_nodes,&key[3..])).is_some() {
+                    debug!(target:"record_all","it's in here!: {:?} {:?}",to_hex(&key[..]),to_hex(&inode));
+                    self.mdb_txn.put(self.dbi_inodes,inode,&key[..],0).unwrap();
+                    self.mdb_txn.put(self.dbi_revinodes,&key[3..],inode,0).unwrap();
+                }
+            }
+        }
         if cfg!(debug_assertions){
             let mut buffer = BufWriter::new(File::create(location.join("debug")).unwrap());
             self.debug(&mut buffer);
@@ -2563,6 +2591,10 @@ impl <'a> Repository<'a> {
 
     pub fn output_repository(&mut self, working_copy:&Path, pending:&Patch) -> Result<(),Error>{
         debug!(target:"output_repository","begin output repository");
+        // First output the repository to change the trees/inodes tables (and their revs).
+        // Do not output the files (do_output = false).
+        try!(self.unsafe_output_repository(working_copy,false));
+        // Then, apply pending and output in an aborted transaction.
         unsafe {
             let mut internal=[0;HASH_SIZE];
             let parent_txn=self.mdb_txn.txn;
@@ -2576,10 +2608,10 @@ impl <'a> Repository<'a> {
             self.new_internal(&mut internal[..]);
             debug!(target:"output_repository","pending patch: {}",to_hex(&internal[..]));
             self.apply(pending,&internal[..],&HashSet::new()).unwrap();
-            let updates=try!(self.unsafe_output_repository(working_copy));
+            // Now output all files (do_output=true)
+            try!(self.unsafe_output_repository(working_copy,true));
             lmdb::mdb_txn_abort(txn);
             self.mdb_txn.txn=parent_txn;
-            try!(self.update_tree(&updates));
             debug!(target:"output_repository","end output repository");
             Ok(())
         }

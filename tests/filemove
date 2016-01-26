@@ -17,8 +17,8 @@ pijul clone alice bob
 
 cd /tmp/bob
 pijul mv blibli xyzw
-echo "blibli" > /tmp/bob/bbb
-pijul add bbb
+#echo "blibli" > /tmp/bob/bbb
+#pijul add bbb
 echo "--------------- Record in b"
 pijul record -a --author "x" -m ""
 echo "--------------- /record in b"
@@ -30,10 +30,11 @@ pijul record -a --author "x" -m ""
 echo "--------------- /record in a"
 echo "--------------- Final pull from a"
 pijul pull ../bob -a
+#find .
 
-cd /tmp/alice/blzaaaa/blublu
+cd /tmp/alice/*/blublu
 pijul mv blabla main.c
 pijul record -a -m "move" --author ""
 
-# dot -Tpdf -o /tmp/alice/a.pdf /tmp/alice/debug
-# dot -Tpdf -o /tmp/bob/b.pdf /tmp/bob/debug
+dot -Tpdf -o /tmp/alice/a.pdf /tmp/alice/debug
+dot -Tpdf -o /tmp/bob/b.pdf /tmp/bob/debug

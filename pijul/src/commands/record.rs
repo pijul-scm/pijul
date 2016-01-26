@@ -148,7 +148,7 @@ pub fn run(args : &Params) -> Result<Option<()>, Error> {
                 debug!("register_patch");
                 // save patch
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                let () = try!(repo.register_patch(r, patch, &syncs).map_err(Error::Repository));
+                let () = try!(repo.apply_local_patch(r, patch, &syncs).map_err(Error::Repository));
                 Ok(Some(()))
             }
         }
