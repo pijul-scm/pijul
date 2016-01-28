@@ -329,10 +329,15 @@ impl <'a>Remote<'a> {
                 match *user { None=>{}, Some(ref u)=>try!(session.set_username(u)) };
                 session.parse_config(None).unwrap();
                 try!(session.connect());
-                if session.userauth_publickey_auto(None).is_err() {
-                    try!(session.userauth_kbdint(None))
+                match try!(session.is_server_known()) {
+                    ssh::ServerKnown::Known=> {
+                        if session.userauth_publickey_auto(None).is_err() {
+                            try!(session.userauth_kbdint(None))
+                        }
+                        Ok(Session::Ssh { session:session, path:path })
+                    },
+                    other=>{Err(Error::SSHUnknownServer(other))}
                 }
-                Ok(Session::Ssh { session:session, path:path })
             }
         }
     }
