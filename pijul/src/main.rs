@@ -1,3 +1,21 @@
+/*
+  Copyright Florent Becker and Pierre-Etienne Meunier 2015.
+
+  This file is part of Pijul.
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU Affero General Public License for more details.
+
+  You should have received a copy of the GNU Affero General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
 #[macro_use]
 extern crate clap;
 #[macro_use]
@@ -36,9 +54,10 @@ macro_rules! pijul_subcommand_dispatch {
 fn main() {
     env_logger::init().unwrap();
     let time0=time::precise_time_s();
+    let version=crate_version!();
     let app = clap_app!(
         pijul =>
-            (version: "0.1.0")
+            (version: &version[..])
             (author: "Pierre-Étienne Meunier and Florent Becker")
             (about: "Version Control: performant, distributed, easy to use; pick any three")
             );
