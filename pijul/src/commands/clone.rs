@@ -50,12 +50,15 @@ pub fn invocation() -> StaticSubcommand {
 #[derive(Debug)]
 pub struct Params<'a> {
     pub from:Remote<'a>,
-    pub to:Remote<'a>,
+    pub to:Remote<'a>
 }
 
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
-    let from = parse_remote(args.value_of("from").unwrap(),args);
-    let to = parse_remote(args.value_of("to").unwrap_or("."),args);
+    // At least one must not use its "port" argument
+    let from = parse_remote(args.value_of("from").unwrap(),args.value_of("port").and_then(|x| { Some(x.parse().unwrap()) }),
+                            None);
+    let to = parse_remote(args.value_of("to").unwrap_or("."),args.value_of("port").and_then(|x| { Some(x.parse().unwrap()) }),
+                          None);
     Params { from:from, to:to }
 }
 

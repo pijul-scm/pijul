@@ -10,13 +10,9 @@ libc = "0.2"
 rustc-serialize="0.3"
 rand = "0.3"
 rust-crypto="0.2"
-bincode="0.4"
-
 time="0.1"
 log="0.3"
-serde="0.6"
+cbor="0.3"
 
 [build-dependencies]
 gcc="0.3"
-syntex="0.26.0"
-serde_codegen="0.6.9"

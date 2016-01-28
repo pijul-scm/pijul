@@ -21,8 +21,7 @@ use std::io;
 use std;
 use std::fmt;
 use std::path::{PathBuf};
-//extern crate serde_cbor;
-extern crate bincode;
+extern crate cbor;
 use fs_representation::{to_hex};
 
 #[derive(Debug)]
@@ -31,10 +30,10 @@ pub enum Error{
     AlreadyApplied,
     AlreadyAdded,
     FileNotInRepo(PathBuf),
-    //PatchDecoding(serde_cbor::error::Error),
-    //PatchEncoding(serde_cbor::error::Error)
-    PatchDecoding(bincode::serde::DeserializeError),
-    PatchEncoding(bincode::serde::SerializeError),
+    Cbor(cbor::CborError),
+    NothingToDecode(Option<PathBuf>),
+    //PatchDecoding(bincode::serde::DeserializeError),
+    //PatchEncoding(bincode::serde::SerializeError),
     InternalHashNotFound(Vec<u8>)
 }
 impl fmt::Display for Error {
@@ -43,8 +42,8 @@ impl fmt::Display for Error {
             Error::IoError(ref err) => write!(f, "IO error: {}", err),
             Error::AlreadyApplied => write!(f, "Patch already applied"),
             Error::AlreadyAdded => write!(f, "File already here"),
-            Error::PatchEncoding(ref err) => write!(f, "Patch encoding error {}",err),
-            Error::PatchDecoding(ref err) => write!(f, "Patch decoding error {}",err),
+            Error::Cbor(ref err) => write!(f, "Cbor error {}",err),
+            Error::NothingToDecode(ref path) => write!(f, "Nothing to decode {:?}",path),
             Error::FileNotInRepo(ref path) => write!(f, "File {} not tracked", path.display()),
             Error::InternalHashNotFound(ref hash) => write!(f, "Internal hash {} not found", to_hex(hash))
         }
@@ -57,8 +56,8 @@ impl std::error::Error for Error {
             Error::IoError(ref err) => err.description(),
             Error::AlreadyApplied => "Patch already applied",
             Error::AlreadyAdded => "File already here",
-            Error::PatchEncoding(ref err) => err.description(),
-            Error::PatchDecoding(ref err) => err.description(),
+            Error::Cbor(ref err) => err.description(),
+            Error::NothingToDecode(_) => "Nothing to decode",
             Error::FileNotInRepo(_) => "Operation on untracked file",
             Error::InternalHashNotFound(_) => "Internal hash not found"
         }
@@ -69,8 +68,8 @@ impl std::error::Error for Error {
             Error::IoError(ref err) => Some(err),
             Error::AlreadyApplied => None,
             Error::AlreadyAdded => None,
-            Error::PatchEncoding(ref err) => Some(err),
-            Error::PatchDecoding(ref err) => Some(err),
+            Error::Cbor(ref err) => Some(err),
+            Error::NothingToDecode(_) => None,
             Error::FileNotInRepo(_) => None,
             Error::InternalHashNotFound(_) => None
         }
@@ -80,6 +79,12 @@ impl std::error::Error for Error {
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Error {
         Error::IoError(err)
+    }
+}
+
+impl From<cbor::CborError> for Error {
+    fn from(err: cbor::CborError) -> Error {
+        Error::Cbor(err)
     }
 }
 

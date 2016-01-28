@@ -17,16 +17,14 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 extern crate clap;
-use clap::{ArgMatches};
 
 extern crate libpijul;
 use self::libpijul::{Repository,DEFAULT_BRANCH};
-use self::libpijul::patch::{Patch,read_changes_from_file,read_changes,HASH_SIZE};
+use self::libpijul::patch::{read_changes_from_file,read_changes};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, branch_changes_base_path,branch_changes_file,to_hex,PIJUL_DIR_NAME,PATCHES_DIR_NAME};
 use std::path::{Path,PathBuf};
-use std::io::{BufWriter,BufReader};
+use std::io::{BufWriter};
 use std::collections::hash_set::{HashSet};
-use std::collections::hash_map::{HashMap};
 use std::fs::{File,hard_link,copy,metadata};
 
 use super::error::Error;
@@ -49,9 +47,9 @@ extern crate hyper;
 
 #[derive(Debug)]
 pub enum Remote<'a> {
-    Ssh { user:Option<&'a str>, host:&'a str, port:Option<u16>, path:&'a Path },
+    Ssh { user:Option<&'a str>, host:&'a str, port:Option<u64>, path:&'a Path },
     Uri { uri:&'a str },
-    Local { path:&'a Path }
+    Local { path:PathBuf }
 }
 
 pub enum Session<'a> {
@@ -109,8 +107,8 @@ impl<'a> Session<'a> {
             Session::Ssh{ref path,ref mut session,..}=>{
                 let patches_path=branch_changes_file(path,branch);
                 let remote_file = try!(ssh_recv_file(session,&patches_path));
-                let changes=match remote_file {
-                    Some(r)=>try!(read_changes(r)),
+                let changes= match remote_file {
+                    Some(r)=>try!(read_changes(r,None)),
                     None=>HashSet::new()
                 };
                 Ok(changes)
@@ -125,7 +123,7 @@ impl<'a> Session<'a> {
                 let mut res = try!(client.get(&uri)
                                    .header(hyper::header::Connection::close())
                                    .send());
-                let changes=read_changes(&mut res).unwrap_or(HashSet::new());
+                let changes=read_changes(&mut res,None).unwrap_or(HashSet::new());
                 debug!("http: {:?}",changes);
                 Ok(changes)
             },
@@ -316,10 +314,10 @@ impl<'a> Session<'a> {
 
 
 impl <'a>Remote<'a> {
-    pub fn session(&self)->Result<Session<'a>,Error> {
+    pub fn session(&'a self)->Result<Session<'a>,Error> {
         //fn from_remote(remote:&Remote<'a>) -> Result<Session<'a>,Error> {
         match *self {
-            Remote::Local{path} => Ok(Session::Local{path:path}),
+            Remote::Local{ref path} => Ok(Session::Local{path:path.as_path()}),
             Remote::Uri{uri} => Ok(Session::Uri {
                 uri:uri,
                 client:hyper::Client::new()
@@ -340,16 +338,23 @@ impl <'a>Remote<'a> {
     }
 }
 
-pub fn parse_remote<'a>(remote_id:&'a str,args:&'a ArgMatches)->Remote<'a> {
+pub fn parse_remote<'a>(remote_id:&'a str,port:Option<u64>,base_path:Option<&'a Path>)->Remote<'a> {
     let ssh=Regex::new(r"^([^:]*):(.*)$").unwrap();
     let uri=Regex::new(r"^([:alpha:]*)://(.*)$").unwrap();
     if uri.is_match(remote_id) {
         let cap=uri.captures(remote_id).unwrap();
-        if cap.at(1).unwrap()=="file" { Remote::Local { path:Path::new(cap.at(2).unwrap()) } }
+        if cap.at(1).unwrap()=="file" {
+            if let Some(a)=base_path {
+                let path=a.join(cap.at(2).unwrap());
+                Remote::Local { path:path }
+            } else {
+                let path=Path::new(cap.at(2).unwrap()).to_path_buf();
+                Remote::Local { path:path }
+            }
+        }
         else { Remote::Uri { uri:remote_id } }
     } else if ssh.is_match(remote_id) {
         let cap=ssh.captures(remote_id).unwrap();
-        let port=match args.value_of("port") { Some(x)=>Some(x.parse().unwrap()), None=>None };
         let user_host=cap.at(1).unwrap();
 
         let (user,host)={
@@ -363,7 +368,13 @@ pub fn parse_remote<'a>(remote_id:&'a str,args:&'a ArgMatches)->Remote<'a> {
         };
         Remote::Ssh { user:user,host:host, port:port, path:Path::new(cap.at(2).unwrap()) }
     } else {
-        Remote::Local { path:Path::new(remote_id) }
+        if let Some(a)=base_path {
+            let path=a.join(remote_id);
+            Remote::Local { path:path }
+        } else {
+            let path=Path::new(remote_id).to_path_buf();
+            Remote::Local { path:path }
+        }
     }
 }
 

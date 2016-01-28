@@ -18,7 +18,6 @@
 */
 extern crate libc;
 extern crate time;
-extern crate serde;
 #[macro_use]
 extern crate log;
 
@@ -47,6 +46,12 @@ use self::contents::{LINE_ONSTACK, LINE_VISITED, DIRECTORY_FLAG};
 
 pub mod fs_representation;
 use self::fs_representation::*;
+
+
+//extern crate rustc_serialize;
+//use self::rustc_serialize::{Encodable,Decodable};
+extern crate rustc_serialize;
+
 pub mod patch;
 use self::patch::*;
 
@@ -2132,8 +2137,8 @@ impl <'a> Repository<'a> {
             if !try!(repo.has_patch(branch,patch_hash)) {
                 let local_patch=local_patches.join(to_hex(patch_hash)).with_extension("cbor");
                 debug!("local_patch={:?}",local_patch);
-                let mut buffer = BufReader::new(try!(File::open(local_patch)));
-                let patch=try!(Patch::from_reader(&mut buffer));
+                let mut buffer = BufReader::new(try!(File::open(&local_patch)));
+                let patch=try!(Patch::from_reader(&mut buffer,Some(&local_patch)));
                 for dep in patch.dependencies.iter() {
                     try!(apply_patches(repo,branch,local_patches,&dep,patches_were_applied, only_local))
                 }

@@ -22,11 +22,9 @@ use clap::{SubCommand, ArgMatches, Arg};
 extern crate libpijul;
 use commands::StaticSubcommand;
 use self::libpijul::{Repository};
-use self::libpijul::patch::{Patch,HASH_SIZE};
-use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, find_repo_root, branch_changes_file,to_hex};
-use std::sync::Arc;
+use self::libpijul::patch::{Patch,Value};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
 
-use std::thread;
 extern crate time;
 use commands::error::Error;
 
@@ -35,8 +33,8 @@ use std::path::{Path};
 
 use super::super::meta::{Meta};
 use super::ask;
-use std;
 use super::get_wd;
+use std::collections::BTreeMap;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -118,16 +116,31 @@ pub fn run(args : &Params) -> Result<Option<()>, Error> {
                 //println!("patch: {:?}",changes);
                 let patch={
                     debug!("loading meta");
-                    let mut meta=Meta::load(r).unwrap_or(Meta::new());
                     let mut save_meta=false;
-                    let authors :Vec<String>=
+                    let mut meta = match Meta::load(r) { Ok(m)=>m, Err(_)=> { save_meta=true; Meta::new() } };
+                    let authors :Vec<BTreeMap<String,Value>>=
                         if let Some(ref authors)=args.authors {
-                            authors.iter().map(|x| x.to_string()).collect()
-                        } else if meta.authors.len()>0 {
-                            meta.authors.iter().map(|x| x.to_string()).collect()
+                            let authors=authors.iter().map(|x| {
+                                let mut b=BTreeMap::new();
+                                b.insert("name".to_string(),Value::String(x.to_string()));
+                                b
+                            }).collect();
+                            {
+                                if meta.default_authors().and_then(|x| { if x.len()>0{Some(x)}else{None} }).is_none() {
+                                    meta.set_default_authors(&authors);
+                                    save_meta=true
+                                }
+                            }
+                            authors
                         } else {
-                            save_meta=true;
-                            try!(ask::ask_authors())
+                            if let Some(default)=meta.default_authors().and_then(|x| { if x.len()>0{Some(x)}else{None} }) {
+                                default
+                            } else {
+                                save_meta=true;
+                                let authors=try!(ask::ask_authors());
+                                //meta.set_default_authors(&authors);
+                                authors
+                            }
                         };
                     let patch_name=
                         if let Some(ref m)=args.patch_name {

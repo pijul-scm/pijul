@@ -7,7 +7,6 @@ use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
 use std::path::{Path};
 use std::fs::{metadata,rename};
 use commands::error;
-use std;
 use super::get_wd;
 #[derive(Debug)]
 pub struct Params<'a> {

@@ -5,12 +5,12 @@ extern crate rustc_serialize;
 use self::rustc_serialize::hex::{ToHex};
 extern crate libpijul;
 //use self::libpijul::fs_representation::{patches_dir};
-use self::libpijul::patch::{Change,Patch,LINE_SIZE,HASH_SIZE,KEY_SIZE};
+use self::libpijul::patch::{Change,Value,Patch,LINE_SIZE,HASH_SIZE,KEY_SIZE};
 extern crate time;
 use self::time::{Duration};
 //use std::path::Path;
 use std::io::{stdout};
-use std::collections::{HashMap,HashSet};
+use std::collections::{HashMap,HashSet,BTreeMap};
 #[cfg(not(windows))]
 extern crate termios;
 #[cfg(not(windows))]
@@ -18,12 +18,13 @@ use self::termios::{tcsetattr,ICANON,ECHO};
 
 use super::error::Error;
 use self::libpijul::Repository;
-use self::libpijul::contents::{FOLDER_EDGE,DELETED_EDGE,PARENT_EDGE};
+use self::libpijul::contents::{FOLDER_EDGE,PARENT_EDGE};
 use std::io::stdin;
 use std::char::from_u32_unchecked;
 use std::str;
 use std::ptr::copy_nonoverlapping;
 use std;
+
 
 const EPOCH:time::Tm = time::Tm {
     tm_sec:0,
@@ -336,7 +337,7 @@ pub fn ask_record<'a>(repository:&Repository<'a>,changes:&[Change])->Result<Hash
             None=>{
                 match final_decision {
                     None => {
-                        print_change(repository,&changes[i]);
+                        try!(print_change(repository,&changes[i]));
                         print!("Shall I record this change? [ynkad] ");
                         try!(stdout().flush());
                         match getch() {
@@ -379,18 +380,20 @@ pub fn ask_record<'a>(repository:&Repository<'a>,changes:&[Change])->Result<Hash
     Ok(choices)
 }
 
-pub fn ask_authors()->Result<Vec<String>,Error> {
+pub fn ask_authors()->Result<Vec<BTreeMap<String,Value>>,Error> {
     print!("What is your name <and email address>? ");
-    std::io::stdout().flush();
+    try!(std::io::stdout().flush());
     let mut input = String::new();
     try!(stdin().read_line(&mut input));
-    Ok(vec!(input))
+    let mut auth=BTreeMap::new();
+    auth.insert("name".to_string(),Value::String(input));
+    Ok(vec!(auth))
 }
 
 
 pub fn ask_patch_name()->Result<String,Error> {
     print!("What is the name of this patch? ");
-    std::io::stdout().flush();
+    try!(std::io::stdout().flush());
     let mut input = String::new();
     try!(stdin().read_line(&mut input));
     Ok(input)

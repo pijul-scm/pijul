@@ -25,7 +25,6 @@ extern crate libpijul;
 use self::libpijul::Repository;
 use self::libpijul::fs_representation::{pristine_dir,find_repo_root};
 use super::get_wd;
-use std;
 use super::error::Error;
 
 pub struct Params<'a> {

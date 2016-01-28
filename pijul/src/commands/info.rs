@@ -24,7 +24,6 @@ use clap::{SubCommand, Arg, ArgMatches};
 use commands;
 extern crate libpijul;
 use self::libpijul::fs_representation::find_repo_root;
-use std;
 use commands::error::Error;
 use super::get_wd;
 pub struct Params<'a> {

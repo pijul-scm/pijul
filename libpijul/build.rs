@@ -4,10 +4,10 @@ use std::io::{Write};
 use std::fs::{File,remove_file};
 use std::env;
 
-extern crate syntex;
-extern crate serde_codegen;
+//extern crate syntex;
+//extern crate serde_codegen;
 
-use std::path::Path;
+//use std::path::Path;
 
 
 fn main() {
@@ -42,7 +42,7 @@ fn main() {
         }
     }
 
-
+    /*
     let out_dir = env::var_os("OUT_DIR").unwrap();
 
     let src = Path::new("src/patch.rs.in");
@@ -52,4 +52,5 @@ fn main() {
 
     serde_codegen::register(&mut registry);
     registry.expand("", &src, &dst).unwrap();
+     */
 }

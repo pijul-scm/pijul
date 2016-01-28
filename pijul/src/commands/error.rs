@@ -19,7 +19,8 @@ pub enum Error{
     Hex(rustc_serialize::hex::FromHexError),
     SSH(ssh::Error),
     Hyper(hyper::error::Error),
-    MetaDecoding
+    MetaDecoding,
+    MissingRemoteRepository
 }
 
 impl fmt::Display for Error {
@@ -36,6 +37,7 @@ impl fmt::Display for Error {
             Error::Hyper(ref err) => write!(f, "Hyper: {}",err),
             Error::UTF8(ref err) => write!(f, "UTF8Error: {}",err),
             Error::MetaDecoding => write!(f, "MetaDecoding"),
+            Error::MissingRemoteRepository => write!(f, "Missing remote repository"),
         }
     }
 }
@@ -53,7 +55,8 @@ impl error::Error for Error {
             Error::Hex(ref err) => err.description(),
             Error::Hyper(ref err) => err.description(),
             Error::UTF8(ref err) => err.description(),
-            Error::MetaDecoding => "Error in the decoding of metadata"
+            Error::MetaDecoding => "Error in the decoding of metadata",
+            Error::MissingRemoteRepository => "Missing remote repository",
         }
     }
 
@@ -69,7 +72,8 @@ impl error::Error for Error {
             Error::Hex(ref err) => Some(err),
             Error::Hyper(ref err) => Some(err),
             Error::UTF8(ref err) => Some(err),
-            Error::MetaDecoding => None
+            Error::MetaDecoding => None,
+            Error::MissingRemoteRepository => None
         }
     }
 }

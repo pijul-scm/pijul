@@ -23,7 +23,6 @@ use commands::error;
 use self::libpijul::{Repository};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
 use std::path::Path;
-use std;
 use super::get_wd;
 
 pub fn invocation() -> StaticSubcommand {
