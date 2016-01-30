@@ -17,10 +17,10 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path,PathBuf,MAIN_SEPARATOR};
 use std::fs::{metadata,create_dir_all};
-
+extern crate rustc_serialize;
+use self::rustc_serialize::hex::ToHex;
 use std;
 
 pub const PIJUL_DIR_NAME:&'static str=".pijul";
@@ -40,7 +40,7 @@ pub fn patches_dir<P:AsRef<Path>>(p : P) -> PathBuf {
 }
 
 pub fn branch_changes_base_path(b:&[u8])->String {
-    "changes.".to_string() + &to_hex(b)
+    "changes.".to_string() + &b.to_hex()
 }
 
 pub fn branch_changes_file(p : &Path, b: &[u8]) -> PathBuf {
@@ -85,15 +85,45 @@ pub fn create(dir : &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn to_hex(x:&[u8]) -> String {
-    let mut v = Vec::with_capacity(x.len() * 2);
-    for &byte in x.iter() {
-        v.push(CHARS[(byte >> 4) as usize]);
-        v.push(CHARS[(byte & 0xf) as usize]);
-    }
 
-    unsafe {
-        String::from_utf8_unchecked(v)
+pub fn patch_path(root:&Path,h:&[u8])->Option<PathBuf> {
+    for p in patch_path_iter(h,MAIN_SEPARATOR) {
+        let p=patches_dir(root).join(p);
+        if std::fs::metadata(&p).is_ok() {
+            return Some(p)
+        }
+    }
+    None
+}
+
+const PATCH_EXTENSIONS:[&'static str;3]=["cbor.gpg","cbor.gz","cbor"];
+
+pub struct PatchPath<'a> {
+    h:&'a [u8],
+    i:usize,
+    sep:char
+}
+
+impl<'a> Iterator for PatchPath<'a> {
+    type Item=String;
+    fn next(&mut self)->Option<String> {
+        if self.i>PATCH_EXTENSIONS.len() {
+            None
+        } else {
+            let mut p=PIJUL_DIR_NAME.to_string();
+            p.push(self.sep);
+            p.push_str(PATCHES_DIR_NAME);
+            p.push(self.sep);
+            p.push_str(&self.h.to_hex());
+            p.push('.');
+            p.push_str(PATCH_EXTENSIONS[self.i]);
+            self.i+=1;
+            Some(p)
+        }
     }
 }
-static CHARS: &'static[u8] = b"0123456789abcdef";
+
+pub fn patch_path_iter<'a>(h:&'a[u8],sep:char)->PatchPath<'a> {
+    PatchPath { h:h,i:0,sep:sep }
+}
+

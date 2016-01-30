@@ -32,10 +32,7 @@ use std::fs::File;
 use super::ask::{ask_apply,Command};
 use super::get_wd;
 
-use super::super::meta::{Meta,PULL,ADDRESS,PORT};
-use std::collections::BTreeMap;
-extern crate toml;
-use self::toml::Value;
+use super::super::meta::{Meta,Repository};
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -107,11 +104,12 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                     savable=true;
                     remote::parse_remote(remote_id,args.port,None)
                 } else {
-                    if let Some((host,port))=meta.get_default_repository(PULL) {
-                        remote::parse_remote(host,port.and_then(|x| { Some(x as u64) }),
-                                             Some(r))
-                    } else {
-                        return Err(Error::MissingRemoteRepository)
+                    match meta.pull {
+                        Some(Repository::SSH{ref address,ref port}) => remote::parse_remote(address,Some(*port as u64),Some(r)),
+                        Some(Repository::String(ref host)) => remote::parse_remote(host,None,Some(r)),
+                        None=>{
+                            return Err(Error::MissingRemoteRepository)
+                        }
                     }
                 }
             };
@@ -137,14 +135,13 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             try!(session.pull(r,&pullable));
             if args.set_default && savable {
                 let mut meta = match Meta::load(r) { Ok(m)=>m, Err(_)=> { Meta::new() } };
-                let mut def=BTreeMap::new();
                 if let Some(remote_id)=args.remote_id {
-                    def.insert(ADDRESS.to_string(),toml::Value::String(remote_id.to_string()));
+                    if let Some(p)=args.port {
+                        meta.pull=Some(Repository::SSH{address:remote_id.to_string(),port:p});
+                    } else {
+                        meta.pull=Some(Repository::String(remote_id.to_string()))
+                    }
                 }
-                if let Some(p)=args.port {
-                    def.insert(PORT.to_string(),toml::Value::Integer(p as i64));
-                }
-                meta.set_default_repository(PULL,Value::Table(def));
                 try!(meta.save(r));
             }
 

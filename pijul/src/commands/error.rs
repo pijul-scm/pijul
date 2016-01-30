@@ -29,7 +29,7 @@ extern crate toml;
 pub enum Error{
     NotInARepository,
     InARepository,
-    IoError(io::Error),
+    IO(io::Error),
     Repository(libpijul::error::Error),
     NotEnoughArguments,
     MoveTargetNotDirectory,
@@ -39,7 +39,7 @@ pub enum Error{
     SSHUnknownServer(ssh::ServerKnown),
     Hyper(hyper::error::Error),
     MetaDecoding,
-    MissingRemoteRepository
+    MissingRemoteRepository,
 }
 
 impl fmt::Display for Error {
@@ -47,7 +47,7 @@ impl fmt::Display for Error {
         match *self {
             Error::NotInARepository => write!(f, "Not in a repository"),
             Error::InARepository => write!(f, "In a repository"),
-            Error::IoError(ref err) => write!(f, "IO error: {}", err),
+            Error::IO(ref err) => write!(f, "IO error: {}", err),
             Error::Repository(ref err) => write!(f, "Repository error: {}", err),
             Error::NotEnoughArguments => write!(f, "Not enough arguments"),
             Error::MoveTargetNotDirectory => write!(f, "Target of mv is not a directory"),
@@ -67,7 +67,7 @@ impl error::Error for Error {
         match *self {
             Error::NotInARepository => "Not in a repository",
             Error::InARepository => "In a repository",
-            Error::IoError(ref err) => error::Error::description(err),
+            Error::IO(ref err) => error::Error::description(err),
             Error::Repository(ref err) => libpijul::error::Error::description(err),
             Error::NotEnoughArguments => "Not enough arguments",
             Error::MoveTargetNotDirectory => "Target of mv is not a directory",
@@ -83,7 +83,7 @@ impl error::Error for Error {
 
     fn cause(&self) -> Option<&error::Error> {
         match *self {
-            Error::IoError(ref err) => Some(err),
+            Error::IO(ref err) => Some(err),
             Error::Repository(ref err) => Some(err),
             Error::NotInARepository => None,
             Error::InARepository => None,
@@ -102,7 +102,7 @@ impl error::Error for Error {
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Error {
-        Error::IoError(err)
+        Error::IO(err)
     }
 }
 impl From<ssh::Error> for Error {

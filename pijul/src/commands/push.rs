@@ -24,16 +24,11 @@ use super::error::Error;
 use super::remote;
 use std::path::Path;
 extern crate libpijul;
-use self::libpijul::fs_representation::{find_repo_root,patches_dir};
-use std::fs::File;
+use self::libpijul::fs_representation::{find_repo_root};
 use self::libpijul::patch::{Patch};
-extern crate rustc_serialize;
-use self::rustc_serialize::hex::{ToHex};
+
 use super::get_wd;
-use super::super::meta::{Meta,PUSH,ADDRESS,PORT};
-extern crate toml;
-use self::toml::Value;
-use std::collections::BTreeMap;
+use super::super::meta::{Meta,Repository};
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -97,11 +92,12 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                     savable=true;
                     remote::parse_remote(remote_id,args.port,None)
                 } else {
-                    if let Some((host,port))=meta.get_default_repository(PUSH) {
-                        remote::parse_remote(host,port.and_then(|x| { Some(x as u64) }),
-                                             Some(r))
-                    } else {
-                        return Err(Error::MissingRemoteRepository)
+                    match meta.pull {
+                        Some(Repository::SSH{ref address,ref port}) => remote::parse_remote(address,Some(*port as u64),Some(r)),
+                        Some(Repository::String(ref host)) => remote::parse_remote(host,None,Some(r)),
+                        None=>{
+                            return Err(Error::MissingRemoteRepository)
+                        }
                     }
                 }
             };
@@ -111,11 +107,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 let selected={
                     let mut patches=Vec::new();
                     for i in pushable.iter() {
-                        let patch={
-                            let filename=patches_dir(r).join(i.to_hex()).with_extension("cbor");
-                            let mut file=try!(File::open(&filename));
-                            try!(Patch::from_reader(&mut file,Some(&filename)))
-                        };
+                        let patch=try!(Patch::from_repository(r,i));
                         patches.push((&i[..],patch));
                     }
                     try!(super::ask::ask_apply(super::ask::Command::Push,&patches))
@@ -126,14 +118,13 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             try!(session.push(r,&pushable));
             if args.set_default && savable {
                 let mut meta = match Meta::load(r) { Ok(m)=>m, Err(_)=> { Meta::new() } };
-                let mut def=BTreeMap::new();
                 if let Some(remote_id)=args.remote_id {
-                    def.insert(ADDRESS.to_string(),toml::Value::String(remote_id.to_string()));
+                    if let Some(p)=args.port {
+                        meta.push=Some(Repository::SSH{address:remote_id.to_string(),port:p});
+                    } else {
+                        meta.push=Some(Repository::String(remote_id.to_string()))
+                    }
                 }
-                if let Some(p)=args.port {
-                    def.insert(PORT.to_string(),toml::Value::Integer(p as i64));
-                }
-                meta.set_default_repository(PUSH,Value::Table(def));
                 try!(meta.save(r));
             }
             Ok(())

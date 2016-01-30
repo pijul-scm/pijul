@@ -115,39 +115,41 @@ pub fn run(args : &Params) -> Result<Option<()>, Error> {
             } else {
                 //println!("patch: {:?}",changes);
                 let patch={
-                    debug!("loading meta");
                     let mut save_meta=false;
                     let mut meta = match Meta::load(r) { Ok(m)=>m, Err(_)=> { save_meta=true; Meta::new() } };
+                    debug!("meta:{:?}",meta);
                     let authors :Vec<BTreeMap<String,Value>>=
                         if let Some(ref authors)=args.authors {
-                            let authors=authors.iter().map(|x| {
+                            let authors:Vec<BTreeMap<String,Value>>=authors.iter().map(|x| {
                                 let mut b=BTreeMap::new();
                                 b.insert("name".to_string(),Value::String(x.to_string()));
                                 b
                             }).collect();
                             {
-                                if meta.default_authors().and_then(|x| { if x.len()>0{Some(x)}else{None} }).is_none() {
-                                    meta.set_default_authors(&authors);
+                                if meta.default_authors.len()==0 {
+                                    meta.default_authors=authors.clone();
                                     save_meta=true
                                 }
                             }
                             authors
                         } else {
-                            if let Some(default)=meta.default_authors().and_then(|x| { if x.len()>0{Some(x)}else{None} }) {
-                                default
+                            if meta.default_authors.len()>0 {
+                                meta.default_authors.clone()
                             } else {
                                 save_meta=true;
                                 let authors=try!(ask::ask_authors());
-                                //meta.set_default_authors(&authors);
+                                meta.default_authors=authors.clone();
                                 authors
                             }
                         };
+                    debug!("authors:{:?}",authors);
                     let patch_name=
                         if let Some(ref m)=args.patch_name {
                             m.to_string()
                         } else {
                             try!(ask::ask_patch_name())
                         };
+                    debug!("patch_name:{:?}",patch_name);
                     if save_meta {
                         try!(meta.save(r))
                     }

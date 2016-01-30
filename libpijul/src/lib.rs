@@ -51,6 +51,7 @@ use self::fs_representation::*;
 //extern crate rustc_serialize;
 //use self::rustc_serialize::{Encodable,Decodable};
 extern crate rustc_serialize;
+use self::rustc_serialize::hex::ToHex;
 
 pub mod patch;
 use self::patch::*;
@@ -122,7 +123,7 @@ impl <'a> InternalKey<'a> {
     }
 
     pub fn to_hex(&self) -> String {
-        to_hex(self.contents)
+        self.contents.to_hex()
     }
 }
 
@@ -284,10 +285,10 @@ impl <'a> Repository<'a> {
             buf.extend(ss.as_bytes());
             let mut broken=false;
             {
-                debug!(target:"mv","mdb_get: dbi_tree, {}",to_hex(&buf));
+                debug!(target:"mv","mdb_get: dbi_tree, {}",buf.to_hex());
                 match self.mdb_txn.get(self.dbi_tree,&buf) {
                     Ok(Some(v))=> {
-                        debug!(target:"mv","got Some({})",to_hex(v));
+                        debug!(target:"mv","got Some({})",v.to_hex());
                         if cs.is_none() {
                             return Err(Error::AlreadyAdded)
                         } else {
@@ -309,7 +310,7 @@ impl <'a> Repository<'a> {
                     self.create_new_inode(&mut inode_);
                     &inode_[..]
                 };
-                debug!(target:"mv","put: dbi_tree, {} {}",to_hex(&buf),to_hex(&inode));
+                debug!(target:"mv","put: dbi_tree, {} {}",buf.to_hex(),inode.to_hex());
                 self.mdb_txn.put(self.dbi_tree,&buf,&inode,0).unwrap();
                 self.mdb_txn.put(self.dbi_revtree,&inode,&buf,0).unwrap();
                 if cs.is_some() || is_dir {
@@ -338,10 +339,10 @@ impl <'a> Repository<'a> {
         for c in path.components() {
             inode.truncate(INODE_SIZE);
             inode.extend(c.as_os_str().to_str().unwrap().as_bytes());
-            debug!(target:"mv","first get: {}",to_hex(inode));
+            debug!(target:"mv","first get: {}",inode.to_hex());
             match self.mdb_txn.get(self.dbi_tree,&inode) {
                 Ok(Some(x))=> {
-                    debug!(target:"mv","got some: {}",to_hex(x));
+                    debug!(target:"mv","got some: {}",x.to_hex());
                     std::mem::swap(inode,parent);
                     (*inode).clear();
                     (*inode).extend(x);
@@ -353,14 +354,14 @@ impl <'a> Repository<'a> {
             }
         }
         // Now the last inode is in "*inode"
-        debug!(target:"mv","mdb_txn.del parent={:?}",to_hex(parent));
+        debug!(target:"mv","mdb_txn.del parent={:?}",parent.to_hex());
         try!(self.mdb_txn.del(self.dbi_tree,parent,None));
 
         let basename=path.file_name().unwrap();
         (*parent).truncate(INODE_SIZE);
         (*parent).extend(basename.to_str().unwrap().as_bytes());
 
-        debug!(target:"mv","inode={} path_={:?}",to_hex(inode),path_);
+        debug!(target:"mv","inode={} path_={:?}",inode.to_hex(),path_);
         try!(self.add_inode(&Some(inode),path_,is_dir));
         let vv=
             match self.mdb_txn.get(self.dbi_inodes,inode) {
@@ -438,7 +439,7 @@ impl <'a> Repository<'a> {
             let b=
                 match repo.mdb_txn.get(repo.dbi_inodes,key) {
                     Ok(Some(node)) => {
-                        debug!(target:"remove_file","node={}",to_hex(node));
+                        debug!(target:"remove_file","node={}",node.to_hex());
                         debug_assert!(node.len()==3+KEY_SIZE);
                         unsafe {
                             copy_nonoverlapping(node.as_ptr() as *const c_void,
@@ -525,7 +526,7 @@ impl <'a> Repository<'a> {
                     Entry::Vacant(e) => {
                         let idx=lines.len();
                         e.insert(idx);
-                        debug!(target:"retrieve","{}",to_hex(key));
+                        debug!(target:"retrieve","{}",key.to_hex());
                         let is_zombie={
                             let mut tag=PARENT_EDGE|DELETED_EDGE;
                             unsafe {
@@ -545,7 +546,7 @@ impl <'a> Repository<'a> {
                             children:children.len(),n_children:0,index:0,lowlink:0,scc:0
                         };
                         for child in CursIter::new(curs,key,0,true,true) {
-                            debug!(target:"retrieve", "child: {}",to_hex(child));
+                            debug!(target:"retrieve", "child: {}",child.to_hex());
                             children.push((child.as_ptr(),0));
                             l.n_children+=1
                         }
@@ -590,7 +591,7 @@ impl <'a> Repository<'a> {
             Ok(Some(v))=>v,
             Ok(None)=>&[],
             Err(e) =>{
-                debug!("contents error for key {}",to_hex(key));
+                debug!("contents error for key {}",key.to_hex());
                 panic!("contents error: {:?}", e)
             }
         }
@@ -607,7 +608,7 @@ impl <'a> Repository<'a> {
                 (*l).index = *index;
                 (*l).lowlink = *index;
                 (*l).flags |= LINE_ONSTACK | LINE_VISITED;
-                debug!(target:"tarjan", "{} {} chi",to_hex((*l).key),(*l).n_children);
+                debug!(target:"tarjan", "{} {} chi",(*l).key.to_hex(),(*l).n_children);
                 //unsafe {println!("contents: {}",std::str::from_utf8_unchecked(repo.contents((*l).key))); }
             }
             stack.push(n_l);
@@ -709,7 +710,7 @@ impl <'a> Repository<'a> {
                     debug!(target:"output_file","forward ! {} {}",n_scc,*component);
                     forward_scc.insert(*component);
                 } else {
-                    debug!(target:"output_file","visiting scc {} {}",*component,to_hex(g.lines[scc[*component][0]].key));
+                    debug!(target:"output_file","visiting scc {} {}",*component,g.lines[scc[*component][0]].key.to_hex());
                     dfs(g,first_visit,last_visit,forward,zero,step,scc,*component)
                 }
             }
@@ -752,7 +753,7 @@ impl <'a> Repository<'a> {
             if scc[i].len() == 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0]  && g.lines[scc[i][0]].flags & LINE_HALF_DELETED == 0 {
                 debug!(target:"conflict","/flag = {} {}",g.lines[scc[i][0]].flags,LINE_HALF_DELETED);
                 let key=g.lines[scc[i][0]].key;
-                debug!(target:"conflict","key = {}",to_hex(key));
+                debug!(target:"conflict","key = {}",key.to_hex());
                 if key.len()>0 {
                     buf.output_line(&key,self.contents(key));
                 }
@@ -760,7 +761,7 @@ impl <'a> Repository<'a> {
             } else {
                 debug!(target:"conflict","flag = {} {}",g.lines[scc[i][0]].flags,LINE_HALF_DELETED);
                 let key=g.lines[scc[i][0]].key;
-                debug!(target:"conflict","key = {}",to_hex(key));
+                debug!(target:"conflict","key = {}",key.to_hex());
                 struct A<'b,'a:'b,'c,B:LineBuffer<'a>> where 'a:'c, B:'b {
                     repo:&'a Repository<'a>,
                     scc:&'c mut Vec<Vec<usize>>,
@@ -778,7 +779,7 @@ impl <'a> Repository<'a> {
                     // x.scc[i] has at least one element (from tarjan).
                     {
                         let key=x.g.lines[x.scc[i][0]].key;
-                        debug!(target:"conflict","get_conflict: {} {}",x.scc[i][0],to_hex(key));
+                        debug!(target:"conflict","get_conflict: {} {}",x.scc[i][0],key.to_hex());
                     }
                     if x.scc[i].len() == 1 && x.first_visit[i] <= x.first_visit[0] && x.last_visit[i] >= x.last_visit[0] && x.g.lines[x.scc[i][0]].flags & LINE_HALF_DELETED == 0 {
                         // End of conflict.
@@ -971,7 +972,7 @@ impl <'a> Repository<'a> {
 
 
     pub fn internal_hash<'b>(&'b self,key:&[u8])->Result<InternalKey<'b>,Error> {
-        debug!("internal_hash: {}, {}",to_hex(key), key.len());
+        debug!("internal_hash: {}, {}",key.to_hex(), key.len());
         if key.len()==HASH_SIZE
             && unsafe { memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t) }==0 {
                 Ok(InternalKey::new(ROOT_KEY))
@@ -1054,7 +1055,7 @@ impl <'a> Repository<'a> {
 
     pub fn register_hash(&mut self,internal:&[u8],external:&[u8]){
         debug!(target:"apply","registering patch\n  {}\n  as\n  {}",
-               to_hex(external),to_hex(internal));
+               external.to_hex(),internal.to_hex());
         self.mdb_txn.put(self.dbi_external,internal,external,0).unwrap();
         self.mdb_txn.put(self.dbi_internal,external,internal,0).unwrap();
     }
@@ -1120,7 +1121,7 @@ impl <'a> Repository<'a> {
                 let mut edges=Vec::with_capacity(lines.len());
                 for i in 0..lines.len() {
                     //unsafe {println!("- {}",std::str::from_utf8_unchecked(repo.contents(lines[i])));}
-                    debug!(target:"conflictdiff","deleting line {}",to_hex(lines[i]));
+                    debug!(target:"conflictdiff","deleting line {}",lines[i].to_hex());
                     repo.delete_edges(cursor,&mut edges,lines[i],PARENT_EDGE)
                 }
                 actions.push(Change::Edges{edges:edges,flag:PARENT_EDGE|DELETED_EDGE})
@@ -1247,7 +1248,7 @@ impl <'a> Repository<'a> {
 
         if parent_inode.is_some() { realpath.push(str::from_utf8(&basename).unwrap()) }
         debug!(target:"record_all","realpath:{:?}",realpath);
-        debug!(target:"record_all","inode:{:?}",to_hex(current_inode));
+        debug!(target:"record_all","inode:{:?}",current_inode.to_hex());
 
         let mut l2=[0;LINE_SIZE];
         let current_node=
@@ -1361,14 +1362,14 @@ impl <'a> Repository<'a> {
                             // Delete the file recursively
                             let mut file_edges=vec!();
                             {
-                                debug!(target:"record_all","del={}",to_hex(current_node));
+                                debug!(target:"record_all","del={}",current_node.to_hex());
                                 let ret = self.retrieve(&current_node[3..]).unwrap();
                                 for l in ret.lines {
                                     if l.key.len()>0 {
                                         let ext_key=self.external_key(l.key);
-                                        debug!(target:"record_all","ext_key={}",to_hex(&ext_key));
+                                        debug!(target:"record_all","ext_key={}",ext_key.to_hex());
                                         for v in CursIter::new(curs_parents,l.key,PARENT_EDGE,true,false) {
-                                            debug!(target:"record_all","v={}",to_hex(v));
+                                            debug!(target:"record_all","v={}",v.to_hex());
                                             if v[0] & FOLDER_EDGE != 0 { &mut edges } else { &mut file_edges }
                                             .push(Edge { from:ext_key.clone(),
                                                          to:self.external_key(&v[1..(1+KEY_SIZE)]),
@@ -1482,7 +1483,7 @@ impl <'a> Repository<'a> {
         match current_node {
             None => (), // we just added a file
             Some(current_node)=>{
-                debug!(target:"record_all","children of current_inode {}",to_hex(current_inode));
+                debug!(target:"record_all","children of current_inode {}",current_inode.to_hex());
                 let cursor=try!(self.mdb_txn.cursor(self.dbi_tree));
                 let mut op=lmdb::Op::MDB_SET_RANGE;
                 while let Ok((k,v))=cursor.get(current_inode,None,op) {
@@ -1492,7 +1493,7 @@ impl <'a> Repository<'a> {
                         break
                     } else {
                         if v.len()>0 { // directories have len==0
-                            debug!(target:"record_all","  child: {} + {}",to_hex(&v[0..INODE_SIZE]),
+                            debug!(target:"record_all","  child: {} + {}",&v[0..INODE_SIZE].to_hex(),
                                    std::str::from_utf8(&k[INODE_SIZE..]).unwrap());
                             try!(self.record_all(actions, line_num,redundant,updatables,
                                                  Some(current_inode), // parent_inode
@@ -1534,14 +1535,14 @@ impl <'a> Repository<'a> {
                        internal_patch_id.contents.as_ptr() as *const c_void,
                        HASH_SIZE as size_t)
                     != 0 } {
-                debug!(target:"exclusive","exclusive_edge: {}",to_hex(&neighbor));
+                debug!(target:"exclusive","exclusive_edge: {}",neighbor.to_hex());
                 let ext=self.external_hash(&neighbor[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]);
-                debug!(target:"exclusive", "{:?}, neighbor={},\next={}",flag0,to_hex(&neighbor[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)]),to_hex(ext));
+                debug!(target:"exclusive", "{:?}, neighbor={},\next={}",flag0,&neighbor[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)].to_hex(),ext.to_hex());
                 if !dependencies.contains(ext) {
                     return true
                 } else {
                     for p in dependencies.iter() {
-                        debug!(target:"exclusive","p={}",to_hex(p));
+                        debug!(target:"exclusive","p={}",p.to_hex());
                     }
                 }
             }
@@ -1558,7 +1559,7 @@ impl <'a> Repository<'a> {
         let cursor= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let mut parents:Vec<u8>=Vec::new();
         let mut children:Vec<u8>=Vec::new();
-        debug!(target:"apply","unsafe_apply (patch {})",to_hex(internal_patch_id.contents));
+        debug!(target:"apply","unsafe_apply (patch {})",internal_patch_id.contents.to_hex());
         for ch in changes {
             match *ch {
                 Change::Edges{ref flag, ref edges} => {
@@ -1571,7 +1572,7 @@ impl <'a> Repository<'a> {
                             let p= try!(self.internal_hash(&e.introduced_by));
                             try!(self.internal_edge(*flag^DELETED_EDGE^PARENT_EDGE,&e.from,p,&mut pu));
                             try!(self.internal_edge(*flag^DELETED_EDGE,&e.to,p,&mut pv));
-                            debug!(target:"exclusive","pu={}\npv={}",to_hex(&pu),to_hex(&pv));
+                            debug!(target:"exclusive","pu={}\npv={}",pu.to_hex(),pv.to_hex());
                         }
                         try!(self.mdb_txn.del(self.dbi_nodes,&pu[1..(1+KEY_SIZE)], Some(&pv)));
                         try!(self.mdb_txn.del(self.dbi_nodes,&pv[1..(1+KEY_SIZE)], Some(&pu)));
@@ -1582,7 +1583,7 @@ impl <'a> Repository<'a> {
                             if self.has_exclusive_edge(cursor,internal_patch_id,&pv,PARENT_EDGE,true,true,dependencies)
                                 || self.has_exclusive_edge(cursor,internal_patch_id,&pu,0,true,true,dependencies) {
                                     debug!(target:"exclusive","add_zombies:\n{}\n{}",
-                                           to_hex(&e.to),to_hex(&e.from));
+                                           e.to.to_hex(),e.from.to_hex());
                                     add_zombies=true;
                                 } else {
                                     debug!(target:"exclusive","not add zombies: {}",add_zombies);
@@ -1599,7 +1600,7 @@ impl <'a> Repository<'a> {
                     for e in edges {
                         try!(self.internal_edge(*flag^PARENT_EDGE,&e.from,internal_patch_id,&mut pu));
                         try!(self.internal_edge(*flag,&e.to,internal_patch_id,&mut pv));
-                        debug!(target:"apply","new edge:\n  {}\n  {}",to_hex(&pu),to_hex(&pv));
+                        debug!(target:"apply","new edge:\n  {}\n  {}",pu.to_hex(),pv.to_hex());
                         try!(self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA));
                         try!(self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA));
                         // Here, there are two options: either we need zombie lines because the currently applied patch doesn't know about some of our edges, or else we just need to reconnect parents and children of a deleted portion of the graph.
@@ -1607,21 +1608,21 @@ impl <'a> Repository<'a> {
                             if add_zombies {
                                 pu[0]^= DELETED_EDGE;
                                 pv[0]^= DELETED_EDGE;
-                                debug!(target:"apply","zombie:\n  {}\n  {}",to_hex(&pu),to_hex(&pv));
+                                debug!(target:"apply","zombie:\n  {}\n  {}",pu.to_hex(),pv.to_hex());
                                 try!(self.mdb_txn.put(self.dbi_nodes,&pu[1..(1+KEY_SIZE)],&pv,lmdb::MDB_NODUPDATA));
                                 try!(self.mdb_txn.put(self.dbi_nodes,&pv[1..(1+KEY_SIZE)],&pu,lmdb::MDB_NODUPDATA));
                             } else if *flag & FOLDER_EDGE == 0 {
                                 // collect alive parents/children of hunk
                                 let (pu,pv)= if *flag&PARENT_EDGE==0 { (&pu,&pv) } else { (&pv,&pu) };
-                                debug!(target:"apply","pu has_edge\n  {}",to_hex(&pu[1..(1+KEY_SIZE)]));
+                                debug!(target:"apply","pu has_edge\n  {}",&pu[1..(1+KEY_SIZE)].to_hex());
                                 if has_edge(cursor,&pu[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
                                     let i=parents.len();
                                     parents.extend(&pu[..]);
                                     parents[i]^= PSEUDO_EDGE | DELETED_EDGE;
                                 }
-                                debug!(target:"apply","pv={}",to_hex(&pv[1..(1+KEY_SIZE)]));
+                                debug!(target:"apply","pv={}",&pv[1..(1+KEY_SIZE)].to_hex());
                                 for neighbor in CursIter::new(cursor,&pv[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
-                                    debug!(target:"apply","parent has_edge\n  {}",to_hex(neighbor));
+                                    debug!(target:"apply","parent has_edge\n  {}",neighbor.to_hex());
                                     if has_edge(alive,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
                                         let i=parents.len();
                                         parents.extend(neighbor);
@@ -1629,7 +1630,7 @@ impl <'a> Repository<'a> {
                                     }
                                 }
                                 for neighbor in CursIter::new(cursor,&pv[1..(1+KEY_SIZE)],0,true,true) {
-                                    debug!(target:"apply","children has_edge\n  {}",to_hex(neighbor));
+                                    debug!(target:"apply","children has_edge\n  {}",neighbor.to_hex());
                                     if has_edge(alive,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true,true) {
                                         let i=children.len();
                                         children.extend(neighbor);
@@ -1650,8 +1651,8 @@ impl <'a> Repository<'a> {
                                                     &parents[j+1 .. j+1+KEY_SIZE],
                                                     &mut children[i .. i+1+KEY_SIZE+HASH_SIZE]) {
                                     debug!(target:"apply","reconnect:\n  {}\n  {}",
-                                           to_hex(&parents[j..(j+1+KEY_SIZE+HASH_SIZE)]),
-                                           to_hex(&mut children[i..(i+1+KEY_SIZE+HASH_SIZE)]));
+                                           &parents[j..(j+1+KEY_SIZE+HASH_SIZE)].to_hex(),
+                                           &mut children[i..(i+1+KEY_SIZE+HASH_SIZE)].to_hex());
                                     if unsafe {
                                         memcmp(parents.as_ptr().offset((j+1) as isize) as *const c_void,
                                                children.as_ptr().offset((i+1) as isize) as *const c_void,
@@ -1688,7 +1689,7 @@ impl <'a> Repository<'a> {
                     };
                     for c in up_context {
                         {
-                            debug!("newnodes: up_context {:?}",to_hex(&c));
+                            debug!("newnodes: up_context {:?}",c.to_hex());
 
                             let u= if c.len()>LINE_SIZE {
                                 try!(self.internal_hash(&c[0..(c.len()-LINE_SIZE)]))
@@ -1768,7 +1769,7 @@ impl <'a> Repository<'a> {
         } else {
             match self.internal_hash(hash) {
                 Ok(internal)=>{
-                    let curs=try!(self.mdb_txn.cursor(self.dbi_branches).map_err(Error::IoError));
+                    let curs=try!(self.mdb_txn.cursor(self.dbi_branches));
                     match curs.get(branch,Some(internal.contents),lmdb::Op::MDB_GET_BOTH) {
                         Ok(_)=>Ok(true),
                         Err(_)=>Ok(false)
@@ -1825,7 +1826,7 @@ impl <'a> Repository<'a> {
                 match unsafe { lmdb::cursor_get(cursor,&pv[1..(1+KEY_SIZE)],Some(&flag[..]),lmdb::Op::MDB_GET_BOTH_RANGE) } {
                     Ok((_,v))=>{
                         if v[0]==flag[0] {
-                            debug!(target:"kill_obsolete_pseudo","kill_obsolete_pseudo:\n  {}",to_hex(v));
+                            debug!(target:"kill_obsolete_pseudo","kill_obsolete_pseudo:\n  {}",v.to_hex());
                             unsafe {
                                 copy_nonoverlapping(v.as_ptr().offset(1) as *const c_void,
                                                     a.as_mut_ptr() as *mut c_void,
@@ -1836,7 +1837,7 @@ impl <'a> Repository<'a> {
                             }
                             b[0]=v[0]^PARENT_EDGE;
                             unsafe { lmdb::mdb_cursor_del(cursor,0) };
-                            debug!(target:"kill_obsolete_pseudo","kill_obsolete_pseudo (parent):\n  {}\n  {}",to_hex(&a[..]),to_hex(&b[..]));
+                            debug!(target:"kill_obsolete_pseudo","kill_obsolete_pseudo (parent):\n  {}\n  {}",a.to_hex(),b.to_hex());
                             self.mdb_txn.del(self.dbi_nodes,&a[..],Some(&b[..])).unwrap();
                         } else {
                             //debug!(target:"kill_obsolete_pseudo","not kill_obsolete_pseudo:\n  {}",to_hex(v));
@@ -1879,20 +1880,20 @@ impl <'a> Repository<'a> {
                                         context.as_mut_ptr().offset(HASH_SIZE as isize),
                                         LINE_SIZE);
                 }
-                debug!(target:"missing context","{} context:{}",direction_up,to_hex(&context[..]));
+                debug!(target:"missing context","{} context:{}",direction_up,context.to_hex());
                 if if direction_up { !has_edge(cursor,&context[..],PARENT_EDGE,true,true) } else { has_edge(cursor,&context[..],PARENT_EDGE|DELETED_EDGE,true,true) } {
                     relatives.clear();
                     repo.find_alive_relatives(&context[..],
                                               if direction_up {DELETED_EDGE|PARENT_EDGE} else {DELETED_EDGE},
                                               internal,new_patches,
                                               &mut relatives);
-                    debug!(target:"missing context","up relatives:{} {}",to_hex(&relatives),relatives.len());
+                    debug!(target:"missing context","up relatives:{} {}",relatives.to_hex(),relatives.len());
                     let mut i=0;
                     while i<relatives.len() {
                         debug!(target:"missing context",
                                "relatives:\n  {}\n  {}",
-                               to_hex(&relatives[(i)..(i+EDGE_SIZE)]),
-                               to_hex(&relatives[(i+EDGE_SIZE)..(i+2*EDGE_SIZE)]));
+                               relatives[(i)..(i+EDGE_SIZE)].to_hex(),
+                               relatives[(i+EDGE_SIZE)..(i+2*EDGE_SIZE)].to_hex());
                         repo.mdb_txn.put(repo.dbi_nodes,
                                          &relatives[(i+1)..(i+1+KEY_SIZE)],
                                          &relatives[(i+EDGE_SIZE)..(i+2*EDGE_SIZE)],
@@ -2025,7 +2026,7 @@ impl <'a> Repository<'a> {
                 let j=result.len();
                 debug_assert!(a.len()==KEY_SIZE);
                 debug_assert!(patch_id.len()==HASH_SIZE);
-                debug!(target:"alive","a={}",to_hex(a));
+                debug!(target:"alive","a={}",a.to_hex());
                 let mut copy=[0;KEY_SIZE];
                 while i < j {
                     unsafe {
@@ -2053,14 +2054,14 @@ impl <'a> Repository<'a> {
                    a:&[u8],
                    patch_id:&[u8],
                    edges:&mut Vec<u8>) {
-            debug!(target:"missing context","connect zombie: {} {}",to_hex(a),
+            debug!(target:"missing context","connect zombie: {} {}",a.to_hex(),
                    has_edge(cursor,&a,PARENT_EDGE|FOLDER_EDGE,true,false));
             if unsafe { memcmp(ROOT_KEY.as_ptr()as *const c_void,a.as_ptr() as *const c_void,KEY_SIZE as size_t)!=0}
             && !has_edge(cursor,&a,PARENT_EDGE|FOLDER_EDGE,true,false) {
                 let i=edges.len();
                 for neighbor in CursIter::new(cursor,&a,PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE,true,false) {
-                    debug!(target:"missing context","pushing from {}",to_hex(a));
-                    debug!(target:"missing context","pushing {}",to_hex(neighbor));
+                    debug!(target:"missing context","pushing from {}",a.to_hex());
+                    debug!(target:"missing context","pushing {}",neighbor.to_hex());
                     edges.push(FOLDER_EDGE);
                     edges.extend(a);
                     edges.extend(patch_id);
@@ -2081,7 +2082,7 @@ impl <'a> Repository<'a> {
                     j+=2*EDGE_SIZE
                 }
             }
-            debug!(target:"missing context","/connect zombie: {}",to_hex(a));
+            debug!(target:"missing context","/connect zombie: {}",a.to_hex());
         }
         //let mut buf=Vec::with_capacity(4*KEY_SIZE);
         let mut edges=Vec::new();
@@ -2135,7 +2136,7 @@ impl <'a> Repository<'a> {
         };
         fn apply_patches<'a>(repo:&mut Repository<'a>, branch:&[u8], local_patches:&Path, patch_hash:&[u8], patches_were_applied:&mut bool, only_local:&HashSet<&[u8]>)->Result<(),Error>{
             if !try!(repo.has_patch(branch,patch_hash)) {
-                let local_patch=local_patches.join(to_hex(patch_hash)).with_extension("cbor");
+                let local_patch=local_patches.join(patch_hash.to_hex()).with_extension("cbor");
                 debug!("local_patch={:?}",local_patch);
                 let mut buffer = BufReader::new(try!(File::open(&local_patch)));
                 let patch=try!(Patch::from_reader(&mut buffer,Some(&local_patch)));
@@ -2196,7 +2197,7 @@ impl <'a> Repository<'a> {
             match self.mdb_txn.get(self.dbi_revtree,current) {
                 Ok(Some(v))=>{
                     debug!(target:"output_repository","filename_of_inode {}{}",
-                           to_hex(&v[0..INODE_SIZE]),
+                           &v[0..INODE_SIZE].to_hex(),
                            std::str::from_utf8(&v[INODE_SIZE..]).unwrap());
                     components.push(&v[INODE_SIZE..]);
                     current=&v[0..INODE_SIZE];
@@ -2220,7 +2221,7 @@ impl <'a> Repository<'a> {
         let mut result=Vec::new();
         let mut curs_b= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()};
         for b in CursIter::new(curs_b,key,flag,true,true) {
-            debug!(target:"retrieve_paths","b={:?}",to_hex(b));
+            debug!(target:"retrieve_paths","b={:?}",b.to_hex());
             let cont_b=
                 match try!(self.mdb_txn.get(self.dbi_contents,&b[1..(1+KEY_SIZE)])) {
                     Some(cont_b)=>cont_b,
@@ -2233,7 +2234,7 @@ impl <'a> Repository<'a> {
                 let perms= ((cont_b[0] as usize) << 8) | (cont_b[1] as usize);
                 let mut curs_c= unsafe { &mut *self.mdb_txn.unsafe_cursor(self.dbi_nodes).unwrap()};
                 for c in CursIter::new(curs_c,&b[1..(1+KEY_SIZE)],flag,true,true) {
-                    debug!(target:"retrieve_paths","c={:?}",to_hex(c));
+                    debug!(target:"retrieve_paths","c={:?}",c.to_hex());
                     let cv=&c[1..(1+KEY_SIZE)];
 
                     result.push((perms,filename,cv))
@@ -2250,10 +2251,10 @@ impl <'a> Repository<'a> {
         let mut first=true;
         for p in path {
             buf.extend(*p);
-            println!("follow: {:?}",to_hex(&buf));
+            println!("follow: {:?}",buf.to_hex());
             match try!(self.mdb_txn.get(self.dbi_tree,&buf)) {
                 Some(v)=> {
-                    println!("some: {:?}",to_hex(&v));
+                    println!("some: {:?}",v.to_hex());
                     first=false;
                     buf.clear();
                     buf.extend(v)
@@ -2291,7 +2292,7 @@ impl <'a> Repository<'a> {
                       moves:&mut Vec<Tree>,
                       curs_b:*mut lmdb::MdbCursor,
                       curs_c:*mut lmdb::MdbCursor)->Result<(),Error>{
-            debug!(target:"output_repository","visited {}",to_hex(key));
+            debug!(target:"output_repository","visited {}",key.to_hex());
 
             moves.clear();
             let mut recursive_calls=Vec::new();
@@ -2316,7 +2317,7 @@ impl <'a> Repository<'a> {
                     let perms= ((cont_b[0] as usize) << 8) | (cont_b[1] as usize);
                     for c in CursIter::new(curs_c,&b[1..(1+KEY_SIZE)],FOLDER_EDGE,true,true) {
                         let cv=&c[1..(1+KEY_SIZE)];
-                        debug!(target:"output_repository","cv={}",to_hex(cv));
+                        debug!(target:"output_repository","cv={}",cv.to_hex());
                         let c_inode=
                             match try!(repo.mdb_txn.get(repo.dbi_revinodes,cv)) {
                                 Some(c_inode) => c_inode.to_vec(),
@@ -2347,7 +2348,7 @@ impl <'a> Repository<'a> {
                             }
                             Entry::Vacant(e)=>{
                                 e.insert(vec!(path.clone()));
-                                debug!(target:"output_repository","inode={}",to_hex(&c_inode));
+                                debug!(target:"output_repository","inode={}",c_inode.to_hex());
                                 {
                                     let mut buf=PathBuf::from(working_copy);
                                     if repo.filename_of_inode(&c_inode,&mut buf) {
@@ -2408,7 +2409,7 @@ impl <'a> Repository<'a> {
                 key[0]=0;
                 key[1]=((perm>>8) & 0xff) as u8;
                 key[2]=(perm & 0xff) as u8;
-                debug!(target:"output_repository","updating dbi_(rev)inodes: {} {}",to_hex(&inode),to_hex(k));
+                debug!(target:"output_repository","updating dbi_(rev)inodes: {} {}",inode.to_hex(),k.to_hex());
                 try!(repo.mdb_txn.put(repo.dbi_inodes,&inode,&key,0));
                 try!(repo.mdb_txn.put(repo.dbi_revinodes,&key[3..],&inode,0));
             }
@@ -2417,12 +2418,12 @@ impl <'a> Repository<'a> {
                 match update {
                     &Tree::Move { ref tree_key,ref tree_value } => { // tree_key = inode_v
                         debug!(target:"output_repository","updating move {}{} {}{}",
-                               to_hex(&tree_key[0..INODE_SIZE]),std::str::from_utf8(&tree_key[INODE_SIZE..]).unwrap(),
-                               to_hex(&tree_value[0..INODE_SIZE]),std::str::from_utf8(&tree_value[INODE_SIZE..]).unwrap());
+                               &tree_key[0..INODE_SIZE].to_hex(),std::str::from_utf8(&tree_key[INODE_SIZE..]).unwrap(),
+                               &tree_value[0..INODE_SIZE].to_hex(),std::str::from_utf8(&tree_value[INODE_SIZE..]).unwrap());
 
                         let current_parent_inode = repo.mdb_txn.get(repo.dbi_revtree,&tree_value).unwrap().unwrap().to_vec();
                         debug!(target:"output_repository","current parent {}{}",
-                               to_hex(&current_parent_inode[0..INODE_SIZE]),
+                               &current_parent_inode[0..INODE_SIZE].to_hex(),
                                std::str::from_utf8(&current_parent_inode[INODE_SIZE..]).unwrap());
                         try!(repo.mdb_txn.del(repo.dbi_tree,&current_parent_inode,Some(&tree_value)));
                         try!(repo.mdb_txn.del(repo.dbi_revtree,&tree_value,Some(&current_parent_inode)));
@@ -2472,7 +2473,7 @@ impl <'a> Repository<'a> {
                 // test whether v is still alive.
                 if ! has_edge(curs_b,&v[3..],PARENT_EDGE|FOLDER_EDGE,true,true) {
                     // v is dead.
-                    debug!(target:"output_repository","dead:{:?} {:?}",to_hex(u),to_hex(v));
+                    debug!(target:"output_repository","dead:{:?} {:?}",u.to_hex(),v.to_hex());
                     dead.push((u.to_vec(),(&v[3..]).to_vec()))
                 }
                 op=lmdb::Op::MDB_NEXT;
@@ -2560,9 +2561,9 @@ impl <'a> Repository<'a> {
                                         key.as_mut_ptr().offset(1),2);
                 }
                 // If this file addition was finally recorded (i.e. in dbi_nodes)
-                debug!(target:"record_all","apply_local_patch: {:?}",to_hex(&key[..]));
+                debug!(target:"record_all","apply_local_patch: {:?}",key.to_hex());
                 if try!(self.mdb_txn.get(self.dbi_nodes,&key[3..])).is_some() {
-                    debug!(target:"record_all","it's in here!: {:?} {:?}",to_hex(&key[..]),to_hex(&inode));
+                    debug!(target:"record_all","it's in here!: {:?} {:?}",key.to_hex(),inode.to_hex());
                     self.mdb_txn.put(self.dbi_inodes,inode,&key[..],0).unwrap();
                     self.mdb_txn.put(self.dbi_revinodes,&key[3..],inode,0).unwrap();
                 }
@@ -2578,7 +2579,7 @@ impl <'a> Repository<'a> {
         match hash_child.join() {
             Ok(Ok(hash))=> {
                 self.register_hash(&internal[..],&hash[..]);
-                debug!(target:"record","hash={}, local={}",to_hex(&hash),to_hex(&internal));
+                debug!(target:"record","hash={}, local={}",hash.to_hex(),internal.to_hex());
                 //println!("writing changes {:?}",internal);
                 self.write_changes_file(&branch_changes_file(location,self.get_current_branch())).unwrap();
                 let t3=time::precise_time_s();
@@ -2607,11 +2608,11 @@ impl <'a> Repository<'a> {
 
             let e=lmdb::mdb_txn_begin(self.mdb_env.env,self.mdb_txn.txn,0,std::mem::transmute(&txn));
             if e!=0 {
-                return Err(Error::IoError(std::io::Error::from_raw_os_error(e)))
+                return Err(Error::IO(std::io::Error::from_raw_os_error(e)))
             }
             self.mdb_txn.txn=txn;
             self.new_internal(&mut internal[..]);
-            debug!(target:"output_repository","pending patch: {}",to_hex(&internal[..]));
+            debug!(target:"output_repository","pending patch: {}",internal.to_hex());
             self.apply(pending,&internal[..],&HashSet::new()).unwrap();
             // Now output all files (do_output=true)
             try!(self.unsafe_output_repository(working_copy,true));
@@ -2644,14 +2645,14 @@ impl <'a> Repository<'a> {
                         Ok(Some(ww))=>ww,
                         _=>&[]
                     };
-                write!(w,"n_{}[label=\"{}: {}\"];\n", to_hex(&k), to_hex(&k),
-                       match str::from_utf8(&cont) { Ok(x)=>x.to_string(), Err(_)=> to_hex(&cont) }
+                write!(w,"n_{}[label=\"{}: {}\"];\n", k.to_hex(), k.to_hex(),
+                       match str::from_utf8(&cont) { Ok(x)=>x.to_string(), Err(_)=> cont.to_hex() }
                        ).unwrap();
                 cur=k;
             }
             let flag=v[0];
             if true || flag & PARENT_EDGE == 0 {
-                write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", to_hex(&k), to_hex(&v[1..(1+KEY_SIZE)]), styles[(flag&0xff) as usize], flag).unwrap();
+                write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", k.to_hex(), &v[1..(1+KEY_SIZE)].to_hex(), styles[(flag&0xff) as usize], flag).unwrap();
             }
         }
         w.write(b"}\n").unwrap();
@@ -2664,7 +2665,7 @@ fn dump_table(txn:&lmdb::Txn,dbi:lmdb::Dbi){
         let cursor= &mut *txn.unsafe_cursor(dbi).unwrap();
         let mut op=lmdb::Op::MDB_FIRST;
         while let Ok((k,v))= lmdb::cursor_get(cursor,&b""[..],None,op ) {
-            println!("key:{:?}, value={:?}",to_hex(k),to_hex(v));
+            println!("key:{:?}, value={:?}",k.to_hex(),v.to_hex());
             op=lmdb::Op::MDB_NEXT_DUP;
         }
         lmdb::mdb_cursor_close(cursor);

@@ -40,16 +40,19 @@ pub type ExternalHash=Vec<u8>;
 pub type Flag=u8;
 
 use error::Error;
-use fs_representation::{to_hex};
 
 extern crate rustc_serialize;
 use self::rustc_serialize::{Encodable,Decodable};
+use self::rustc_serialize::hex::ToHex;
 
 extern crate cbor;
 
 use std::collections::BTreeMap;
 
-#[derive(Debug,PartialEq,RustcEncodable,RustcDecodable)]
+use super::fs_representation::{patch_path};
+use std::process::Command;
+
+#[derive(Debug,Clone,PartialEq,RustcEncodable,RustcDecodable)]
 pub enum Value {
     String(String)
 }
@@ -102,7 +105,46 @@ impl Patch {
         Patch { authors:vec!(),name:"".to_string(),description:None,timestamp:0,
                 changes:vec!(), dependencies:HashSet::new() }
     }
-    pub fn from_reader<R>(r:&mut R,p:Option<&Path>)->Result<Patch,Error> where R:Read {
+
+    fn patch_from_file(p:&Path)->Result<Patch,Error> {
+        match p.extension().and_then(|x| x.to_str()) {
+            Some("gpg") => {
+                let mut gpg=
+                    try!(Command::new("gpg")
+                         .arg("--yes")
+                         .arg("-d")
+                         .arg(p)
+                         .spawn());
+                let stdout = gpg.stdout.take().unwrap();
+                let patch=try!(Patch::from_reader(stdout,Some(p)));
+                let stat=try!(gpg.wait());
+                if stat.success() {
+                    Ok(patch)
+                } else {
+                    Err(Error::GPG(stat.code()))
+                }
+            },
+            Some("cbor") => {
+                let mut file=try!(File::open(p));
+                Patch::from_reader(&mut file,Some(p))
+            },
+            _=>{
+                // TODO: This should not happen if this function is
+                // called from other class methods. Remove this after
+                // debugging.
+                panic!("Unknown patch extension.")
+            }
+        }
+    }
+
+    pub fn from_repository(p:&Path,i:&[u8])->Result<Patch,Error> {
+        if let Some(filename)=patch_path(p,i) {
+            Self::patch_from_file(&filename)
+        } else {
+            Err(Error::PatchNotFound(p.to_path_buf(),i.to_hex()))
+        }
+    }
+    pub fn from_reader<R>(r:R,p:Option<&Path>)->Result<Patch,Error> where R:Read {
         let mut d=cbor::Decoder::from_reader(r);
         if let Some(d)=d.decode().next() {
             Ok(try!(d))
@@ -118,6 +160,7 @@ impl Patch {
         Ok(())
     }
     pub fn save(&self,dir:&Path)->Result<Vec<u8>,Error>{
+        debug!("saving patch");
         let mut name:[u8;20]=[0;20]; // random name initially
         fn make_name(dir:&Path,name:&mut [u8])->std::path::PathBuf{
             for i in 0..name.len() { let r:u8=rand::random(); name[i] = 97 + (r%26) }
@@ -129,23 +172,45 @@ impl Patch {
             let mut buffer = BufWriter::new(try!(File::create(&tmp)));
             try!(self.to_writer(&mut buffer));
         }
+        // Sign
+        let tmp_gpg=tmp.with_extension("gpg");
+        let gpg=Command::new("gpg")
+            .arg("--yes")
+            .arg("-o")
+            .arg(&tmp_gpg)
+            .arg("-s")
+            .arg(&tmp)
+            .spawn();
+
         // hash
         let mut hasher = Sha512::new();
         {
-            let mut buffer = BufReader::new(try!(File::open(&tmp).map_err(Error::IoError)));
+            let mut buffer = BufReader::new(try!(File::open(&tmp)));
             loop {
-                let len= match buffer.fill_buf() {
-                    Ok(buf)=> if buf.len()==0 { break } else {
+                let len= {
+                    let buf=try!(buffer.fill_buf());
+                    if buf.len()==0 { break } else {
                         hasher.input(buf);buf.len()
-                    },
-                    Err(e)=>return Err(Error::IoError(e))
+                    }
                 };
                 buffer.consume(len)
             }
         }
         let mut hash=vec![0;hasher.output_bytes()];
         hasher.result(&mut hash);
-        try!(std::fs::rename(tmp,dir.join(to_hex(&hash)).with_extension("cbor")).map_err(Error::IoError));
+        if let Ok(true)=gpg.and_then(|mut gpg| {
+            let stat=try!(gpg.wait());
+            Ok(stat.success())
+        }) {
+            let mut f=dir.join(hash.to_hex());
+            f.set_extension("cbor.gpg");
+            try!(std::fs::rename(&tmp_gpg,&f));
+            try!(std::fs::remove_file(&tmp));
+        } else {
+            let mut f=dir.join(hash.to_hex());;
+            f.set_extension("cbor");
+            try!(std::fs::rename(&tmp,&f));
+        }
         Ok(hash)
     }
 
@@ -153,7 +218,7 @@ impl Patch {
 
 
 pub fn write_changes(patches:&HashSet<&[u8]>,changes_file:&Path)->Result<(),Error>{
-    let file=try!(File::create(changes_file).map_err(Error::IoError));
+    let file=try!(File::create(changes_file));
     let mut buffer = BufWriter::new(file);
     let mut e = cbor::Encoder::from_writer(&mut buffer);
     try!(patches.encode(&mut e));
@@ -172,7 +237,7 @@ pub fn read_changes<R:Read>(r:R,p:Option<&Path>)->Result<HashSet<Vec<u8>>,Error>
     }
 }
 pub fn read_changes_from_file(changes_file:&Path)->Result<HashSet<Vec<u8>>,Error> {
-    let file=try!(File::open(changes_file).map_err(Error::IoError));
+    let file=try!(File::open(changes_file));
     let r = BufReader::new(file);
     read_changes(r,Some(changes_file))
 }
@@ -181,7 +246,7 @@ pub fn dependencies(changes:&[Change])->HashSet<ExternalHash> {
     let mut deps=HashSet::new();
     fn push_dep(deps:&mut HashSet<ExternalHash>,dep:ExternalHash) {
         // don't include ROOT_KEY as a dependency
-        debug!(target:"dependencies","dep={}",to_hex(&dep));
+        debug!(target:"dependencies","dep={}",dep.to_hex());
         if !if dep.len()==HASH_SIZE {unsafe { memcmp(dep.as_ptr() as *const c_void,
                                                      ROOT_KEY.as_ptr() as *const c_void,
                                                      HASH_SIZE as size_t)==0 }} else {false} {

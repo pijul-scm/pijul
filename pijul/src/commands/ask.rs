@@ -385,6 +385,7 @@ pub fn ask_authors()->Result<Vec<BTreeMap<String,Value>>,Error> {
     try!(std::io::stdout().flush());
     let mut input = String::new();
     try!(stdin().read_line(&mut input));
+    if let Some(c)=input.pop() { if c!='\n' { input.push(c) } }
     let mut auth=BTreeMap::new();
     auth.insert("name".to_string(),Value::String(input));
     Ok(vec!(auth))
@@ -396,5 +397,6 @@ pub fn ask_patch_name()->Result<String,Error> {
     try!(std::io::stdout().flush());
     let mut input = String::new();
     try!(stdin().read_line(&mut input));
+    if let Some(c)=input.pop() { if c!='\n' { input.push(c) } }
     Ok(input)
 }
