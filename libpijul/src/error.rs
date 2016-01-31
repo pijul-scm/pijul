@@ -35,7 +35,7 @@ pub enum Error{
     NothingToDecode(Option<PathBuf>),
     InternalHashNotFound(Vec<u8>),
     PatchNotFound(PathBuf,String),
-    GPG(Option<i32>)
+    GPG(i32,String)
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -48,7 +48,7 @@ impl fmt::Display for Error {
             Error::FileNotInRepo(ref path) => write!(f, "File {} not tracked", path.display()),
             Error::InternalHashNotFound(ref hash) => write!(f, "Internal hash {} not found", hash.to_hex()),
             Error::PatchNotFound(ref path,ref hash) => write!(f, "Patch {} not found in {}", hash, path.display()),
-            Error::GPG(ref code) => write!(f, "GPG returned code {:?}", code)
+            Error::GPG(ref code,ref s) => write!(f, "GPG returned code {:?}, {:?}", code, s)
         }
     }
 }
@@ -64,7 +64,7 @@ impl std::error::Error for Error {
             Error::FileNotInRepo(_) => "Operation on untracked file",
             Error::InternalHashNotFound(_) => "Internal hash not found",
             Error::PatchNotFound(_,_) => "Patch not found",
-            Error::GPG(_) => "GPG was unsuccessful"
+            Error::GPG(_,_) => "GPG was unsuccessful"
         }
     }
 
@@ -78,7 +78,7 @@ impl std::error::Error for Error {
             Error::FileNotInRepo(_) => None,
             Error::InternalHashNotFound(_) => None,
             Error::PatchNotFound(_,_) => None,
-            Error::GPG(_) => None
+            Error::GPG(_,_) => None
         }
     }
 }

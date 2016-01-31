@@ -25,6 +25,8 @@ use super::init;
 
 use super::error::Error;
 use super::remote::{Remote,parse_remote};
+extern crate regex;
+use self::regex::Regex;
 
 pub fn invocation() -> StaticSubcommand {
     return
@@ -32,6 +34,7 @@ pub fn invocation() -> StaticSubcommand {
         .about("clone a remote repository")
         .arg(Arg::with_name("from")
              .help("Repository to clone.")
+             .required(true)
              )
         .arg(Arg::with_name("to")
              .help("Target.")
@@ -57,8 +60,18 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
     // At least one must not use its "port" argument
     let from = parse_remote(args.value_of("from").unwrap(),args.value_of("port").and_then(|x| { Some(x.parse().unwrap()) }),
                             None);
-    let to = parse_remote(args.value_of("to").unwrap_or("."),args.value_of("port").and_then(|x| { Some(x.parse().unwrap()) }),
-                          None);
+    let to =
+        if let Some(to)=args.value_of("to") {
+            parse_remote(to,args.value_of("port").and_then(|x| { Some(x.parse().unwrap()) }), None)
+        } else {
+            let basename=Regex::new(r"([^/:]*)").unwrap();
+            let from=args.value_of("from").unwrap();
+            if let Some(to)=basename.captures_iter(from).last().and_then(|to| { to.at(1) }) {
+                parse_remote(to,args.value_of("port").and_then(|x| { Some(x.parse().unwrap()) }), None)
+            } else {
+                panic!("Could not parse target")
+            }
+        };
     Params { from:from, to:to }
 }
 

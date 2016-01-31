@@ -88,7 +88,8 @@ pub fn create(dir : &Path) -> std::io::Result<()> {
 
 pub fn patch_path(root:&Path,h:&[u8])->Option<PathBuf> {
     for p in patch_path_iter(h,MAIN_SEPARATOR) {
-        let p=patches_dir(root).join(p);
+        let p=root.join(p);
+        debug!("patch_path: trying {:?}",p);
         if std::fs::metadata(&p).is_ok() {
             return Some(p)
         }
@@ -107,7 +108,7 @@ pub struct PatchPath<'a> {
 impl<'a> Iterator for PatchPath<'a> {
     type Item=String;
     fn next(&mut self)->Option<String> {
-        if self.i>PATCH_EXTENSIONS.len() {
+        if self.i>=PATCH_EXTENSIONS.len() {
             None
         } else {
             let mut p=PIJUL_DIR_NAME.to_string();

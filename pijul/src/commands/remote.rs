@@ -21,17 +21,16 @@ extern crate clap;
 extern crate libpijul;
 use self::libpijul::{Repository,DEFAULT_BRANCH};
 use self::libpijul::patch::{read_changes_from_file,read_changes};
-use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, branch_changes_base_path,branch_changes_file,PIJUL_DIR_NAME,patch_path,patch_path_iter};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, branch_changes_base_path,branch_changes_file,PIJUL_DIR_NAME,PATCHES_DIR_NAME,patch_path,patch_path_iter};
 use std::path::{Path,PathBuf};
 use std::io::{BufWriter};
 use std::collections::hash_set::{HashSet};
 use std::fs::{File,hard_link,copy,metadata};
 
 use super::error::Error;
-use std::str::{from_utf8};
+use std::str::{from_utf8,from_utf8_unchecked};
 extern crate ssh;
 use std::io::prelude::*;
-use std::io;
 extern crate regex;
 use self::regex::Regex;
 
@@ -47,13 +46,14 @@ extern crate hyper;
 
 #[derive(Debug)]
 pub enum Remote<'a> {
-    Ssh { user:Option<&'a str>, host:&'a str, port:Option<u64>, path:&'a Path },
+    Ssh { user:Option<&'a str>, host:&'a str, port:Option<u64>, path:&'a Path, id:&'a str },
     Uri { uri:&'a str },
     Local { path:PathBuf }
 }
 
 pub enum Session<'a> {
     Ssh {
+        id:&'a str,
         path:&'a Path,
         session:ssh::Session
     },
@@ -106,6 +106,7 @@ impl<'a> Session<'a> {
         match *self {
             Session::Ssh{ref path,ref mut session,..}=>{
                 let patches_path=branch_changes_file(path,branch);
+                debug!("ssh: receiving changes");
                 let remote_file = try!(ssh_recv_file(session,&patches_path));
                 let changes= match remote_file {
                     Some(r)=>try!(read_changes(r,None)),
@@ -144,8 +145,8 @@ impl<'a> Session<'a> {
                         }));
                         Ok(local_file)
                     } else {
-                        let err=path.to_path_buf().to_string_lossy().into_owned() + " + " + &patch_hash.to_hex();
-                        Err(Error::IO(io::Error::new(io::ErrorKind::NotFound,err)))
+                        Err(Error::PatchNotFound(path.to_path_buf().to_string_lossy().into_owned(),
+                                                 patch_hash.to_hex()))
                     }
                 }
             },
@@ -154,6 +155,7 @@ impl<'a> Session<'a> {
                     Ok(local_file)
                 } else {
                     for remote_file in patch_path_iter(patch_hash,'/') {
+                        debug!("ssh: receiving patch {}",patch_hash.to_hex());
                         if let Ok(Some(mut rem))=ssh_recv_file(session,&remote_file) {
                             let local_file={
                                 let remote_path=Path::new(&remote_file);
@@ -167,8 +169,8 @@ impl<'a> Session<'a> {
                             return Ok(local_file)
                         }
                     }
-                    let err=path.to_path_buf().to_string_lossy().into_owned() + " + " + &patch_hash.to_hex();
-                    Err(Error::IO(io::Error::new(io::ErrorKind::NotFound,err)))
+                    Err(Error::PatchNotFound(path.to_path_buf().to_string_lossy().into_owned(),
+                                             patch_hash.to_hex()))
                 }
             },
             Session::Uri{ref mut client,uri}=>{
@@ -192,41 +194,47 @@ impl<'a> Session<'a> {
                                 return Ok(local_file)
                             }
                     }
-                    let err=uri.to_string() + " + " + &patch_hash.to_hex();
-                    Err(Error::IO(io::Error::new(io::ErrorKind::NotFound,err)))
+                    Err(Error::PatchNotFound(repo_root.to_str().unwrap().to_string(),
+                                             patch_hash.to_hex()))
                 }
             }
         }
     }
     // patch hash in binary
-    pub fn upload_patches(&mut self, local_patches:&Path, patch_hashes:&HashSet<Vec<u8>>)->Result<(),Error> {
+    pub fn upload_patches(&mut self, repo_root:&Path, patch_hashes:&HashSet<Vec<u8>>)->Result<(),Error> {
         match *self {
             Session::Ssh { ref mut session, ref path, .. }=> {
-                let remote_path=patches_dir(path);
+                let remote_path=path.to_str().unwrap().to_string()+"/"+PIJUL_DIR_NAME+"/"+PATCHES_DIR_NAME;
                 let mut scp=try!(session.scp_new(ssh::WRITE,&remote_path));
                 try!(scp.init());
                 for hash in patch_hashes {
-                    let remote_patch=remote_path.join(hash.to_hex()).with_extension("cbor");
-                    let local_patch=local_patches.join(hash.to_hex()).with_extension("cbor");
-                    let mut buf = Vec::new();
-                    {
-                        let mut f = try!(File::open(&local_patch));
-                        try!(f.read_to_end(&mut buf));
+                    debug!("repo_root: {:?},hash:{:?}",repo_root,hash.to_hex());
+                    if let Some(path)=patch_path(repo_root,hash) {
+                        let remote_file=remote_path.clone() + "/" + path.file_name().unwrap().to_str().unwrap();
+                        let mut buf = Vec::new();
+                        {
+                            let mut f = try!(File::open(&path));
+                            try!(f.read_to_end(&mut buf));
+                        }
+                        try!(scp.push_file(&remote_file,buf.len(),0o644));
+                        try!(scp.write(&buf));
+                    } else {
+                        return Err(Error::PatchNotFound(repo_root.to_str().unwrap().to_string(),hash.to_hex()))
                     }
-                    try!(scp.push_file(&remote_patch,buf.len(),0o644));
-                    try!(scp.write(&buf));
                 }
                 Ok(())
             },
             Session::Local{path} =>{
-                for patch_hash in patch_hashes {
-                    let hash=patch_hash.to_hex();
-                    let remote_file=patches_dir(path).join(&hash).with_extension("cbor");
-                    let local_file=local_patches.join(&hash).with_extension("cbor");
-                    if metadata(&remote_file).is_err() {
-                        try!(hard_link(&local_file,&remote_file).or_else(|_|{
-                            copy(&local_file, &remote_file).and_then(|_| Ok(()))
-                        }));
+                for hash in patch_hashes {
+                    if let Some(local_file)=patch_path(repo_root,hash) {
+                        let remote_file=patches_dir(path).join(local_file.file_name().unwrap());
+                        if metadata(&remote_file).is_err() {
+                            try!(hard_link(&local_file,&remote_file).or_else(|_|{
+                                copy(&local_file, &remote_file).and_then(|_| Ok(()))
+                            }))
+                        }
+                    } else {
+                        return Err(Error::PatchNotFound(repo_root.to_str().unwrap().to_string(),hash.to_hex()))
                     }
                 }
                 Ok(())
@@ -239,7 +247,8 @@ impl<'a> Session<'a> {
     /// Apply patches that have been uploaded.
     pub fn remote_apply(&mut self, patch_hashes:&HashSet<Vec<u8>>)->Result<(),Error> {
         match *self {
-            Session::Ssh { ref mut session, ref path, .. }=> {
+            Session::Ssh { ref mut session, ref path, ref id, .. }=> {
+                debug!("ssh: remote_apply");
                 let mut s=try!(session.channel_new());
                 try!(s.open_session());
                 let esc_path=escape(Cow::Borrowed(path.to_str().unwrap()));
@@ -247,14 +256,29 @@ impl<'a> Session<'a> {
                 for i in patch_hashes {
                     patches=patches + " " + &(i.to_hex());
                 }
-                try!(s.request_exec(format!("cd \"{}\"; pijul apply{}",esc_path, &patches).as_bytes()));
-                try!(s.send_eof());
-                let mut buf=Vec::new();
-                try!(s.stdout().read_to_end(&mut buf));
-                if buf.len() > 0 {
-                    println!("{}",from_utf8(&buf).unwrap());
+                if patches.len()>0 {
+                    let cmd=format!("cd \"{}\"; pijul apply{}",esc_path, &patches);
+                    debug!("command line:{:?}",cmd);
+                    try!(s.request_exec(cmd.as_bytes()));
                 }
-                Ok(())
+                try!(s.send_eof());
+                let exitcode=s.get_exit_status().unwrap();
+                if exitcode != 0 {
+                    let mut buf=Vec::new();
+                    try!(s.stdout().read_to_end(&mut buf));
+                    try!(s.stderr().read_to_end(&mut buf));
+                    let buf= unsafe { from_utf8_unchecked(&buf) }.to_string();
+                    return Err(Error::RemoteApplyFailed(id.to_string(),exitcode as i32,buf))
+                } else {
+                    let mut buf=Vec::new();
+                    try!(s.stdout().read_to_end(&mut buf));
+                    try!(s.stderr().read_to_end(&mut buf));
+                    let buf= unsafe { from_utf8_unchecked(&buf) }.to_string();
+                    if buf.len() > 0 {
+                        println!("{}",buf)
+                    }
+                    Ok(())
+                }
             },
             Session::Local{path} =>{
                 let applied_patches:HashSet<Vec<u8>>=try!(self.changes(DEFAULT_BRANCH.as_bytes()));
@@ -268,18 +292,27 @@ impl<'a> Session<'a> {
     }
     pub fn remote_init(&mut self)->Result<(),Error> {
         match *self {
-            Session::Ssh { ref mut session, ref path, .. }=> {
+            Session::Ssh { ref mut session, ref path, ref id, .. }=> {
                 let mut s=try!(session.channel_new());
                 try!(s.open_session());
                 let esc_path=escape(Cow::Borrowed(path.to_str().unwrap()));
                 try!(s.request_exec(format!("mkdir -p \"{}\"; cd \"{}\"; pijul init",esc_path,esc_path).as_bytes()));
                 try!(s.send_eof());
-                let mut buf=Vec::new();
-                try!(s.stdout().read_to_end(&mut buf));
-                if buf.len() > 0 {
-                    println!("{}",from_utf8(&buf).unwrap());
+                let exitcode=s.get_exit_status().unwrap();
+                if exitcode != 0 {
+                    let mut buf=String::new();
+                    try!(s.stdout().read_to_string(&mut buf));
+                    try!(s.stderr().read_to_string(&mut buf));
+                    return Err(Error::RemoteInitFailed(id.to_string(),exitcode as i32,buf))
+                } else {
+                    let mut buf=String::new();
+                    try!(s.stdout().read_to_string(&mut buf));
+                    try!(s.stderr().read_to_string(&mut buf));
+                    if buf.len() > 0 {
+                        println!("{}",buf);
+                    }
+                    Ok(())
                 }
-                Ok(())
             },
             Session::Local{path} =>{
                 try!(init::run(&init::Params { location:path, allow_nested:false }));
@@ -300,7 +333,7 @@ impl<'a> Session<'a> {
 
     pub fn pull(&mut self,target:&Path,pullable:&Pullable) -> Result<(), Error> {
         for i in pullable.iter() {
-            try!(self.download_patch(&patches_dir(target),i));
+            try!(self.download_patch(&target,i));
         }
         let repo_dir=pristine_dir(target);
         let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
@@ -324,7 +357,7 @@ impl<'a> Session<'a> {
     }
 
     pub fn push(&mut self, source:&Path,pushable:&HashSet<Vec<u8>>) -> Result<(), Error> {
-        try!(self.upload_patches(&patches_dir(source),pushable));
+        try!(self.upload_patches(source,pushable));
         try!(self.remote_apply(pushable));
         Ok(())
     }
@@ -341,19 +374,21 @@ impl <'a>Remote<'a> {
                 uri:uri,
                 client:hyper::Client::new()
             }),
-            Remote::Ssh{ref user,ref host,ref port,ref path}=>{
+            Remote::Ssh{ref user,ref host,ref port,ref path,ref id}=>{
                 let mut session = ssh::Session::new().unwrap();
                 session.set_host(host).unwrap();
                 match *port { None=>{}, Some(ref p)=>try!(session.set_port(*p as usize)) };
                 match *user { None=>{}, Some(ref u)=>try!(session.set_username(u)) };
                 session.parse_config(None).unwrap();
+                debug!("ssh: trying to connect");
                 try!(session.connect());
+                debug!("ssh: connected");
                 match try!(session.is_server_known()) {
                     ssh::ServerKnown::Known=> {
                         if session.userauth_publickey_auto(None).is_err() {
                             try!(session.userauth_kbdint(None))
                         }
-                        Ok(Session::Ssh { session:session, path:path })
+                        Ok(Session::Ssh { session:session, path:path, id:id })
                     },
                     other=>{Err(Error::SSHUnknownServer(other))}
                 }
@@ -390,7 +425,7 @@ pub fn parse_remote<'a>(remote_id:&'a str,port:Option<u64>,base_path:Option<&'a 
                 (None,user_host)
             }
         };
-        Remote::Ssh { user:user,host:host, port:port, path:Path::new(cap.at(2).unwrap()) }
+        Remote::Ssh { user:user,host:host, port:port, path:Path::new(cap.at(2).unwrap()),id:remote_id }
     } else {
         if let Some(a)=base_path {
             let path=a.join(remote_id);

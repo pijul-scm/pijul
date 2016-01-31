@@ -47,7 +47,6 @@ use self::contents::{LINE_ONSTACK, LINE_VISITED, DIRECTORY_FLAG};
 pub mod fs_representation;
 use self::fs_representation::*;
 
-
 //extern crate rustc_serialize;
 //use self::rustc_serialize::{Encodable,Decodable};
 extern crate rustc_serialize;
@@ -2134,14 +2133,11 @@ impl <'a> Repository<'a> {
             for i in local_patches.difference(&remote_patches) { only_local.insert(&i[..]); };
             only_local
         };
-        fn apply_patches<'a>(repo:&mut Repository<'a>, branch:&[u8], local_patches:&Path, patch_hash:&[u8], patches_were_applied:&mut bool, only_local:&HashSet<&[u8]>)->Result<(),Error>{
+        fn apply_patches<'a>(repo:&mut Repository<'a>, branch:&[u8], repo_root:&Path, patch_hash:&[u8], patches_were_applied:&mut bool, only_local:&HashSet<&[u8]>)->Result<(),Error>{
             if !try!(repo.has_patch(branch,patch_hash)) {
-                let local_patch=local_patches.join(patch_hash.to_hex()).with_extension("cbor");
-                debug!("local_patch={:?}",local_patch);
-                let mut buffer = BufReader::new(try!(File::open(&local_patch)));
-                let patch=try!(Patch::from_reader(&mut buffer,Some(&local_patch)));
+                let patch=try!(Patch::from_repository(repo_root,patch_hash));
                 for dep in patch.dependencies.iter() {
-                    try!(apply_patches(repo,branch,local_patches,&dep,patches_were_applied, only_local))
+                    try!(apply_patches(repo,branch,repo_root,&dep,patches_were_applied, only_local))
                 }
                 let mut internal=[0;HASH_SIZE];
                 repo.new_internal(&mut internal);
@@ -2155,7 +2151,6 @@ impl <'a> Repository<'a> {
                 Ok(())
             }
         }
-        let local_patches=patches_dir(r);
         let current_branch=self.get_current_branch().to_vec();
         let pending={
             let (changes,_)= try!(self.record(&r));
@@ -2165,7 +2160,7 @@ impl <'a> Repository<'a> {
         };
         let mut patches_were_applied=false;
         for p in pullable {
-            try!(apply_patches(self,&current_branch,&local_patches,p,&mut patches_were_applied,&only_local))
+            try!(apply_patches(self,&current_branch,&r,p,&mut patches_were_applied,&only_local))
         }
         debug!(target:"pull","patches applied? {}",patches_were_applied);
         if patches_were_applied {

@@ -48,9 +48,8 @@ use self::rustc_serialize::hex::ToHex;
 extern crate cbor;
 
 use std::collections::BTreeMap;
-
 use super::fs_representation::{patch_path};
-use std::process::Command;
+use std::process::{Command,Stdio};
 
 #[derive(Debug,Clone,PartialEq,RustcEncodable,RustcDecodable)]
 pub enum Value {
@@ -109,19 +108,28 @@ impl Patch {
     fn patch_from_file(p:&Path)->Result<Patch,Error> {
         match p.extension().and_then(|x| x.to_str()) {
             Some("gpg") => {
+                debug!("starting gpg");
                 let mut gpg=
                     try!(Command::new("gpg")
                          .arg("--yes")
+                         .arg("--status-fd").arg("2") // report error on stderr.
                          .arg("-d")
                          .arg(p)
+                         .stdout(Stdio::piped())
+                         .stderr(Stdio::piped())
                          .spawn());
+                debug!("gpg started");
+                let stat=try!(gpg.wait());
                 let stdout = gpg.stdout.take().unwrap();
                 let patch=try!(Patch::from_reader(stdout,Some(p)));
-                let stat=try!(gpg.wait());
+                debug!("gpg done");
                 if stat.success() {
                     Ok(patch)
                 } else {
-                    Err(Error::GPG(stat.code()))
+                    let mut stderr = gpg.stderr.take().unwrap();
+                    let mut buf=String::new();
+                    stderr.read_to_string(&mut buf);
+                    Err(Error::GPG(stat.code().unwrap(),buf))
                 }
             },
             Some("cbor") => {
