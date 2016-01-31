@@ -24,7 +24,7 @@ use clap::{SubCommand, ArgMatches,Arg};
 
 
 pub fn invocation() -> StaticSubcommand {
-    return 
+    return
         SubCommand::with_name("add")
         .about("add a file to the repository")
         .arg(Arg::with_name("files")

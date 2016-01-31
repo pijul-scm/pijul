@@ -43,6 +43,7 @@ pub enum Error{
     PatchNotFound(String,String),
     RemoteApplyFailed(String,i32,String),
     RemoteInitFailed(String,i32,String),
+    InvalidPath(String),
 }
 
 impl fmt::Display for Error {
@@ -64,6 +65,7 @@ impl fmt::Display for Error {
             Error::PatchNotFound(ref path,ref hash) => write!(f, "Patch {} not found in {}", hash, path),
             Error::RemoteApplyFailed(ref id,ref code,ref msg) => write!(f, "Remote apply to {} failed with code {} and message:\n{} ", id, code, msg),
             Error::RemoteInitFailed(ref id,ref code,ref msg) => write!(f, "Remote apply to {} failed with code {} and message:\n{} ", id, code, msg),
+            Error::InvalidPath(ref p) => write!(f, "Invalid path {}", p),
         }
     }
 }
@@ -87,6 +89,7 @@ impl error::Error for Error {
             Error::PatchNotFound(_,_) => "Patch not found",
             Error::RemoteApplyFailed(_,_,_) => "Remote apply failed",
             Error::RemoteInitFailed(_,_,_) => "Remote init failed",
+            Error::InvalidPath(_) => "Invalid path",
         }
     }
 
@@ -108,6 +111,7 @@ impl error::Error for Error {
             Error::PatchNotFound(_,_) => None,
             Error::RemoteApplyFailed(_,_,_) => None,
             Error::RemoteInitFailed(_,_,_) => None,
+            Error::InvalidPath(_) => None,
         }
     }
 }

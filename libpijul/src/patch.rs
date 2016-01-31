@@ -128,7 +128,7 @@ impl Patch {
                 } else {
                     let mut stderr = gpg.stderr.take().unwrap();
                     let mut buf=String::new();
-                    stderr.read_to_string(&mut buf);
+                    try!(stderr.read_to_string(&mut buf));
                     Err(Error::GPG(stat.code().unwrap(),buf))
                 }
             },
