@@ -1,11 +1,29 @@
-/// This module defines the data structures representing contents of a
-/// pijul repository at any point in time. It is a Graph of Lines.
-/// Each Line corresponds to either a bit of contents of a file, or a
-/// bit of information about fs layout within the working directory
-/// (files and directories).
-///
-/// Lines are organised in a Graph, which encodes which line belongs to what
-/// file, in what order they appear, and any conflict.
+/*
+  Copyright Florent Becker and Pierre-Etienne Meunier 2015.
+
+  This file is part of Pijul.
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU Affero General Public License for more details.
+
+  You should have received a copy of the GNU Affero General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+//! This module defines the data structures representing contents of a
+//! pijul repository at any point in time. It is a Graph of Lines.
+//! Each Line corresponds to either a bit of contents of a file, or a
+//! bit of information about fs layout within the working directory
+//! (files and directories).
+//!
+//! Lines are organised in a Graph, which encodes which line belongs to what
+//! file, in what order they appear, and any conflict.
 
 extern crate libc;
 use self::libc::{c_uchar};
@@ -66,11 +84,11 @@ pub struct Line<'a> {
                  /// guaranteed to be universally unique if the line
                  /// appears in a commit, and locally unique
                  /// otherwise.
-    
+
     pub flags:u8,    /// The status of the line with respect to a dfs of
                  /// a graph it appears in. This is 0 or
                  /// LINE_HALF_DELETED unless some dfs is being run.
-    
+
     pub children:usize,
     pub n_children:usize,
     pub index:usize,

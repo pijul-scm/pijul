@@ -234,7 +234,11 @@ impl <'a> Repository<'a> {
         }
     }
 
-
+    pub fn commit(mut self)->Result<(),Error> {
+        unsafe {
+            Ok(try!(self.txn.unsafe_commit()))
+        }
+    }
 
     fn create_new_inode(& self,buf: &mut [u8]) {
         let curs_revtree=self.txn.cursor(self.dbi_revtree).unwrap();

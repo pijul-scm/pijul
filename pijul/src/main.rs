@@ -59,7 +59,7 @@ fn main() {
         pijul =>
             (version: &version[..])
             (author: "Pierre-Étienne Meunier and Florent Becker")
-            (about: "Version Control: performant, distributed, easy to use; pick any three")
+            (about: "Version Control: fast, distributed, easy to use; pick any three")
             );
     let app = app.subcommands(commands::all_command_invocations());
 

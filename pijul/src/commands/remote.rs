@@ -286,6 +286,7 @@ impl<'a> Session<'a> {
                 let repo_dir=pristine_dir(path);
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 try!(repo.apply_patches(path,&patch_hashes,&applied_patches));
+                try!(repo.commit());
                 Ok(())
             }
             _=>{panic!("remote apply not possible")}
@@ -339,6 +340,7 @@ impl<'a> Session<'a> {
         let repo_dir=pristine_dir(target);
         let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
         try!(repo.apply_patches(target,&pullable.remote,&pullable.local));
+        try!(repo.commit());
         Ok(())
     }
 

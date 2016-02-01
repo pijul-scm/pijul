@@ -21,11 +21,7 @@ pub struct LmdbRepository<'a> {
 impl <'a>Drop for LmdbRepository<'a> {
     fn drop(& mut self){
         unsafe {
-            if std::thread::panicking() {
-                self.txn.unsafe_abort()
-            } else {
-                self.txn.unsafe_commit().unwrap()
-            }
+            self.txn.unsafe_abort()
         }
     }
 }
@@ -36,9 +32,4 @@ impl <'a> LmdbRepository<'a> {
     {
         self.txn.get(self.dbi_tree, &(inode.inode_contents))
     }
-
-    
 }
-
-
-    

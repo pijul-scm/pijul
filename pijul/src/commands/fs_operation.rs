@@ -121,6 +121,7 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                     }
                 }
             }
+            try!(repo.commit());
             Ok(Some(()))
         }
     }

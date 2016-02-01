@@ -85,6 +85,7 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
             let repo_dir=pristine_dir(target);
             let mut repo = try!(Repository::new(&repo_dir));
             try!(repo.apply_patches(target,&remote,&local));
+            try!(repo.commit());
             Ok(Some(()))
         }
     }

@@ -144,7 +144,6 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 }
                 try!(meta.save(r));
             }
-
             Ok(())
         }
     }

@@ -1,8 +1,12 @@
 [package]
 name = "pijul"
+description = "A patch-based distributed version control system, easy to use and fast. Command-line interface."
 version = "0.1.0"
 authors = ["Pierre-Étienne Meunier","Florent Becker"]
 license = "AGPL-3.0"
+homepage = "https://pijul.org/"
+documentation = "https://pijul.org/doc/libpijul/index.html"
+
 
 [dependencies]
 clap = "1.5"

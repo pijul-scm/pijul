@@ -164,6 +164,7 @@ pub fn run(args : &Params) -> Result<Option<()>, Error> {
                 // save patch
                 let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
                 let () = try!(repo.apply_local_patch(r, patch, &syncs).map_err(Error::Repository));
+                try!(repo.commit());
                 Ok(Some(()))
             }
         }

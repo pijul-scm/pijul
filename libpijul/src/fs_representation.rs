@@ -16,6 +16,11 @@
   You should have received a copy of the GNU Affero General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+//! Layout of a repository (files in `.pijul`) on the disk. This
+//! module exports both high-level functions that require no knowledge
+//! of the repository, and lower-level constants documented on
+//! [pijul.org/documentation/repository](https://pijul.org/documentation/repository),
+//! used for instance for downloading files from remote repositories.
 
 use std::path::{Path,PathBuf,MAIN_SEPARATOR};
 use std::fs::{metadata,create_dir_all};
