@@ -2693,7 +2693,7 @@ impl <'a> Repository<'a> {
         w.write(b"}\n").unwrap();
     }
 }
-
+/*
 fn dump_table(txn:&lmdb::Txn,dbi:lmdb::Dbi){
     println!("dumping table");
     unsafe {
@@ -2707,6 +2707,8 @@ fn dump_table(txn:&lmdb::Txn,dbi:lmdb::Dbi){
     }
     println!("/dumping table");
 }
+ */
+
 impl<'a, 'b> RepositoryT<'b> for Repository<'a>{
 
     type Error = Error;
