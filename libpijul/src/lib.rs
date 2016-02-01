@@ -16,6 +16,8 @@
   You should have received a copy of the GNU Affero General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+//! This crate implements operations on Pijul repositories.
+
 extern crate libc;
 extern crate time;
 #[macro_use]
