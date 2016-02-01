@@ -2559,14 +2559,6 @@ impl <'a> Repository<'a> {
         Ok(())
     }
 
-
-
-    pub fn retrieve_and_output<L:LineBuffer<'a>>(&'a self,key:&'a [u8],l:&mut L) {
-        let mut redundant_edges=vec!();
-        let graph=self.retrieve(key).unwrap();
-        self.output_file(l,graph,&mut redundant_edges);
-    }
-
     /// Apply a patch from a local record: register it, give it a hash, and then apply.
     pub fn apply_local_patch(&mut self, location: &Path, patch: Patch, inode_updates:&HashMap<LocalKey,OwnedInode>)
                            -> Result<(), Error>{
