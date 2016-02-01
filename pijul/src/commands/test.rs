@@ -97,7 +97,7 @@ fn add_remove_nothing_to_record() {
         Some (()) => (),
         None => panic!("no file removed")
     };
-
+    
     let record_params = record::Params { repository : Some(&dir.path()),
                                          yes_to_all : true,
                                          authors : Some(vec![]),

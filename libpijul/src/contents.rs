@@ -10,13 +10,49 @@
 extern crate libc;
 use self::libc::{c_uchar};
 
+extern crate rustc_serialize;
+use rustc_serialize::hex::ToHex;
+
 pub const PSEUDO_EDGE:u8=1;
 pub const FOLDER_EDGE:u8=2;
 pub const PARENT_EDGE:u8=4;
 pub const DELETED_EDGE:u8=8;
 
+pub const INODE_SIZE:usize=16;
+
+
 /// An Inode is a handle to a file; it is attached to a Line.
-pub type Inode=Vec<u8>;
+#[derive(Copy, Clone)]
+pub struct Inode<'a> {pub inode_contents : &'a[u8]} // TODO: [u8; INODE_SIZE]
+pub struct OwnedInode {pub inode_contents : Vec<u8>}
+
+pub const ROOT_INODE : [u8;INODE_SIZE] = [0;INODE_SIZE];
+
+impl<'a> Inode<'a> {
+    pub fn from_slice(v: &'a [u8]) -> Self {
+        Inode {inode_contents : v}
+    }
+
+    pub fn to_hex(&self) -> String {
+        self.inode_contents.to_hex()
+    }
+
+    pub fn from_owned(o : &'a OwnedInode) -> Self {
+        Inode { inode_contents : &(o.inode_contents) }
+    }
+}
+
+impl OwnedInode {
+    pub fn from_inode(i: Inode) -> Self {
+        OwnedInode {inode_contents : i.inode_contents.to_vec() }
+    }
+
+    pub fn root() -> Self {
+        OwnedInode {inode_contents : vec![0;INODE_SIZE]}
+    }
+
+}
+
 pub const DIRECTORY_FLAG:usize = 0x200;
 
 pub const LINE_HALF_DELETED:c_uchar=4;

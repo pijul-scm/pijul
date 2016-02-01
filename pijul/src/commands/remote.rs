@@ -30,6 +30,7 @@ use std::fs::{File,hard_link,copy,metadata};
 use super::error::Error;
 use std::str::{from_utf8,from_utf8_unchecked};
 extern crate ssh;
+use self::ssh::Channel;
 use std::io::prelude::*;
 extern crate regex;
 use self::regex::Regex;
@@ -249,7 +250,7 @@ impl<'a> Session<'a> {
         match *self {
             Session::Ssh { ref mut session, ref path, ref id, .. }=> {
                 debug!("ssh: remote_apply");
-                let mut s=try!(session.channel_new());
+                let mut s  =try!(session.channel_new());
                 try!(s.open_session());
                 let esc_path=escape(Cow::Borrowed(path.to_str().unwrap()));
                 let mut patches="".to_string();
@@ -293,7 +294,7 @@ impl<'a> Session<'a> {
     pub fn remote_init(&mut self)->Result<(),Error> {
         match *self {
             Session::Ssh { ref mut session, ref path, ref id, .. }=> {
-                let mut s=try!(session.channel_new());
+                let mut s : Channel =try!(session.channel_new());
                 try!(s.open_session());
                 let esc_path=escape(Cow::Borrowed(path.to_str().unwrap()));
                 try!(s.request_exec(format!("mkdir -p \"{}\"; cd \"{}\"; pijul init",esc_path,esc_path).as_bytes()));
