@@ -141,7 +141,7 @@ fn add_record_pull() {
                                    touched_files : vec![&fpath] };
     match add::run(&add_params).unwrap() {
         Some (()) => (),
-        None => panic!("no file added")        
+        None => panic!("no file added")
     };
     let record_params = record::Params { repository : Some(&dir_a),
                                          yes_to_all : true,
@@ -153,8 +153,9 @@ fn add_record_pull() {
         Some(()) => ()
     }
     let pull_params = pull::Params { repository : Some(&dir_b),
-                                     remote_id : "test_repository_a",
-                                     remote : remote::Remote::Local{ path: &dir_a},
+                                     remote_id : Some("test_repository_a"),
+                                     set_default : false,
+                                     port : None,
                                      yes_to_all : true };
     pull::run(&pull_params).unwrap();
     let fpath_b = &dir_b.join("toto");
