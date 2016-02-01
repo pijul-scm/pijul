@@ -153,7 +153,7 @@ fn add_record_pull() {
         Some(()) => ()
     }
     let pull_params = pull::Params { repository : Some(&dir_b),
-                                     remote_id : Some("test_repository_a"),
+                                     remote_id : Some(dir_a.to_str().unwrap()),
                                      set_default : false,
                                      port : None,
                                      yes_to_all : true };
