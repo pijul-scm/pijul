@@ -2285,6 +2285,33 @@ impl <'a> Repository<'a> {
         true
     }
 
+    pub fn retrieve_paths<'b>(&'b self, key:&[u8], flag:u8) -> Result<Vec<(usize,&'b [u8],&'b[u8])>,Error> {
+        let mut result=Vec::new();
+        let mut curs_b= unsafe { &mut *self.txn.unsafe_cursor(self.dbi_nodes).unwrap()};
+        for b in CursIter::new(curs_b,key,flag,true,true) {
+            debug!(target:"retrieve_paths","b={:?}",b.to_hex());
+            let cont_b=
+                match try!(self.txn.get(self.dbi_contents,&b[1..(1+KEY_SIZE)])) {
+                    Some(cont_b)=>cont_b,
+                    None=>&[][..]
+                };
+            if cont_b.len()<2 {
+                //panic!("node (b) too short")
+            } else {
+                let filename=&cont_b[2..];
+                let perms= ((cont_b[0] as usize) << 8) | (cont_b[1] as usize);
+                let mut curs_c= unsafe { &mut *self.txn.unsafe_cursor(self.dbi_nodes).unwrap()};
+                for c in CursIter::new(curs_c,&b[1..(1+KEY_SIZE)],flag,true,true) {
+                    debug!(target:"retrieve_paths","c={:?}",c.to_hex());
+                    let cv=&c[1..(1+KEY_SIZE)];
+
+                    result.push((perms,filename,cv))
+                }
+            }
+        }
+        Ok(result)
+    }
+
     /// Returns the path's inode
     pub fn follow_path<'b>(&'b self, path:&[&[u8]])->Result<Option<Vec<u8>>,Error> {
         // follow in tree, return inode
@@ -2557,6 +2584,14 @@ impl <'a> Repository<'a> {
             }
         }
         Ok(())
+    }
+
+
+
+    pub fn retrieve_and_output<L:LineBuffer<'a>>(&'a self,key:&'a [u8],l:&mut L) {
+        let mut redundant_edges=vec!();
+        let graph=self.retrieve(key).unwrap();
+        self.output_file(l,graph,&mut redundant_edges);
     }
 
     /// Apply a patch from a local record: register it, give it a hash, and then apply.
