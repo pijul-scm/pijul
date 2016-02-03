@@ -2362,6 +2362,8 @@ impl <'a> Repository<'a> {
                       curs_c:*mut lmdb::MdbCursor)->Result<(),Error>{
             debug!(target:"output_repository","visited {}",key.to_hex());
             moves.clear();
+            debug_assert!(inode.len()==INODE_SIZE);
+            debug_assert!(key.len()==KEY_SIZE);
             let mut recursive_calls=Vec::new();
             let mut new_inodes:HashMap<Vec<u8>,(usize,&[u8])>=HashMap::new();
             // This function is globally a DFS, but has two phases,
