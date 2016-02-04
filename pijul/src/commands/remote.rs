@@ -45,6 +45,8 @@ use std::collections::hash_set::Iter;
 use std::fmt::Debug;
 extern crate hyper;
 
+const HTTP_MAX_ATTEMPTS:usize=3;
+
 #[derive(Debug)]
 pub enum Remote<'a> {
     Ssh { user:Option<&'a str>, host:&'a str, port:Option<u64>, path:&'a Path, id:&'a str },
@@ -184,16 +186,28 @@ impl<'a> Session<'a> {
                             patches_dir(repo_root).join(remote_path.file_name().unwrap())
                         };
                         let uri = uri.to_string() + "/" + &remote_file;
-                        if let Ok(mut res)=client.get(&uri)
-                            .header(hyper::header::Connection::close())
-                            .send() {
-                                let mut body=Vec::new();
-                                try!(res.read_to_end(&mut body));
-                                let mut f=try!(File::create(&local_file));
-                                try!(f.write_all(&body));
-                                debug!("patch downloaded through http: {:?}",body);
-                                return Ok(local_file)
+                        debug!("downloading uri {:?}",uri);
+                        let mut attempts=0;
+                        while attempts<HTTP_MAX_ATTEMPTS {
+                            match client.get(&uri).header(hyper::header::Connection::close()).send() {
+                                Ok(ref mut res) if res.status==hyper::status::StatusCode::Ok => {
+                                    debug!("response={:?}",res);
+                                    let mut body=Vec::new();
+                                    try!(res.read_to_end(&mut body));
+                                    let mut f=try!(File::create(&local_file));
+                                    try!(f.write_all(&body));
+                                    debug!("patch downloaded through http: {:?}",body);
+                                    return Ok(local_file)
+                                },
+                                Ok(_) => {
+                                    break
+                                },
+                                Err(e)=>{
+                                    debug!("error downloading : {:?}",e);
+                                    attempts+=1;
+                                }
                             }
+                        }
                     }
                     Err(Error::PatchNotFound(repo_root.to_str().unwrap().to_string(),
                                              patch_hash.to_hex()))
