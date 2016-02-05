@@ -90,18 +90,36 @@ enum Tree {
 /// The name of the default branch, "main".
 pub const DEFAULT_BRANCH:&'static str="main";
 
-#[derive(Copy, Clone)]
-pub struct InternalKey<'a> {
-    pub contents : &'a[u8]
+pub struct InternalKey {
+    pub contents : [u8;HASH_SIZE]
 }
 
-impl <'a> InternalKey<'a> {
-    pub fn new(b : &'a[u8]) -> Self {
-        InternalKey { contents : b}
+impl InternalKey {
+    pub fn zero() -> Self {
+        InternalKey {contents : [0;HASH_SIZE]}
     }
-
+    
     pub fn to_hex(&self) -> String {
         self.contents.to_hex()
+    }
+
+    pub fn from_array(b: [u8;HASH_SIZE]) -> Self {
+        unsafe { std::mem::transmute(b) }
+    }
+    
+    pub fn from_slice(b: &[u8]) -> &Self {
+        if b.len () >= HASH_SIZE
+        {
+            unsafe {
+                {
+                    std::mem::transmute(b.as_ptr())
+                }
+            }
+        }
+        else
+        {
+            panic!("Invalid internal key pointer")
+        }
     }
 }
 
@@ -257,7 +275,7 @@ impl <'a> Repository<'a> {
     }
 
     fn add_inode(&mut self, inode:&Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error>{
-        let mut buf = vec![0;INODE_SIZE]; //:Inode = contents::root_inode(); // Inode { vec![0;INODE_SIZE] };
+        let mut buf = vec![0;INODE_SIZE];
         let mut components=path.components();
         let mut cs=components.next();
         while let Some(s)=cs { // need to peek at the next element, so no for.
@@ -316,7 +334,7 @@ impl <'a> Repository<'a> {
         let inode= &mut (Vec::new());
         let parent= &mut (Vec::new());
 
-        (*inode).extend_from_slice(&ROOT_INODE);
+        inode.extend_from_slice(&ROOT_INODE);
         for c in path.components() {
             inode.truncate(INODE_SIZE);
             inode.extend(c.as_os_str().to_str().unwrap().as_bytes());
@@ -357,6 +375,7 @@ impl <'a> Repository<'a> {
         };
         Ok(())
     }
+
     pub fn remove_file(&mut self, path:&std::path::Path) -> Result<(), Error>{
         let mut inode=Vec::new();
         inode.extend_from_slice(&ROOT_INODE);
@@ -888,6 +907,7 @@ impl <'a> Repository<'a> {
         }
         debug!(target:"conflict","/output_file");
     }
+
     fn remove_redundant_edges(&mut self,forward:&mut Vec<u8>) {
         let mut i=0;
         let cursor=unsafe { self.txn.unsafe_cursor(self.dbi_nodes).unwrap() };
@@ -951,36 +971,21 @@ impl <'a> Repository<'a> {
     }
 
 
-    pub fn internal_hash<'b>(&'b self,key:&[u8])->Result<InternalKey<'b>,Error> {
+    pub fn internal_hash<'b>(&'b self,key:&[u8])->Result<&'b InternalKey,Error> {
         debug!("internal_hash: {}, {}",key.to_hex(), key.len());
         if key.len()==HASH_SIZE
             && unsafe { memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t) }==0 {
-                Ok(InternalKey::new(ROOT_KEY))
+                Ok(InternalKey::from_slice(&ROOT_KEY))
             } else {
                 match try!(self.txn.get(self.dbi_internal,key)) {
-                    Some(k)=>Ok(InternalKey::new(k)),
+                    Some(k)=>Ok(InternalKey::from_slice(&k)),
                     None=>Err(Error::InternalHashNotFound(key.to_vec()))
                 }
             }
     }
-    /*
-    fn internal_key(&'a self,key:&[u8],internal_patch_id:&[u8],result:&mut [u8])->Result<(),Error> {
-        debug_assert!(result.len()>=KEY_SIZE);
-        let inter=
-            if key.len() == LINE_SIZE { internal_patch_id } else {
-                try!(self.internal_hash(&key[0..(key.len()-LINE_SIZE)]))
-            };
-        unsafe {
-            copy_nonoverlapping(inter.as_ptr(),result.as_mut_ptr(),HASH_SIZE);
-            copy_nonoverlapping(key.as_ptr().offset((key.len()-LINE_SIZE) as isize),
-                                result.as_mut_ptr().offset(HASH_SIZE as isize),
-                                LINE_SIZE)
-        }
-        Ok(())
-    }
-     */
+
     /// "intro" is the internal patch number of the patch that introduced this edge.
-    fn internal_edge(&'a self,flag:u8,to:&[u8],intro:InternalKey,result:&mut [u8])->Result<(),Error> {
+    fn internal_edge(&'a self,flag:u8,to:&[u8],intro:&InternalKey,result:&mut [u8])->Result<(),Error> {
         debug_assert!(result.len()>=1+KEY_SIZE+HASH_SIZE);
         debug_assert!(intro.contents.len() == HASH_SIZE);
         result[0]=flag;
@@ -994,6 +999,7 @@ impl <'a> Repository<'a> {
         }
         Ok(())
     }
+
     /// Create a new internal patch id, register it in the "external" and
     /// "internal" bases, and write the result in its second argument
     /// ("result").
@@ -1002,42 +1008,44 @@ impl <'a> Repository<'a> {
     /// and returns the last registered patch number, plus one (in big
     /// endian binary on HASH_SIZE bytes). Otherwise, it returns a
     /// random patch number not yet registered.
-    pub fn new_internal(&mut self,result:&mut[u8]) {
-
+    pub fn new_internal(&mut self) -> InternalKey {
+        let mut result = InternalKey::zero();
         if cfg!(debug_assertions){
             let curs=self.txn.cursor(self.dbi_external).unwrap();
             if let Ok((k,_))=curs.get(b"",None,lmdb::Op::MDB_LAST) {
-                unsafe { copy_nonoverlapping(k.as_ptr() as *const c_void,result.as_mut_ptr() as *mut c_void, HASH_SIZE) }
+                unsafe { copy_nonoverlapping(k.as_ptr() as *const c_void,
+                                             (&mut result.contents).as_mut_ptr() as *mut c_void, HASH_SIZE) }
             } else {
-                for i in 0..HASH_SIZE { result[i]=0 }
+                for i in 0..HASH_SIZE { result.contents[i]=0 }
             };
             let mut i=HASH_SIZE-1;
-            while i>0 && result[i]==0xff {
-                result[i]=0;
+            while i>0 && result.contents[i]==0xff {
+                result.contents[i]=0;
                 i-=1
             }
-            if result[i] != 0xff {
-                result[i]+=1
+            if result.contents[i] != 0xff {
+                result.contents[i]+=1
             } else {
                 panic!("the last patch in the universe has arrived")
             }
         } else {
-            for i in 0..result.len() { result[i]=rand::random() }
+            for i in 0..result.contents.len() { result.contents[i]=rand::random() }
             loop {
-                match self.txn.get(self.dbi_external,&result) {
+                match self.txn.get(self.dbi_external,&result.contents) {
                     Ok(None)=>break,
-                    Ok(_)=>{for i in 0..result.len() { result[i]=rand::random() }},
+                    Ok(_)=>{for i in 0..result.contents.len() { result.contents[i]=rand::random() }},
                     Err(_)=>panic!("")
                 }
             }
         }
+        result
     }
 
-    pub fn register_hash(&mut self,internal:InternalKey,external:&[u8]){
+    pub fn register_hash(&mut self,internal:&InternalKey,external:&[u8]){
         debug!(target:"apply","registering patch\n  {}\n  as\n  {}",
                external.to_hex(),internal.to_hex());
-        self.txn.put(self.dbi_external,internal.contents,external,0).unwrap();
-        self.txn.put(self.dbi_internal,external,internal.contents,0).unwrap();
+        self.txn.put(self.dbi_external,&internal.contents,external,0).unwrap();
+        self.txn.put(self.dbi_internal,external,&internal.contents,0).unwrap();
     }
 
 
@@ -1509,7 +1517,7 @@ impl <'a> Repository<'a> {
     }
 
     /// Test whether a node has edges unknown to the patch we're applying.
-    fn has_exclusive_edge(&self,cursor:&mut lmdb::MdbCursor,internal_patch_id:InternalKey,key:&[u8],flag0:u8,include_folder:bool,include_pseudo:bool,dependencies:&HashSet<Vec<u8>>)->bool {
+    fn has_exclusive_edge(&self,cursor:&mut lmdb::MdbCursor,internal_patch_id:&InternalKey,key:&[u8],flag0:u8,include_folder:bool,include_pseudo:bool,dependencies:&HashSet<Vec<u8>>)->bool {
         for neighbor in CursIter::new(cursor,&key[1..(1+KEY_SIZE)],flag0,include_folder,include_pseudo) {
             if unsafe {
                 memcmp(neighbor.as_ptr().offset(1+KEY_SIZE as isize) as *const c_void,
@@ -1532,7 +1540,7 @@ impl <'a> Repository<'a> {
     }
 
 
-    fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:InternalKey,dependencies:&HashSet<Vec<u8>>)->Result<(),Error>{
+    fn unsafe_apply(&mut self,changes:&[Change], internal_patch_id:& InternalKey,dependencies:&HashSet<Vec<u8>>)->Result<(),Error>{
         debug!(target:"conflictdiff","unsafe_apply");
         let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
         let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
@@ -1551,7 +1559,7 @@ impl <'a> Repository<'a> {
                         //debug!(target:"conflictdiff","e:{:?}",e);
                         {
                             let p= try!(self.internal_hash(&e.introduced_by));
-                            try!(self.internal_edge(*flag^DELETED_EDGE^PARENT_EDGE,&e.from,p,&mut pu));
+                            try!(self.internal_edge(*flag^DELETED_EDGE^PARENT_EDGE,&e.from,&p,&mut pu));
                             try!(self.internal_edge(*flag^DELETED_EDGE,&e.to,p,&mut pv));
                             debug!(target:"exclusive","pu={}\npv={}",pu.to_hex(),pv.to_hex());
                         }
@@ -1752,7 +1760,7 @@ impl <'a> Repository<'a> {
             match self.internal_hash(hash) {
                 Ok(internal)=>{
                     let curs=try!(self.txn.cursor(self.dbi_branches));
-                    match curs.get(branch,Some(internal.contents),lmdb::Op::MDB_GET_BOTH) {
+                    match curs.get(branch,Some(&internal.contents),lmdb::Op::MDB_GET_BOTH) {
                         Ok(_)=>Ok(true),
                         Err(_)=>Ok(false)
                     }
@@ -1833,17 +1841,17 @@ impl <'a> Repository<'a> {
     }
 
     /// Applies a patch to a repository. "new_patches" are patches that just this repository has, and the remote repository doesn't have.
-    pub fn apply<'b>(&mut self, patch:&Patch, internal: InternalKey<'b>, new_patches:&HashSet<&[u8]>)->Result<(),Error> {
+    pub fn apply<'b>(&mut self, patch:&Patch, internal: &'b InternalKey, new_patches:&HashSet<&[u8]>)->Result<(),Error> {
         let current=self.get_current_branch().to_vec();
         {
             let curs=self.txn.cursor(self.dbi_branches).unwrap();
-            match curs.get(&current,Some(internal.contents),lmdb::Op::MDB_GET_BOTH) {
+            match curs.get(&current,Some(&(internal.contents)),lmdb::Op::MDB_GET_BOTH) {
                 Ok(_)=>return Err(Error::AlreadyApplied),
                 Err(_)=>{}
             }
         }
         self.txn.put(self.dbi_branches,&current,&(internal.contents),lmdb::MDB_NODUPDATA).unwrap();
-        try!(self.unsafe_apply(&patch.changes,InternalKey::new(internal.contents),&patch.dependencies));
+        try!(self.unsafe_apply(&patch.changes,&internal,&patch.dependencies));
         let cursor= unsafe {&mut *self.txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         let cursor_= unsafe {&mut *self.txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         {
@@ -1852,7 +1860,7 @@ impl <'a> Repository<'a> {
             let mut repair_missing_context= |repo:&mut Repository,direction_up:bool,c:&[u8] | {
                 let mut context:[u8;KEY_SIZE]=[0;KEY_SIZE];
                 unsafe {
-                    let u : InternalKey = if c.len()>LINE_SIZE {
+                    let u : &InternalKey = if c.len()>LINE_SIZE {
                         repo.internal_hash(&c[0..(c.len()-LINE_SIZE)]).unwrap()
                     } else {
                         internal // as &[u8]
@@ -1961,7 +1969,7 @@ impl <'a> Repository<'a> {
         let time2=time::precise_time_s();
         for ref dep in patch.dependencies.iter() {
             let dep_internal=try!(self.internal_hash(&dep)).contents.to_vec();
-            self.txn.put(self.dbi_revdep,&dep_internal,internal.contents,0).unwrap();
+            self.txn.put(self.dbi_revdep,&dep_internal,&internal.contents,0).unwrap();
         }
         let time3=time::precise_time_s();
         info!(target:"libpijul","deps took: {}", time3-time2);
@@ -1969,7 +1977,7 @@ impl <'a> Repository<'a> {
     }
 
 
-    fn find_alive_relatives(&self, a:&[u8], direction:u8, patch_id:InternalKey, new_patches:&HashSet<&[u8]>,
+    fn find_alive_relatives(&self, a:&[u8], direction:u8, patch_id:&InternalKey, new_patches:&HashSet<&[u8]>,
                             relatives:&mut Vec<u8>) {
         let cursor= unsafe { &mut * self.txn.unsafe_cursor(self.dbi_nodes).unwrap() };
         fn connect(repo:&Repository,
@@ -1978,7 +1986,7 @@ impl <'a> Repository<'a> {
                    direction:u8,
                    result:&mut Vec<u8>,
                    //buffer:&mut Vec<u8>,
-                   patch_id:InternalKey,
+                   patch_id:&InternalKey,
                    new_patches:&HashSet<&[u8]>) {
             // different from root
             if unsafe { memcmp(ROOT_KEY.as_ptr()as *const c_void,a.as_ptr() as *const c_void,KEY_SIZE as size_t)!=0} {
@@ -1998,11 +2006,11 @@ impl <'a> Repository<'a> {
                     if is_new {
                         result.push((neighbor[0]^PARENT_EDGE)^DELETED_EDGE);
                         result.extend(a);
-                        result.extend(patch_id.contents);
+                        result.extend(&patch_id.contents);
 
                         result.push(neighbor[0]^DELETED_EDGE);
                         result.extend(&neighbor[1..(1+KEY_SIZE)]);
-                        result.extend(patch_id.contents);
+                        result.extend(&patch_id.contents);
                     }
                 }
                 let j=result.len();
@@ -2030,11 +2038,11 @@ impl <'a> Repository<'a> {
     }
 
 
-    fn reconnect_zombie_folder(&mut self, a:&[u8], patch_id: InternalKey)->Result<(),Error> {
+    fn reconnect_zombie_folder(&mut self, a:&[u8], patch_id: &InternalKey)->Result<(),Error> {
         fn connect(repo:&Repository,
                    cursor:&mut lmdb::MdbCursor,
                    a:&[u8],
-                   patch_id:InternalKey,
+                   patch_id:&InternalKey,
                    edges:&mut Vec<u8>) {
             debug!(target:"missing context","connect zombie: {} {}",a.to_hex(),
                    has_edge(cursor,&a,PARENT_EDGE|FOLDER_EDGE,true,false));
@@ -2046,10 +2054,10 @@ impl <'a> Repository<'a> {
                     debug!(target:"missing context","pushing {}",neighbor.to_hex());
                     edges.push(FOLDER_EDGE);
                     edges.extend(a);
-                    edges.extend(patch_id.contents);
+                    edges.extend(&patch_id.contents);
                     edges.push(PARENT_EDGE|FOLDER_EDGE);
                     edges.extend(&neighbor[1..(1+KEY_SIZE)]);
-                    edges.extend(patch_id.contents);
+                    edges.extend(&patch_id.contents);
                 }
                 let mut j=i;
                 let l=edges.len();
@@ -2101,7 +2109,7 @@ impl <'a> Repository<'a> {
     }
 
 
-    pub fn sync_file_additions(&mut self, changes:&[Change], updates:&HashMap<LocalKey,OwnedInode>, internal_patch_id:InternalKey){
+    pub fn sync_file_additions(&mut self, changes:&[Change], updates:&HashMap<LocalKey,OwnedInode>, internal_patch_id:&InternalKey){
         let mut node=[0;3+KEY_SIZE];
         let mut node_=[0;3+KEY_SIZE];
         let mut inode=[0;INODE_SIZE];
@@ -2211,14 +2219,12 @@ impl <'a> Repository<'a> {
                 for dep in patch.dependencies.iter() {
                     try!(apply_patches(repo,branch,repo_root,&dep,patches_were_applied, only_local))
                 }
-                let mut internal=[0;HASH_SIZE];
-                repo.new_internal(&mut internal);
-                let internal = InternalKey::new(&internal);
+                let internal = repo.new_internal();
                 //println!("pulling and applying patch {}",to_hex(patch_hash));
-                try!(repo.apply(&patch, internal,only_local));
+                try!(repo.apply(&patch, &internal,only_local));
                 *patches_were_applied=true;
                 //repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);
-                repo.register_hash(internal,patch_hash);
+                repo.register_hash(&internal,patch_hash);
                 Ok(())
             } else {
                 Ok(())
@@ -2612,9 +2618,7 @@ impl <'a> Repository<'a> {
         });
 
         let t0 = time::precise_time_s();
-        let mut internal = [0_u8;HASH_SIZE];
-        self.new_internal(&mut internal);
-        let internal = InternalKey::new( &internal );
+        let internal : &InternalKey = &self.new_internal();// InternalKey::new( &internal );
         debug!(target:"pijul", "applying patch");
         try!(self.apply(&patch, internal, &HashSet::new()));
         debug!(target:"pijul", "synchronizing tree");
@@ -2671,7 +2675,6 @@ impl <'a> Repository<'a> {
         try!(self.unsafe_output_repository(working_copy,false));
         // Then, apply pending and output in an aborted transaction.
         unsafe {
-            let mut internal=[0;HASH_SIZE];
             let parent_txn=self.txn.txn;
             let txn=ptr::null_mut();
 
@@ -2680,10 +2683,9 @@ impl <'a> Repository<'a> {
                 return Err(Error::IO(std::io::Error::from_raw_os_error(e)))
             }
             self.txn.txn=txn;
-            self.new_internal(&mut internal[..]);
-            let internal = InternalKey::new(&internal);
+            let internal = self.new_internal();
             debug!(target:"output_repository","pending patch: {}",internal.to_hex());
-            self.apply(pending,internal,&HashSet::new()).unwrap();
+            self.apply(pending,&internal,&HashSet::new()).unwrap();
             // Now output all files (do_output=true)
             try!(self.unsafe_output_repository(working_copy,true));
             lmdb::mdb_txn_abort(txn);
@@ -2747,7 +2749,7 @@ fn dump_table(txn:&lmdb::Txn,dbi:lmdb::Dbi){
 impl<'a, 'b> RepositoryT<'b> for Repository<'a>{
 
     type Error = Error;
-    type InternalKey = InternalKey<'b>;
+    type InternalKey = &'b InternalKey;
 
     fn open(path: &std::path::Path) -> Result<Repository<'a>, Error> {
         Repository::new(path)
@@ -2762,7 +2764,7 @@ impl<'a, 'b> RepositoryT<'b> for Repository<'a>{
         self.output_repository(working_copy, pending)
     }
 
-    fn apply(&mut self, patch: &Patch, internal: InternalKey, new_patches: &HashSet<&[u8]>)
+    fn apply(&mut self, patch: &Patch, internal: &InternalKey, new_patches: &HashSet<&[u8]>)
              -> Result<(), Error> {
         self.apply(patch, internal, new_patches)
     }
@@ -2771,7 +2773,7 @@ impl<'a, 'b> RepositoryT<'b> for Repository<'a>{
         self.record(working_copy)
     }
 
-    fn sync_file_additions(&mut self, changes: &[Change], updates: &FileIndex, internal_patch_id: InternalKey)
+    fn sync_file_additions(&mut self, changes: &[Change], updates: &FileIndex, internal_patch_id: &InternalKey)
     {
         self.sync_file_additions(changes, updates, internal_patch_id)
     }
@@ -2783,7 +2785,7 @@ impl<'a, 'b> RepositoryT<'b> for Repository<'a>{
         self.apply_patches(repo_root, remote_patches, local_patches)
     }
 
-    fn internal_hash(&'b self, key:&[u8]) -> Result<InternalKey, Error> {
+    fn internal_hash(&'b self, key:&[u8]) -> Result<&InternalKey, Error> {
         self.internal_hash(key)
     }
 
