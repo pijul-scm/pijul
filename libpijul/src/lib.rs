@@ -376,6 +376,69 @@ impl <'a> Repository<'a> {
         Ok(())
     }
 
+    // This function returns a boolean indicating whether the directory we are trying to delete is non-empty, and deletes it if so.
+    fn rec_delete(&mut self, key:&[u8])->bool {
+        //println!("rec_delete {}",to_hex(key));
+        let mut children=Vec::new();
+        // First, kill the inode itself, if it exists (or mark it deleted)
+        //let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
+        //let mut v : MDB_val = std::mem::zeroed();
+        {
+            let curs=self.txn.cursor(self.dbi_tree).unwrap();
+            let mut result=curs.get(&key,None,lmdb::Op::MDB_SET_RANGE);
+            loop {
+                match result {
+                    Ok((k,v))=>
+                        if unsafe { memcmp(k.as_ptr() as *const c_void,key.as_ptr() as *const c_void,
+                                           key.len() as size_t) } ==0 {
+                            //debug_assert!(v.mv_size as usize==INODE_SIZE);
+                            if v.len()>0 {
+                                children.push((k.to_vec(),v.to_vec()));
+                            }
+                            result=curs.get(&k,Some(&v),lmdb::Op::MDB_NEXT);
+                        } else {
+                            break
+                        },
+                    _=>break
+                }
+            }
+        }
+        {
+            for (a,b) in children {
+                if self.rec_delete(&b) {
+                    //println!("deleting {} {}",to_hex(&a),to_hex(&b));
+                    self.txn.del(self.dbi_tree,&a,Some(&b)).unwrap();
+                    self.txn.del(self.dbi_revtree,&b,Some(&a)).unwrap();
+                }
+            }
+        }
+        let mut node_=[0;3+KEY_SIZE];
+        // If the directory is empty, then mark the corresponding node as deleted (flag '2').
+        // TODO: this could be done by unsafely mutating the lmdb memory.
+        let b=
+            match self.txn.get(self.dbi_inodes,key) {
+                Ok(Some(node)) => {
+                    debug!(target:"remove_file","node={}",node.to_hex());
+                    debug_assert!(node.len()==3+KEY_SIZE);
+                    unsafe {
+                        copy_nonoverlapping(node.as_ptr() as *const c_void,
+                                            node_.as_ptr() as *mut c_void,
+                                            3+KEY_SIZE);
+                    }
+                    node_[0]=2;
+                    false
+                },
+                Ok(None)=>true,
+                Err(_)=>{
+                    panic!("delete panic")
+                }
+            };
+        if !b {
+            self.txn.put(self.dbi_inodes,key,&node_[..],0).unwrap();
+        }
+        b
+    }
+
     pub fn remove_file(&mut self, path:&std::path::Path) -> Result<(), Error>{
         let mut inode=Vec::new();
         inode.extend_from_slice(&ROOT_INODE);
@@ -396,69 +459,8 @@ impl <'a> Repository<'a> {
                 _=>break
             }
         }
-        // This function returns a boolean indicating whether the directory we are trying to delete is non-empty, and deletes it if so.
-        fn rec_delete(repo:&mut Repository,key:&[u8])->bool {
-            //println!("rec_delete {}",to_hex(key));
-            let mut children=Vec::new();
-            // First, kill the inode itself, if it exists (or mark it deleted)
-            //let mut k = MDB_val{ mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
-            //let mut v : MDB_val = std::mem::zeroed();
-            {
-                let curs=repo.txn.cursor(repo.dbi_tree).unwrap();
-                let mut result=curs.get(&key,None,lmdb::Op::MDB_SET_RANGE);
-                loop {
-                    match result {
-                        Ok((k,v))=>
-                            if unsafe { memcmp(k.as_ptr() as *const c_void,key.as_ptr() as *const c_void,
-                                               key.len() as size_t) } ==0 {
-                                //debug_assert!(v.mv_size as usize==INODE_SIZE);
-                                if v.len()>0 {
-                                    children.push((k.to_vec(),v.to_vec()));
-                                }
-                                result=curs.get(&k,Some(&v),lmdb::Op::MDB_NEXT);
-                            } else {
-                                break
-                            },
-                        _=>break
-                    }
-                }
-            }
-            {
-                for (a,b) in children {
-                    if rec_delete(repo,&b) {
-                        //println!("deleting {} {}",to_hex(&a),to_hex(&b));
-                        repo.txn.del(repo.dbi_tree,&a,Some(&b)).unwrap();
-                        repo.txn.del(repo.dbi_revtree,&b,Some(&a)).unwrap();
-                    }
-                }
-            }
-            let mut node_=[0;3+KEY_SIZE];
-            // If the directory is empty, then mark the corresponding node as deleted (flag '2').
-            // TODO: this could be done by unsafely mutating the lmdb memory.
-            let b=
-                match repo.txn.get(repo.dbi_inodes,key) {
-                    Ok(Some(node)) => {
-                        debug!(target:"remove_file","node={}",node.to_hex());
-                        debug_assert!(node.len()==3+KEY_SIZE);
-                        unsafe {
-                            copy_nonoverlapping(node.as_ptr() as *const c_void,
-                                                node_.as_ptr() as *mut c_void,
-                                                3+KEY_SIZE);
-                        }
-                        node_[0]=2;
-                        false
-                    },
-                    Ok(None)=>true,
-                    Err(_)=>{
-                        panic!("delete panic")
-                    }
-                };
-            if !b {
-                repo.txn.put(repo.dbi_inodes,key,&node_[..],0).unwrap();
-            }
-            b
-        }
-        rec_delete(self,&inode);
+
+        self.rec_delete(&inode);
         Ok(())
     }
 
