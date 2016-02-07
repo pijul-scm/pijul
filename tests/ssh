@@ -1,6 +1,6 @@
 #!/bin/bash
 
-RECORD_FLAGS=-a
+RECORD_FLAGS="-a -m test --author me"
 PULL_FLAGS=-a
 PUSH_FLAGS=-a
 

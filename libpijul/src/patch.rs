@@ -17,8 +17,7 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path,PathBuf,MAIN_SEPARATOR};
 use std::fs::{metadata};
 
 use std::io::{BufWriter,BufReader,Read,Write,BufRead};
@@ -49,9 +48,11 @@ use self::rustc_serialize::hex::ToHex;
 
 extern crate cbor;
 
+extern crate flate2;
+
 use std::collections::BTreeMap;
 use super::fs_representation::{patch_path};
-use std::process::{Command,Stdio};
+use std::process::{Command};
 
 pub type FileIndex = HashMap<LocalKey, OwnedInode >;
 
@@ -109,55 +110,14 @@ impl Patch {
                 changes:vec!(), dependencies:HashSet::new() }
     }
 
-    fn patch_from_file(p:&Path)->Result<Patch,Error> {
-        match p.extension().and_then(|x| x.to_str()) {
-            Some("gpg") => {
-                debug!("starting gpg");
-                let mut gpg=
-                    try!(Command::new("gpg")
-                         .arg("--yes")
-                         .arg("--status-fd").arg("2") // report error on stderr.
-                         .arg("-d")
-                         .arg(p)
-                         .stdout(Stdio::piped())
-                         .stderr(Stdio::piped())
-                         .spawn());
-                debug!("gpg started");
-                let stat=try!(gpg.wait());
-                let stdout = gpg.stdout.take().unwrap();
-                let patch=try!(Patch::from_reader(stdout,Some(p)));
-                debug!("gpg done");
-                if stat.success() {
-                    Ok(patch)
-                } else {
-                    let mut stderr = gpg.stderr.take().unwrap();
-                    let mut buf=String::new();
-                    try!(stderr.read_to_string(&mut buf));
-                    Err(Error::GPG(stat.code().unwrap(),buf))
-                }
-            },
-            Some("cbor") => {
-                let mut file=try!(File::open(p));
-                Patch::from_reader(&mut file,Some(p))
-            },
-            _=>{
-                // TODO: This should not happen if this function is
-                // called from other class methods. Remove this after
-                // debugging.
-                panic!("Unknown patch extension.")
-            }
-        }
-    }
-
     pub fn from_repository(p:&Path,i:&[u8])->Result<Patch,Error> {
-        if let Some(filename)=patch_path(p,i) {
-            Self::patch_from_file(&filename)
-        } else {
-            Err(Error::PatchNotFound(p.to_path_buf(),i.to_hex()))
-        }
+        let p=p.join(&patch_path(i,MAIN_SEPARATOR));
+        let mut file=try!(File::open(&p));
+        Patch::from_reader(&mut file,Some(&p))
     }
     pub fn from_reader<R>(r:R,p:Option<&Path>)->Result<Patch,Error> where R:Read {
-        let mut d=cbor::Decoder::from_reader(r);
+        let d=try!(flate2::read::GzDecoder::new(r));
+        let mut d=cbor::Decoder::from_reader(d);
         if let Some(d)=d.decode().next() {
             Ok(try!(d))
         } else {
@@ -166,7 +126,8 @@ impl Patch {
     }
 
     pub fn to_writer<W>(&self,w:&mut W)->Result<(),Error> where W:Write {
-        let mut e = cbor::Encoder::from_writer(w);
+        let e = flate2::write::GzEncoder::new(w,flate2::Compression::Best);
+        let mut e = cbor::Encoder::from_writer(e);
         try!(self.encode(&mut e));
         //try!(bincode::rustc_serialize::encode_into(self,w,SizeLimit::Infinite).map_err(Error::PatchEncoding));
         Ok(())
@@ -187,10 +148,10 @@ impl Patch {
         // Sign
         let tmp_gpg=tmp.with_extension("gpg");
         let gpg=Command::new("gpg")
-            .arg("--yes")
-            .arg("-o")
+            .arg("--batch")
+            .arg("--output")
             .arg(&tmp_gpg)
-            .arg("-s")
+            .arg("--detach-sig")
             .arg(&tmp)
             .spawn();
 
@@ -210,22 +171,19 @@ impl Patch {
         }
         let mut hash=vec![0;hasher.output_bytes()];
         hasher.result(&mut hash);
+        let mut f=dir.join(hash.to_hex());
         if let Ok(true)=gpg.and_then(|mut gpg| {
             let stat=try!(gpg.wait());
             Ok(stat.success())
         }) {
-            let mut f=dir.join(hash.to_hex());
-            f.set_extension("cbor.gpg");
+            f.set_extension("cbor.sig");
             try!(std::fs::rename(&tmp_gpg,&f));
-            try!(std::fs::remove_file(&tmp));
-        } else {
-            let mut f=dir.join(hash.to_hex());;
-            f.set_extension("cbor");
-            try!(std::fs::rename(&tmp,&f));
         }
+        f.set_extension("");
+        f.set_extension("cbor.gz");
+        try!(std::fs::rename(&tmp,&f));
         Ok(hash)
     }
-
 }
 
 

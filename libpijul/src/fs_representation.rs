@@ -22,7 +22,7 @@
 //! [pijul.org/documentation/repository](https://pijul.org/documentation/repository),
 //! used for instance for downloading files from remote repositories.
 
-use std::path::{Path,PathBuf,MAIN_SEPARATOR};
+use std::path::{Path,PathBuf};
 use std::fs::{metadata,create_dir_all};
 extern crate rustc_serialize;
 use self::rustc_serialize::hex::ToHex;
@@ -91,18 +91,17 @@ pub fn create(dir : &Path) -> std::io::Result<()> {
 }
 
 
-pub fn patch_path(root:&Path,h:&[u8])->Option<PathBuf> {
-    for p in patch_path_iter(h,MAIN_SEPARATOR) {
-        let p=root.join(p);
-        debug!("patch_path: trying {:?}",p);
-        if std::fs::metadata(&p).is_ok() {
-            return Some(p)
-        }
-    }
-    None
+pub fn patch_path(h:&[u8],sep:char)->String {
+    let mut p=PIJUL_DIR_NAME.to_string();
+    p.push(sep);
+    p.push_str(PATCHES_DIR_NAME);
+    p.push(sep);
+    p.push_str(&h.to_hex());
+    p.push_str(".cbor.gz");
+    p
 }
-
-const PATCH_EXTENSIONS:[&'static str;3]=["cbor.gpg","cbor.gz","cbor"];
+/*
+const PATCH_EXTENSIONS:[&'static str;1]=["cbor.gz"];
 
 pub struct PatchPath<'a> {
     h:&'a [u8],
@@ -133,3 +132,4 @@ pub fn patch_path_iter<'a>(h:&'a[u8],sep:char)->PatchPath<'a> {
     PatchPath { h:h,i:0,sep:sep }
 }
 
+*/

@@ -21,8 +21,8 @@ extern crate clap;
 extern crate libpijul;
 use self::libpijul::{Repository,DEFAULT_BRANCH};
 use self::libpijul::patch::{read_changes_from_file,read_changes};
-use self::libpijul::fs_representation::{repo_dir, pristine_dir, patches_dir, branch_changes_base_path,branch_changes_file,PIJUL_DIR_NAME,PATCHES_DIR_NAME,patch_path,patch_path_iter};
-use std::path::{Path,PathBuf};
+use self::libpijul::fs_representation::{repo_dir, pristine_dir, branch_changes_base_path,branch_changes_file,PIJUL_DIR_NAME,PATCHES_DIR_NAME,patch_path};
+use std::path::{Path,PathBuf,MAIN_SEPARATOR};
 use std::io::{BufWriter};
 use std::collections::hash_set::{HashSet};
 use std::fs::{File,hard_link,copy,metadata};
@@ -44,6 +44,7 @@ use super::init;
 use std::collections::hash_set::Iter;
 use std::fmt::Debug;
 extern crate hyper;
+use super::ask;
 
 const HTTP_MAX_ATTEMPTS:usize=3;
 
@@ -134,78 +135,59 @@ impl<'a> Session<'a> {
         }
     }
     pub fn download_patch(&mut self, repo_root:&Path, patch_hash:&[u8])->Result<PathBuf,Error>{
-        match *self {
-            Session::Local{path}=>{
-                debug!("local downloading {:?}",patch_hash.to_hex());
-                if let Some(local_file)=patch_path(repo_root,patch_hash) {
+        let s=patch_path(patch_hash,MAIN_SEPARATOR);
+        let local_file=repo_root.join(&s);
+        if metadata(&local_file).is_ok() {
+            Ok(local_file)
+        } else {
+            match *self {
+                Session::Local{path}=>{
+                    debug!("local downloading {:?}",patch_hash.to_hex());
+                    let remote_file=path.join(&s);
+                    //let local_file=patches_dir(repo_root).join(remote_file.file_name().unwrap());
+                    debug!("hard linking {:?} to {:?}",remote_file,local_file);
+                    try!(hard_link(&remote_file,&local_file).or_else(|_|{
+                        copy(&remote_file, &local_file).and_then(|_| Ok(()))
+                    }));
                     Ok(local_file)
-                } else {
-                    if let Some(remote_file)=patch_path(path,patch_hash) {
-                        let local_file=patches_dir(repo_root).join(remote_file.file_name().unwrap());
-                        debug!("hard linking {:?} to {:?}",remote_file,local_file);
-                        try!(hard_link(&remote_file,&local_file).or_else(|_|{
-                            copy(&remote_file, &local_file).and_then(|_| Ok(()))
-                        }));
+                },
+                Session::Ssh{ref path,ref mut session,..}=>{
+                    let s_=patch_path(patch_hash,'/');
+                    let remote_file=path.join(&s_);
+                    if let Ok(Some(mut rem))=ssh_recv_file(session,&remote_file) {
+                        let mut contents = Vec::new();
+                        debug!(target:"pull","downloading file to {:?}",local_file);
+                        try!(rem.read_to_end(&mut contents));
+                        let mut w=BufWriter::new(try!(File::create(&local_file)));
+                        try!(w.write_all(&contents));
                         Ok(local_file)
                     } else {
                         Err(Error::PatchNotFound(path.to_path_buf().to_string_lossy().into_owned(),
                                                  patch_hash.to_hex()))
                     }
-                }
-            },
-            Session::Ssh{ref path,ref mut session,..}=>{
-                if let Some(local_file)=patch_path(repo_root,patch_hash) { // If we don't have it yet
-                    Ok(local_file)
-                } else {
-                    for remote_file in patch_path_iter(patch_hash,'/') {
-                        debug!("ssh: receiving patch {}",patch_hash.to_hex());
-                        if let Ok(Some(mut rem))=ssh_recv_file(session,&remote_file) {
-                            let local_file={
-                                let remote_path=Path::new(&remote_file);
-                                patches_dir(repo_root).join(remote_path.file_name().unwrap())
-                            };
-                            let mut contents = Vec::new();
-                            debug!(target:"pull","downloading file to {:?}",local_file);
-                            try!(rem.read_to_end(&mut contents));
-                            let mut w=BufWriter::new(try!(File::create(&local_file)));
-                            try!(w.write_all(&contents));
-                            return Ok(local_file)
-                        }
-                    }
-                    Err(Error::PatchNotFound(path.to_path_buf().to_string_lossy().into_owned(),
-                                             patch_hash.to_hex()))
-                }
-            },
-            Session::Uri{ref mut client,uri}=>{
-                if let Some(local_file)=patch_path(repo_root,patch_hash) { // If we don't have it yet
-                    Ok(local_file)
-                } else {
-                    for remote_file in patch_path_iter(patch_hash,'/') {
-                        let local_file={
-                            let remote_path=Path::new(&remote_file);
-                            patches_dir(repo_root).join(remote_path.file_name().unwrap())
-                        };
-                        let uri = uri.to_string() + "/" + &remote_file;
-                        debug!("downloading uri {:?}",uri);
-                        let mut attempts=0;
-                        while attempts<HTTP_MAX_ATTEMPTS {
-                            match client.get(&uri).header(hyper::header::Connection::close()).send() {
-                                Ok(ref mut res) if res.status==hyper::status::StatusCode::Ok => {
-                                    debug!("response={:?}",res);
-                                    let mut body=Vec::new();
-                                    try!(res.read_to_end(&mut body));
-                                    let mut f=try!(File::create(&local_file));
-                                    try!(f.write_all(&body));
-                                    debug!("patch downloaded through http: {:?}",body);
-                                    return Ok(local_file)
-                                },
-                                Ok(_) => {
-                                    break
-                                },
-                                Err(e)=>{
-                                    debug!("error downloading : {:?}",e);
-                                    attempts+=1;
-                                }
+                },
+                Session::Uri{ref mut client,uri}=>{
+                    //for remote_file in patch_path_iter(patch_hash,'/') {
+                    let uri=uri.to_string() + "/" + &patch_path(patch_hash,'/');
+                    debug!("downloading uri {:?}",uri);
+                    let mut attempts=0;
+                    while attempts<HTTP_MAX_ATTEMPTS {
+                        match client.get(&uri).header(hyper::header::Connection::close()).send() {
+                            Ok(ref mut res) if res.status==hyper::status::StatusCode::Ok => {
+                                debug!("response={:?}",res);
+                                let mut body=Vec::new();
+                                try!(res.read_to_end(&mut body));
+                                let mut f=try!(File::create(&local_file));
+                                try!(f.write_all(&body));
+                                debug!("patch downloaded through http: {:?}",body);
+                                return Ok(local_file)
+                            },
+                            Ok(_) => {
+                                break
+                            },
+                            Err(e)=>{
+                                debug!("error downloading : {:?}",e);
+                                attempts+=1;
                             }
                         }
                     }
@@ -219,37 +201,67 @@ impl<'a> Session<'a> {
     pub fn upload_patches(&mut self, repo_root:&Path, patch_hashes:&HashSet<Vec<u8>>)->Result<(),Error> {
         match *self {
             Session::Ssh { ref mut session, ref path, .. }=> {
-                let remote_path=path.to_str().unwrap().to_string()+"/"+PIJUL_DIR_NAME+"/"+PATCHES_DIR_NAME;
+                let mut remote_path=path.to_str().unwrap().to_string()+"/"+PIJUL_DIR_NAME+"/"+PATCHES_DIR_NAME+"/";
+                let remote_len=remote_path.len();
+
+                let mut local_path=repo_root.to_str().unwrap().to_string();
+                local_path.push(MAIN_SEPARATOR);
+                local_path.push_str(PIJUL_DIR_NAME);
+                local_path.push(MAIN_SEPARATOR);
+                local_path.push_str(PATCHES_DIR_NAME);
+                local_path.push(MAIN_SEPARATOR);
+                let local_len=local_path.len();
+
                 let mut scp=try!(session.scp_new(ssh::WRITE,&remote_path));
                 try!(scp.init());
                 for hash in patch_hashes {
                     debug!("repo_root: {:?},hash:{:?}",repo_root,hash.to_hex());
-                    if let Some(path)=patch_path(repo_root,hash) {
-                        let remote_file=remote_path.clone() + "/" + path.file_name().unwrap().to_str().unwrap();
-                        let mut buf = Vec::new();
-                        {
-                            let mut f = try!(File::open(&path));
-                            try!(f.read_to_end(&mut buf));
-                        }
-                        try!(scp.push_file(&remote_file,buf.len(),0o644));
-                        try!(scp.write(&buf));
-                    } else {
-                        return Err(Error::PatchNotFound(repo_root.to_str().unwrap().to_string(),hash.to_hex()))
+                    remote_path.truncate(remote_len);
+                    remote_path.push_str(&hash.to_hex());
+                    remote_path.push_str(".cbor.gz");
+                    local_path.truncate(local_len);
+                    local_path.push_str(&hash.to_hex());
+                    local_path.push_str(".cbor.gz");
+                    let mut buf = Vec::new();
+                    {
+                        let mut f = try!(File::open(&local_path));
+                        try!(f.read_to_end(&mut buf));
                     }
+                    try!(scp.push_file(&remote_path,buf.len(),0o644));
+                    try!(scp.write(&buf));
                 }
                 Ok(())
             },
             Session::Local{path} =>{
+                let mut remote_path=path.to_str().unwrap().to_string();
+                remote_path.push(MAIN_SEPARATOR);
+                remote_path.push_str(PIJUL_DIR_NAME);
+                remote_path.push(MAIN_SEPARATOR);
+                remote_path.push_str(PATCHES_DIR_NAME);
+                remote_path.push(MAIN_SEPARATOR);
+                let remote_len=remote_path.len();
+
+                let mut local_path=repo_root.to_str().unwrap().to_string();
+                local_path.push(MAIN_SEPARATOR);
+                local_path.push_str(PIJUL_DIR_NAME);
+                local_path.push(MAIN_SEPARATOR);
+                local_path.push_str(PATCHES_DIR_NAME);
+                local_path.push(MAIN_SEPARATOR);
+                let local_len=local_path.len();
+
                 for hash in patch_hashes {
-                    if let Some(local_file)=patch_path(repo_root,hash) {
-                        let remote_file=patches_dir(path).join(local_file.file_name().unwrap());
-                        if metadata(&remote_file).is_err() {
-                            try!(hard_link(&local_file,&remote_file).or_else(|_|{
-                                copy(&local_file, &remote_file).and_then(|_| Ok(()))
-                            }))
-                        }
-                    } else {
-                        return Err(Error::PatchNotFound(repo_root.to_str().unwrap().to_string(),hash.to_hex()))
+                    remote_path.truncate(remote_len);
+                    remote_path.push_str(&hash.to_hex());
+                    remote_path.push_str(".cbor.gz");
+
+                    local_path.truncate(local_len);
+                    local_path.push_str(&hash.to_hex());
+                    local_path.push_str(".cbor.gz");
+
+                    if metadata(&remote_path).is_err() {
+                        try!(hard_link(&local_path,&remote_path).or_else(|_|{
+                            copy(&local_path, &remote_path).and_then(|_| Ok(()))
+                        }))
                     }
                 }
                 Ok(())
@@ -401,11 +413,18 @@ impl <'a>Remote<'a> {
                 try!(session.connect());
                 debug!("ssh: connected");
                 match try!(session.is_server_known()) {
-                    ssh::ServerKnown::Known=> {
-                        if session.userauth_publickey_auto(None).is_err() {
-                            try!(session.userauth_kbdint(None))
-                        }
+                    ssh::ServerKnown::Known=>{
+                        if session.userauth_publickey_auto(None).is_err() { try!(session.userauth_kbdint(None)) }
                         Ok(Session::Ssh { session:session, path:path, id:id })
+                    },
+                    ssh::ServerKnown::NotKnown=>{
+                        if let Ok(true)=ask::ask_learn_ssh(host,&try!(session.get_pubkey_hash()).to_hex()) {
+                            try!(session.write_knownhost());
+                            if session.userauth_publickey_auto(None).is_err() { try!(session.userauth_kbdint(None)) }
+                            Ok(Session::Ssh { session:session, path:path, id:id })
+                        } else {
+                            Err(Error::SSHUnknownServer(ssh::ServerKnown::NotKnown))
+                        }
                     },
                     other=>{Err(Error::SSHUnknownServer(other))}
                 }

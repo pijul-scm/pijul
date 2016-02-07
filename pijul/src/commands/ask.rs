@@ -400,3 +400,15 @@ pub fn ask_patch_name()->Result<String,Error> {
     if let Some(c)=input.pop() { if c!='\n' { input.push(c) } }
     Ok(input)
 }
+
+pub fn ask_learn_ssh(host:&str,fingerprint:&str)->Result<bool,Error> {
+    print!("The authenticity of host {:?} cannot be established.\nThe fingerprint is {:?}.\nAre you sure you want to continue (yes/no)? ",host,fingerprint);
+    try!(std::io::stdout().flush());
+    let mut input = String::new();
+    try!(stdin().read_line(&mut input));
+    let mut input=input.to_uppercase();
+    input.pop();
+    if let Some(c)=input.pop() { if c!='\n' { input.push(c) } }
+    println!("input={:?}",input);
+    Ok(input=="YES")
+}
