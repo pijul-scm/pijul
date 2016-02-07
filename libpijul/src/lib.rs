@@ -78,6 +78,15 @@ use std::marker::PhantomData;
 use std::io::{BufWriter};
 use std::fs::File;
 
+
+fn memeq(a:&[u8],b:&[u8])->bool {
+    if a.len() == b.len() {
+        unsafe { memcmp(a.as_ptr() as *const c_void,b.as_ptr() as *const c_void,
+                        b.len() as size_t) == 0 }
+    } else { false }
+}
+
+
 pub type Repository<'a> = LmdbRepository<'a>;
 
 // Used between functions of unsafe_output_repository (Rust does not allow enum inside the class)
@@ -1088,113 +1097,110 @@ impl <'a> Repository<'a> {
         Change::Edges{edges:edges,flag:PARENT_EDGE|DELETED_EDGE}
     }
 
-    fn diff(&self,line_num:&mut usize, actions:&mut Vec<Change>, redundant:&mut Vec<u8>,
-            a:Graph, b:&Path)->Result<(),std::io::Error> {
-        fn memeq(a:&[u8],b:&[u8])->bool {
-            if a.len() == b.len() {
-                unsafe { memcmp(a.as_ptr() as *const c_void,b.as_ptr() as *const c_void,
-                                b.len() as size_t) == 0 }
-            } else { false }
-        }
-        fn local_diff(repo:&Repository,cursor:&mut lmdb::MdbCursor,actions:&mut Vec<Change>,line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[&[u8]], b:&[&[u8]]) {
-            debug!(target:"conflictdiff","local_diff {} {}",contents_a.len(),b.len());
-            let mut opt=vec![vec![0;b.len()+1];contents_a.len()+1];
-            if contents_a.len()>0 {
-                let mut i=contents_a.len() - 1;
-                loop {
-                    opt[i]=vec![0;b.len()+1];
-                    if b.len()>0 {
-                        let mut j=b.len()-1;
-                        loop {
-                            opt[i][j]=
-                                if memeq(contents_a[i],b[j]) {
-                                    opt[i+1][j+1]+1
-                                } else {
-                                    std::cmp::max(opt[i+1][j], opt[i][j+1])
-                                };
-                            debug!(target:"diff","opt[{}][{}] = {}",i,j,opt[i][j]);
-                            if j>0 { j-=1 } else { break }
-                        }
+    fn local_diff(&self, cursor:&mut lmdb::MdbCursor, actions:&mut Vec<Change>,
+                  line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[&[u8]], b:&[&[u8]])
+    {
+        debug!(target:"conflictdiff","local_diff {} {}",contents_a.len(),b.len());
+        let mut opt=vec![vec![0;b.len()+1];contents_a.len()+1];
+        if contents_a.len()>0 {
+            let mut i=contents_a.len() - 1;
+            loop {
+                opt[i]=vec![0;b.len()+1];
+                if b.len()>0 {
+                    let mut j=b.len()-1;
+                    loop {
+                        opt[i][j]=
+                            if memeq(contents_a[i],b[j]) {
+                                opt[i+1][j+1]+1
+                            } else {
+                                std::cmp::max(opt[i+1][j], opt[i][j+1])
+                            };
+                        debug!(target:"diff","opt[{}][{}] = {}",i,j,opt[i][j]);
+                        if j>0 { j-=1 } else { break }
                     }
-                    if i>0 { i-=1 } else { break }
                 }
+                if i>0 { i-=1 } else { break }
             }
-            let mut i=1;
-            let mut j=0;
-            let mut oi=None;
-            let mut oj=None;
-            let mut last_alive_context=0;
-            while i<contents_a.len() && j<b.len() {
-                debug!(target:"diff","i={}, j={}",i,j);
-                if memeq(contents_a[i],b[j]) {
-                    if let Some(i0)=oi {
-                        debug!(target:"diff","deleting from {} to {} / {}",i0,i,lines_a.len());
-                        let dels = repo.delete_lines(cursor, &lines_a[i0..i]);
-                        actions.push(dels);
-                        oi=None
-                    } else if let Some(j0)=oj {
-                        let adds = repo.add_lines(line_num,
+        }
+        let mut i=1;
+        let mut j=0;
+        let mut oi=None;
+        let mut oj=None;
+        let mut last_alive_context=0;
+        while i<contents_a.len() && j<b.len() {
+            debug!(target:"diff","i={}, j={}",i,j);
+            if memeq(contents_a[i],b[j]) {
+                if let Some(i0)=oi {
+                    debug!(target:"diff","deleting from {} to {} / {}",i0,i,lines_a.len());
+                    let dels = self.delete_lines(cursor, &lines_a[i0..i]);
+                    actions.push(dels);
+                    oi=None
+                } else if let Some(j0)=oj {
+                    let adds = self.add_lines(line_num,
+                                              lines_a[last_alive_context], // up context
+                                              &lines_a[i..i+1], // down context
+                                              &b[j0..j]);
+                    actions.push(adds);
+                    oj=None
+                }
+                last_alive_context=i;
+                i+=1; j+=1;
+            } else {
+                if opt[i+1][j] >= opt[i][j+1] {
+                    // we will delete things starting from i (included).
+                    if let Some(j0)=oj {
+                        let adds = self.add_lines(line_num,
                                                   lines_a[last_alive_context], // up context
                                                   &lines_a[i..i+1], // down context
                                                   &b[j0..j]);
                         actions.push(adds);
                         oj=None
                     }
-                    last_alive_context=i;
-                    i+=1; j+=1;
-                } else {
-                    if opt[i+1][j] >= opt[i][j+1] {
-                        // we will delete things starting from i (included).
-                        if let Some(j0)=oj {
-                            let adds = repo.add_lines(line_num,
-                                                 lines_a[last_alive_context], // up context
-                                                 &lines_a[i..i+1], // down context
-                                                 &b[j0..j]);
-                            actions.push(adds);
-                            oj=None
-                        }
-                        if oi.is_none() {
-                            oi=Some(i)
-                        }
-                        i+=1
-                    } else {
-                        // We will add things starting from j.
-                        if let Some(i0)=oi {
-                            let dels = repo.delete_lines(cursor, &lines_a[i0..i]);
-                            actions.push(dels);
-                            last_alive_context=i0-1;
-                            oi=None
-                        }
-                        if oj.is_none() {
-                            oj=Some(j)
-                        }
-                        j+=1
+                    if oi.is_none() {
+                        oi=Some(i)
                     }
-                }
-            }
-            if i < lines_a.len() {
-                if let Some(j0)=oj {
-                    let adds = repo.add_lines(line_num,
-                                              lines_a[i-1], // up context
-                                              &lines_a[i..i+1], // down context
-                                              &b[j0..j]);
-                        actions.push(adds)
-
-                }
-                let dels = repo.delete_lines(cursor, &lines_a[i..lines_a.len()]);
-                actions.push(dels)
-            } else if j < b.len() {
-                if let Some(i0)=oi {
-                    repo.delete_lines(cursor, &lines_a[i0..i]);
-                    let adds =
-                        repo.add_lines(line_num, lines_a[i0-1], &[], &b[j..b.len()]);
-                    actions.push(adds);
+                    i+=1
                 } else {
-                    let adds = repo.add_lines(line_num, lines_a[i-1], &[], &b[j..b.len()]);
-                    actions.push(adds);
+                    // We will add things starting from j.
+                    if let Some(i0)=oi {
+                        let dels = self.delete_lines(cursor, &lines_a[i0..i]);
+                        actions.push(dels);
+                        last_alive_context=i0-1;
+                        oi=None
+                    }
+                    if oj.is_none() {
+                        oj=Some(j)
+                    }
+                    j+=1
                 }
             }
         }
+        if i < lines_a.len() {
+            if let Some(j0)=oj {
+                let adds = self.add_lines(line_num,
+                                          lines_a[i-1], // up context
+                                          &lines_a[i..i+1], // down context
+                                          &b[j0..j]);
+                actions.push(adds)
+                    
+            }
+            let dels = self.delete_lines(cursor, &lines_a[i..lines_a.len()]);
+            actions.push(dels)
+        } else if j < b.len() {
+            if let Some(i0)=oi {
+                self.delete_lines(cursor, &lines_a[i0..i]);
+                let adds =
+                    self.add_lines(line_num, lines_a[i0-1], &[], &b[j..b.len()]);
+                actions.push(adds);
+            } else {
+                let adds = self.add_lines(line_num, lines_a[i-1], &[], &b[j..b.len()]);
+                actions.push(adds);
+            }
+        }
+    }
+
+    fn diff(&self,line_num:&mut usize, actions:&mut Vec<Change>, redundant:&mut Vec<u8>,
+            a:Graph, b:&Path)->Result<(),std::io::Error> {
 
         let mut buf_b=Vec::new();
         let mut lines_b=Vec::new();
@@ -1225,10 +1231,10 @@ impl <'a> Repository<'a> {
                 let t1=time::precise_time_s();
                 info!("output_file took {}s",t1-t0);
                 let cursor= unsafe {&mut *self.txn.unsafe_cursor(self.dbi_nodes).unwrap()};
-                local_diff(self,cursor,actions, line_num,
-                           &d.lines_a,
-                           &d.contents_a,
-                           &lines_b);
+                self.local_diff(cursor,actions, line_num,
+                                &d.lines_a,
+                                &d.contents_a,
+                                &lines_b);
                 unsafe {
                     lmdb::mdb_cursor_close(cursor);
                 }
