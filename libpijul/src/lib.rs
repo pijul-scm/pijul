@@ -75,7 +75,7 @@ use std::fs;
 extern crate rand;
 
 use std::marker::PhantomData;
-use std::io::{BufWriter,BufReader};
+use std::io::{BufWriter};
 use std::fs::File;
 
 pub type Repository<'a> = LmdbRepository<'a>;
