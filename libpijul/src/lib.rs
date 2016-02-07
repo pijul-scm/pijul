@@ -1062,6 +1062,32 @@ impl <'a> Repository<'a> {
         }
     }
 
+    fn add_lines(&self, line_num:&mut usize, up_context:&[u8],
+                 down_context:&[&[u8]], lines:&[&[u8]])
+        -> patch::Change
+    {
+        let changes = Change::NewNodes {
+            up_context:vec!(self.external_key(up_context)),
+            down_context:down_context.iter().map(|x|{self.external_key(x)}).collect(),
+            line_num: *line_num as u32,
+            flag:0,
+            nodes:lines.iter().map(|x|{x.to_vec()}).collect()
+        };
+        *line_num += lines.len();
+        changes
+    }
+
+    fn delete_lines(&self, cursor:&mut lmdb::MdbCursor, lines:&[&[u8]])
+                    -> patch::Change
+    {
+        let mut edges=Vec::with_capacity(lines.len());
+        for i in 0..lines.len() {
+            debug!(target:"conflictdiff","deleting line {}",lines[i].to_hex());
+            self.delete_edges(cursor,&mut edges,lines[i],PARENT_EDGE)
+        }
+        Change::Edges{edges:edges,flag:PARENT_EDGE|DELETED_EDGE}
+    }
+
     fn diff(&self,line_num:&mut usize, actions:&mut Vec<Change>, redundant:&mut Vec<u8>,
             a:Graph, b:&Path)->Result<(),std::io::Error> {
         fn memeq(a:&[u8],b:&[u8])->bool {
@@ -1095,27 +1121,6 @@ impl <'a> Repository<'a> {
             }
             let mut i=1;
             let mut j=0;
-            fn add_lines(repo:&Repository,actions:&mut Vec<Change>, line_num:&mut usize,
-                         up_context:&[u8],down_context:&[&[u8]],lines:&[&[u8]]){
-                actions.push(
-                    Change::NewNodes {
-                        up_context:vec!(repo.external_key(up_context)),
-                        down_context:down_context.iter().map(|x|{repo.external_key(x)}).collect(),
-                        line_num: *line_num as u32,
-                        flag:0,
-                        nodes:lines.iter().map(|x|{x.to_vec()}).collect()
-                    });
-                *line_num += lines.len()
-            }
-            fn delete_lines(repo:&Repository,cursor:&mut lmdb::MdbCursor,actions:&mut Vec<Change>, lines:&[&[u8]]){
-                let mut edges=Vec::with_capacity(lines.len());
-                for i in 0..lines.len() {
-                    //unsafe {println!("- {}",std::str::from_utf8_unchecked(repo.contents(lines[i])));}
-                    debug!(target:"conflictdiff","deleting line {}",lines[i].to_hex());
-                    repo.delete_edges(cursor,&mut edges,lines[i],PARENT_EDGE)
-                }
-                actions.push(Change::Edges{edges:edges,flag:PARENT_EDGE|DELETED_EDGE})
-            }
             let mut oi=None;
             let mut oj=None;
             let mut last_alive_context=0;
@@ -1124,13 +1129,15 @@ impl <'a> Repository<'a> {
                 if memeq(contents_a[i],b[j]) {
                     if let Some(i0)=oi {
                         debug!(target:"diff","deleting from {} to {} / {}",i0,i,lines_a.len());
-                        delete_lines(repo,cursor,actions, &lines_a[i0..i]);
+                        let dels = repo.delete_lines(cursor, &lines_a[i0..i]);
+                        actions.push(dels);
                         oi=None
                     } else if let Some(j0)=oj {
-                        add_lines(repo,actions, line_num,
-                                  lines_a[last_alive_context], // up context
-                                  &lines_a[i..i+1], // down context
-                                  &b[j0..j]);
+                        let adds = repo.add_lines(line_num,
+                                                  lines_a[last_alive_context], // up context
+                                                  &lines_a[i..i+1], // down context
+                                                  &b[j0..j]);
+                        actions.push(adds);
                         oj=None
                     }
                     last_alive_context=i;
@@ -1139,10 +1146,11 @@ impl <'a> Repository<'a> {
                     if opt[i+1][j] >= opt[i][j+1] {
                         // we will delete things starting from i (included).
                         if let Some(j0)=oj {
-                            add_lines(repo,actions, line_num,
-                                      lines_a[last_alive_context], // up context
-                                      &lines_a[i..i+1], // down context
-                                      &b[j0..j]);
+                            let adds = repo.add_lines(line_num,
+                                                 lines_a[last_alive_context], // up context
+                                                 &lines_a[i..i+1], // down context
+                                                 &b[j0..j]);
+                            actions.push(adds);
                             oj=None
                         }
                         if oi.is_none() {
@@ -1152,7 +1160,8 @@ impl <'a> Repository<'a> {
                     } else {
                         // We will add things starting from j.
                         if let Some(i0)=oi {
-                            delete_lines(repo,cursor,actions, &lines_a[i0..i]);
+                            let dels = repo.delete_lines(cursor, &lines_a[i0..i]);
+                            actions.push(dels);
                             last_alive_context=i0-1;
                             oi=None
                         }
@@ -1165,18 +1174,24 @@ impl <'a> Repository<'a> {
             }
             if i < lines_a.len() {
                 if let Some(j0)=oj {
-                    add_lines(repo,actions, line_num,
-                              lines_a[i-1], // up context
-                              &lines_a[i..i+1], // down context
-                              &b[j0..j])
+                    let adds = repo.add_lines(line_num,
+                                              lines_a[i-1], // up context
+                                              &lines_a[i..i+1], // down context
+                                              &b[j0..j]);
+                        actions.push(adds)
+
                 }
-                delete_lines(repo,cursor,actions,&lines_a[i..lines_a.len()])
+                let dels = repo.delete_lines(cursor, &lines_a[i..lines_a.len()]);
+                actions.push(dels)
             } else if j < b.len() {
                 if let Some(i0)=oi {
-                    delete_lines(repo,cursor,actions, &lines_a[i0..i]);
-                    add_lines(repo,actions, line_num, lines_a[i0-1], &[], &b[j..b.len()])
+                    repo.delete_lines(cursor, &lines_a[i0..i]);
+                    let adds =
+                        repo.add_lines(line_num, lines_a[i0-1], &[], &b[j..b.len()]);
+                    actions.push(adds);
                 } else {
-                    add_lines(repo,actions, line_num, lines_a[i-1], &[], &b[j..b.len()])
+                    let adds = repo.add_lines(line_num, lines_a[i-1], &[], &b[j..b.len()]);
+                    actions.push(adds);
                 }
             }
         }
