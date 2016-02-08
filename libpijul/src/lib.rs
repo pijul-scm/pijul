@@ -607,6 +607,25 @@ impl <'a> Repository<'a> {
         }
     }
 
+    pub fn contents_external<'b>(&'b self,external_patch_id:&[u8],key:&[u8]) -> &'b[u8] {
+        let mut internal_key:[u8;KEY_SIZE]=[0;KEY_SIZE];
+
+        let int_hash = if key.len()>LINE_SIZE {
+            self.internal_hash(&key[0..(key.len()-LINE_SIZE)]).unwrap()
+        } else {
+            self.internal_hash(&external_patch_id[..]).unwrap()
+        };
+        unsafe {
+            copy_nonoverlapping(int_hash.contents.as_ptr(),
+                                internal_key.as_mut_ptr(),
+                                HASH_SIZE);
+            copy_nonoverlapping(key.as_ptr().offset((key.len()-LINE_SIZE) as isize),
+                                internal_key.as_mut_ptr().offset(HASH_SIZE as isize),
+                                LINE_SIZE);
+        }
+        self.contents(&internal_key[..])
+    }
+
 
     fn tarjan(&self,line:&mut Graph)->Vec<Vec<usize>> {
         fn dfs<'a>(repo:&Repository,
