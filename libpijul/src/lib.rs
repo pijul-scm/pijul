@@ -2377,18 +2377,17 @@ impl <'a> Repository<'a> {
         }
     }
 
-
-    fn unsafe_output_repository(&mut self,working_copy:&Path,do_output:bool)->Result<(),Error> {
-        fn output<'a>(repo:&'a mut Repository,
-                      working_copy:&Path,
-                      do_output:bool,
-                      visited:&mut HashMap<Vec<u8>,Vec<PathBuf>>,
-                      path:&mut PathBuf,
-                      key:&[u8],
-                      inode:&[u8],
-                      moves:&mut Vec<Tree>,
-                      curs_b:*mut lmdb::MdbCursor,
-                      curs_c:*mut lmdb::MdbCursor)->Result<(),Error>{
+    fn output_aux(&mut self,
+              working_copy:&Path,
+              do_output:bool,
+              visited:&mut HashMap<Vec<u8>,Vec<PathBuf>>,
+              path:&mut PathBuf,
+              key:&[u8],
+              inode:&[u8],
+              moves:&mut Vec<Tree>,
+              curs_b:*mut lmdb::MdbCursor,
+              curs_c:*mut lmdb::MdbCursor)->Result<(),Error>
+    {
             debug!(target:"output_repository","visited {}",key.to_hex());
             moves.clear();
             debug_assert!(inode.len()==INODE_SIZE);
@@ -2404,7 +2403,7 @@ impl <'a> Repository<'a> {
             for b in CursIter::new(curs_b,key,FOLDER_EDGE,true,true) {
                 //debug!(target:"output_repository","b={}",to_hex(b));
                 let cont_b=
-                    match try!(repo.txn.get(repo.dbi_contents,&b[1..(1+KEY_SIZE)])) {
+                    match try!(self.txn.get(self.dbi_contents,&b[1..(1+KEY_SIZE)])) {
                         Some(cont_b)=>cont_b,
                         None=>&[][..]
                     };
@@ -2417,12 +2416,12 @@ impl <'a> Repository<'a> {
                         let cv=&c[1..(1+KEY_SIZE)];
                         debug!(target:"output_repository","cv={}",cv.to_hex());
                         let c_inode=
-                            match try!(repo.txn.get(repo.dbi_revinodes,cv)) {
+                            match try!(self.txn.get(self.dbi_revinodes,cv)) {
                                 Some(c_inode) => c_inode.to_vec(),
                                 None => {
                                     let mut v=vec![0;INODE_SIZE];
                                     loop {
-                                        (*repo).create_new_inode(&mut v);
+                                        (*self).create_new_inode(&mut v);
                                         if new_inodes.get(&v).is_none() { break }
                                     }
                                     new_inodes.insert(v.clone(),(perms,cv));
@@ -2449,7 +2448,7 @@ impl <'a> Repository<'a> {
                                 debug!(target:"output_repository","inode={}",c_inode.to_hex());
                                 {
                                     let mut buf=PathBuf::from(working_copy);
-                                    if repo.filename_of_inode(&c_inode,&mut buf) {
+                                    if self.filename_of_inode(&c_inode,&mut buf) {
                                         debug!(target:"output_repository","former_path={:?}",buf);
                                         if buf.as_os_str() != path.as_os_str() {
                                             // move on filesystem
@@ -2482,11 +2481,11 @@ impl <'a> Repository<'a> {
                                 if perms&DIRECTORY_FLAG==0 {
                                     if do_output {
                                         let mut redundant_edges=vec!();
-                                        let l=repo.retrieve(&cv).unwrap();
+                                        let l=self.retrieve(&cv).unwrap();
                                         debug!(target:"output_repository","creating file {:?}",path);
                                         let mut f=std::fs::File::create(&path).unwrap();
                                         debug!(target:"output_repository","done");
-                                        repo.output_file(&mut f,l,&mut redundant_edges);
+                                        self.output_file(&mut f,l,&mut redundant_edges);
                                     }
                                 } else {
                                     recursive_calls.push((filename.to_string(),cv.to_vec(),c_inode.to_vec()));
@@ -2508,8 +2507,8 @@ impl <'a> Repository<'a> {
                 key[1]=((perm>>8) & 0xff) as u8;
                 key[2]=(perm & 0xff) as u8;
                 debug!(target:"output_repository","updating dbi_(rev)inodes: {} {}",inode.to_hex(),k.to_hex());
-                try!(repo.txn.put(repo.dbi_inodes,&inode,&key,0));
-                try!(repo.txn.put(repo.dbi_revinodes,&key[3..],&inode,0));
+                try!(self.txn.put(self.dbi_inodes,&inode,&key,0));
+                try!(self.txn.put(self.dbi_revinodes,&key[3..],&inode,0));
             }
             // Update the tree: add the last file moves.
             for update in &moves[..] {
@@ -2519,26 +2518,26 @@ impl <'a> Repository<'a> {
                                &tree_key[0..INODE_SIZE].to_hex(),std::str::from_utf8(&tree_key[INODE_SIZE..]).unwrap(),
                                &tree_value[0..INODE_SIZE].to_hex(),std::str::from_utf8(&tree_value[INODE_SIZE..]).unwrap());
 
-                        let current_parent_inode = repo.txn.get(repo.dbi_revtree,&tree_value).unwrap().unwrap().to_vec();
+                        let current_parent_inode = self.txn.get(self.dbi_revtree,&tree_value).unwrap().unwrap().to_vec();
                         debug!(target:"output_repository","current parent {}{}",
                                &current_parent_inode[0..INODE_SIZE].to_hex(),
                                std::str::from_utf8(&current_parent_inode[INODE_SIZE..]).unwrap());
-                        try!(repo.txn.del(repo.dbi_tree,&current_parent_inode,Some(&tree_value)));
-                        try!(repo.txn.del(repo.dbi_revtree,&tree_value,Some(&current_parent_inode)));
-                        try!(repo.txn.put(repo.dbi_tree,&tree_key,&tree_value,0));
-                        try!(repo.txn.put(repo.dbi_revtree,&tree_value,&tree_key,0));
+                        try!(self.txn.del(self.dbi_tree,&current_parent_inode,Some(&tree_value)));
+                        try!(self.txn.del(self.dbi_revtree,&tree_value,Some(&current_parent_inode)));
+                        try!(self.txn.put(self.dbi_tree,&tree_key,&tree_value,0));
+                        try!(self.txn.put(self.dbi_revtree,&tree_value,&tree_key,0));
                     }
                     &Tree::Addition { ref tree_key,ref tree_value } =>{
-                        try!(repo.txn.put(repo.dbi_tree,&tree_key,&tree_value,0));
-                        try!(repo.txn.put(repo.dbi_revtree,&tree_value,&tree_key,0));
+                        try!(self.txn.put(self.dbi_tree,&tree_key,&tree_value,0));
+                        try!(self.txn.put(self.dbi_revtree,&tree_value,&tree_key,0));
                     }
                     &Tree::NameConflict { ref inode } => {
                         // Mark the file as moved.
                         let mut current_key={
-                            repo.txn.get(repo.dbi_inodes,&inode).unwrap().unwrap().to_vec()
+                            self.txn.get(self.dbi_inodes,&inode).unwrap().unwrap().to_vec()
                         };
                         current_key[0]=1;
-                        try!(repo.txn.put(repo.dbi_inodes,&current_key,&inode,0));
+                        try!(self.txn.put(self.dbi_inodes,&current_key,&inode,0));
                     }
                 }
             }
@@ -2547,19 +2546,21 @@ impl <'a> Repository<'a> {
             for (filename,cv,c_inode) in recursive_calls {
                 path.push(filename);
                 debug!(target:"output_repository","> {:?}",path);
-                try!(output(repo,working_copy,do_output,visited,path,&cv,&c_inode,moves,curs_b,curs_c));
+                try!(self.output_aux(working_copy,do_output,visited,path,&cv,&c_inode,moves,curs_b,curs_c));
                 debug!(target:"output_repository","< {:?}",path);
                 path.pop();
             }
             Ok(())
         }
+
+    fn unsafe_output_repository(&mut self,working_copy:&Path,do_output:bool)->Result<(),Error> {
         let mut visited=HashMap::new();
         let mut p=PathBuf::from(working_copy);
         let mut curs_b= unsafe { &mut *try!(self.txn.unsafe_cursor(self.dbi_nodes)) };
         let mut curs_c= unsafe { &mut *try!(self.txn.unsafe_cursor(self.dbi_nodes)) };
 
         let mut moves=Vec::new();
-        try!(output(self,working_copy,do_output,&mut visited,&mut p,ROOT_KEY,&ROOT_INODE,&mut moves,curs_b,curs_c,));
+        try!(self.output_aux(working_copy,do_output,&mut visited,&mut p,ROOT_KEY,&ROOT_INODE,&mut moves,curs_b,curs_c));
         unsafe { lmdb::mdb_cursor_close(curs_c) }
 
         // Now, garbage collect dead inodes.
