@@ -7,7 +7,6 @@ extern crate libpijul;
 //use self::libpijul::fs_representation::{patches_dir};
 use self::libpijul::patch::{Change,Value,Patch,LINE_SIZE,HASH_SIZE,KEY_SIZE};
 extern crate time;
-use self::time::{Duration};
 //use std::path::Path;
 use std::io::{stdout};
 use std::collections::{HashMap,HashSet,BTreeMap};
@@ -24,23 +23,6 @@ use std::char::from_u32_unchecked;
 use std::str;
 use std::ptr::copy_nonoverlapping;
 use std;
-
-
-const EPOCH:time::Tm = time::Tm {
-    tm_sec:0,
-    tm_min:0,
-    tm_hour:0,
-    tm_mday:1,
-    tm_mon:0,
-    tm_year:70,
-    tm_wday:4,
-    tm_yday:0,
-    tm_isdst:0,
-    tm_utcoff:0,
-    tm_nsec:0
-};
-
-
 
 
 #[cfg(windows)]
@@ -109,10 +91,9 @@ pub enum Command {
 }
 
 fn print_patch_descr(hash:&[u8],patch:&Patch) {
-    let time=EPOCH + Duration::seconds(patch.timestamp);
     println!("Hash: {}",hash.to_hex());
     println!("Authors: {:?}",patch.authors);
-    println!("Timestamp {}",time.to_local().rfc822z());
+    println!("Timestamp {}",patch.timestamp);
     println!("  * {}",patch.name);
     match patch.description { Some(ref d)=>println!("  {}",d), None=>{} };
 }

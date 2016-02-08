@@ -46,6 +46,8 @@ extern crate rustc_serialize;
 use self::rustc_serialize::{Encodable,Decodable};
 use self::rustc_serialize::hex::ToHex;
 
+extern crate time;
+
 extern crate cbor;
 
 extern crate flate2;
@@ -65,7 +67,7 @@ pub enum Value {
 pub struct Edge {
     pub from:ExternalKey,
     pub to:ExternalKey,
-    pub introduced_by:ExternalHash
+    pub introduced_by:ExternalHash,
 }
 
 
@@ -87,26 +89,27 @@ pub struct Patch {
     pub authors:Vec<BTreeMap<String,Value>>,
     pub name:String,
     pub description:Option<String>,
-    pub timestamp:i64,
+    pub timestamp:String,
     pub dependencies:HashSet<ExternalHash>,
     pub changes:Vec<Change>
 }
 
 impl Patch {
 
-    pub fn new(authors:Vec<BTreeMap<String,Value>>,name:String,description:Option<String>,timestamp:i64,changes:Vec<Change>)->Patch {
+    pub fn new(authors:Vec<BTreeMap<String,Value>>,name:String,description:Option<String>,timestamp:self::time::Tm,changes:Vec<Change>)->Patch {
         let deps=dependencies(&changes);
         Patch {
             authors:authors,
             name:name,
             description:description,
-            timestamp:timestamp,
+            timestamp:format!("{}",timestamp.rfc3339()),
             changes:changes,
             dependencies:deps
         }
     }
     pub fn empty()->Patch {
-        Patch { authors:vec!(),name:"".to_string(),description:None,timestamp:0,
+        Patch { authors:vec!(),name:"".to_string(),description:None,
+                timestamp:format!("{}",self::time::now().rfc3339()),
                 changes:vec!(), dependencies:HashSet::new() }
     }
 

@@ -157,7 +157,7 @@ pub fn run(args : &Params) -> Result<Option<()>, Error> {
                     Patch::new(authors,
                                patch_name,
                                None,
-                               self::time::now().to_timespec().sec,
+                               self::time::now(),
                                changes)
                 };
                 debug!("register_patch");
