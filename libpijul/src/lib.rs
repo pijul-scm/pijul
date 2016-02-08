@@ -2135,18 +2135,33 @@ impl <'a> Repository<'a> {
         Ok(())
     }
 
+    pub fn branches(&'a self)->Result<Vec<&'a[u8]>,Error> {
+        let mut v=Vec::new();
+        let curs=try!(self.txn.cursor(self.dbi_branches));
+        let mut op=lmdb::Op::MDB_FIRST;
+        while let Ok((u,_))=curs.get(&[],None,op) {
+            v.push(u);
+            op=lmdb::Op::MDB_NEXT_NODUP
+        }
+        Ok(v)
+    }
 
-
-    pub fn write_changes_file(&self,changes_file:&Path)->Result<(),Error> {
+    pub fn branch_patches(&'a self,branch:&[u8])->Result<HashSet<&'a[u8]>,Error> {
         let mut patches=HashSet::new();
-        let branch=self.get_current_branch();
-        let curs=self.txn.cursor(self.dbi_branches).unwrap();
+        let curs=try!(self.txn.cursor(self.dbi_branches));
         let mut op=lmdb::Op::MDB_SET;
         while let Ok((_,v))=curs.get(&branch,None,op) {
             patches.insert(self.external_hash(v));
             op=lmdb::Op::MDB_NEXT_DUP
         }
-        try!(patch::write_changes(&patches,changes_file));
+        Ok(patches)
+    }
+
+    fn write_changes_file(&self,r:&Path)->Result<(),Error> {
+        let branch=self.get_current_branch();
+        let patches=try!(self.branch_patches(branch));
+        let changes_file=branch_changes_file(r,branch);
+        try!(patch::write_changes(&patches,&changes_file));
         Ok(())
     }
 
@@ -2285,7 +2300,7 @@ impl <'a> Repository<'a> {
         }
         debug!(target:"pull","patches applied? {}",patches_were_applied);
         if patches_were_applied {
-            try!(self.write_changes_file(&branch_changes_file(r,&current_branch)));
+            try!(self.write_changes_file(r));
             debug!(target:"pull","output_repository");
             try!(self.output_repository(&r,&pending))
         }
@@ -2364,20 +2379,18 @@ impl <'a> Repository<'a> {
     pub fn follow_path<'b>(&'b self, path:&[&[u8]])->Result<Option<Vec<u8>>,Error> {
         // follow in tree, return inode
         let mut buf=vec![0;INODE_SIZE];
-        let mut first=true;
         for p in path {
             buf.extend(*p);
-            println!("follow: {:?}",buf.to_hex());
+            //println!("follow: {:?}",buf.to_hex());
             match try!(self.txn.get(self.dbi_tree,&buf)) {
                 Some(v)=> {
-                    println!("some: {:?}",v.to_hex());
-                    first=false;
+                    //println!("some: {:?}",v.to_hex());
                     buf.clear();
                     buf.extend(v)
                 },
                 None => {
-                    println!("none");
-                    if first { buf.truncate(INODE_SIZE); return Ok(Some(buf)) } else { return Ok(None) }
+                    //println!("none");
+                    return Ok(None)
                 }
             }
         }
@@ -2697,7 +2710,7 @@ impl <'a> Repository<'a> {
             Ok(Ok(hash))=> {
                 self.register_hash(internal,&hash[..]);
                 debug!(target:"record","hash={}, local={}",hash.to_hex(),internal.to_hex());
-                self.write_changes_file(&branch_changes_file(location,self.get_current_branch())).unwrap();
+                self.write_changes_file(location).unwrap();
                 let t3=time::precise_time_s();
                 info!("changes files took {}s to write", t3-t2);
                 Ok(())
