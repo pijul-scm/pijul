@@ -28,7 +28,7 @@ termios="0.2"
 serde_json="0.6"
 
 [dependencies.libpijul]
-path="../libpijul"
+path="src/libpijul"
 
 [dev-dependencies]
 tempdir="0.3"

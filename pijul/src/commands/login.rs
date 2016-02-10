@@ -101,7 +101,8 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             try!(res.read_to_end(&mut encrypted));
             let child = Command::new("gpg")
                 .arg("-d")
-                .arg("-q")
+                .arg("--batch")
+                .arg("--no-tty")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -111,21 +112,23 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
             try!(child.stdin.unwrap().write(&encrypted));
             let mut clear=String::with_capacity(len as usize);
             try!(child.stdout.unwrap().read_to_string(&mut clear));
+
+            let mut err=String::new();
+            try!(child.stderr.unwrap().read_to_string(&mut err));
+            info!("{}",err);
+
             let bclear=clear.as_bytes();
-            if &bclear[0..PREFIX_LEN]==PREFIX {
-                let mut err=String::new();
-                try!(child.stderr.unwrap().read_to_string(&mut err));
-                info!("{}",err);
-                if clear.len()>0 {
+            if bclear.len()>PREFIX_LEN {
+                if &bclear[0..PREFIX_LEN]==PREFIX {
                     remote.push('/');
                     remote.push_str(&clear[PREFIX_LEN..]);
                     println!("Visit the following address:\n {}to complete authentication",remote);
                     Ok(())
                 } else {
-                    panic!("Some error happened")
+                    panic!("The server is trying to trick you into decoding other stuff")
                 }
             } else {
-                panic!("The server is trying to trick you into decoding other stuff")
+                panic!("Empty clear")
             }
         } else {
             panic!("no content length")
