@@ -38,6 +38,7 @@ pub mod remove;
 pub mod mv;
 pub mod ls;
 pub mod revert;
+pub mod login;
 #[cfg(test)]
 mod test;
 pub mod error;
@@ -62,7 +63,8 @@ pub fn all_command_invocations() -> Vec<StaticSubcommand> {
         remove::invocation(),
         mv::invocation(),
         ls::invocation(),
-        revert::invocation()
+        revert::invocation(),
+        login::invocation()
         ];
 }
 

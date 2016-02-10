@@ -77,7 +77,8 @@ fn main() {
                                "remove" => remove,
                                "mv" => mv,
                                "ls" => ls,
-                               "revert" => revert
+                               "revert" => revert,
+                               "login" => login
                                );
     let time1=time::precise_time_s();
     info!(target:"pijul","whole command took: {}", time1-time0);
