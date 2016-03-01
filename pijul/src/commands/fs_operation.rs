@@ -27,7 +27,6 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
 
 #[derive(Debug)]
 pub enum Operation { Add,
-                     Move,
                      Remove }
 
 pub fn run<'a>(args : &Params<'a>, op : Operation)
@@ -51,62 +50,6 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                             try!(repo.add_file(file.as_path(),m.is_dir()))
                         } else {
                             return Err(Error::InvalidPath(file.to_string_lossy().into_owned()))
-                        }
-                    }
-                },
-                Operation::Move => {
-                    debug!(target:"mv","moving {:?}",args.touched_files);
-                    if args.touched_files.len() <=1 {
-                        return Err(error::Error::NotEnoughArguments)
-                    } else {
-                        let target_file=args.touched_files.last().unwrap();
-                        let p=try!(canonicalize(wd.join(&target_file)));
-                        if let Some(target)=iter_after(p.components(), r.components()) {
-                            let target_is_dir=target_file.is_dir();
-                            if args.touched_files.len() > 2 || (args.touched_files.len()==2 && target_is_dir) {
-                                if !target_is_dir {
-                                    return Err(error::Error::MoveTargetNotDirectory)
-                                } else {
-                                    let mut i=0;
-                                    while i<args.touched_files.len()-1 {
-                                        let file=args.touched_files[i];
-                                        let p=wd.join(file);
-                                        let file=iter_after(p.components(), r.components()).unwrap();
-
-                                        let full_target_name ={
-                                            let target_basename = file.as_path().file_name().unwrap();
-                                            target.as_path().join(&target_basename)
-                                        };
-                                        let m=try!(metadata(args.touched_files[i]));
-                                        try!(repo.move_file(&file.as_path(),
-                                                            &full_target_name.as_path(),
-                                                            m.is_dir()));
-                                        i+=1
-                                    }
-                                    i=0;
-                                    while i<args.touched_files.len()-1 {
-                                        let target_basename = args.touched_files[i].file_name().unwrap();
-                                        let full_target_name = (args.touched_files.last().unwrap()).join(&target_basename);
-                                        try!(rename(&args.touched_files[i],
-                                                    &full_target_name));
-                                        i+=1
-                                    }
-                                }
-                            } else {
-                                let file=args.touched_files[0];
-                                let p=wd.join(file);
-                                let file=iter_after(p.components(), r.components()).unwrap();
-
-                                let file_=args.touched_files[1];
-                                let p_=wd.join(file_);
-                                let file_=iter_after(p_.components(), r.components()).unwrap();
-
-                                try!(repo.move_file(&file.as_path(),&file_.as_path(),target_is_dir));
-                                try!(rename(&args.touched_files[0],
-                                            &args.touched_files[1]))
-                            }
-                        } else {
-                            return Err(Error::InvalidPath(target_file.to_string_lossy().into_owned()))
                         }
                     }
                 },
