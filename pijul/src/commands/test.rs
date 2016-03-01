@@ -1,8 +1,9 @@
 extern crate tempdir;
 
-use commands::{init, info, record, add, remove, pull, remote};
+use commands::{init, info, record, add, remove, pull, remote, mv};
 use commands::error;
 use std::fs;
+use std::path::PathBuf;
 
 #[test]
 fn init_creates_repo() -> ()
@@ -159,6 +160,170 @@ fn add_record_pull() {
                                      yes_to_all : true };
     pull::run(&pull_params).unwrap();
     let fpath_b = &dir_b.join("toto");
+    let metadata = fs::metadata(fpath_b).unwrap();
+    assert!(metadata.is_file());
+}
+
+#[test]
+fn move_to_file() {
+    let dir = tempdir::TempDir::new("pijul").unwrap();
+    let dir_a = &dir.path().join("a");
+    let dir_b = &dir.path().join("b");
+    fs::create_dir(dir_a);
+    fs::create_dir(dir_b);
+    let init_params_a = init::Params { location : &dir_a, allow_nested : false};
+    let init_params_b = init::Params { location : &dir_b, allow_nested : false};
+    init::run(&init_params_a).unwrap();
+    init::run(&init_params_b).unwrap();
+    let toto_path = &dir_a.join("toto");
+    let titi_path = &dir_b.join("titi");
+    let file = fs::File::create(&toto_path).unwrap();
+    let add_params = add::Params { repository : Some(&dir_a),
+                                   touched_files : vec![&toto_path] };
+    match add::run(&add_params).unwrap() {
+        Some (()) => (),
+        None => panic!("no file added")
+    };
+    let record_params = record::Params { repository : Some(&dir_a),
+                                         yes_to_all : true,
+                                         authors : Some(vec![]),
+                                         patch_name : Some("file add")
+    };
+    match record::run(&record_params).unwrap() {
+        None => panic!("file add is not going to be recorded"),
+        Some(()) => ()
+    };
+
+
+    let mv_params = mv::Params { repository : Some(&dir_a),
+                                 movement : mv::Movement::FileToFile {from: PathBuf::from("toto"),
+                                                                      to: PathBuf::from("titi")}
+    };
+    mv::run(&mv_params).unwrap();
+    match record::run(&record_params).unwrap() {
+        None => panic!("file move is not going to be recorded"),
+        Some(()) => ()
+    };
+    println!("record command finished");
+
+    println!("Checking the contents of {:?}", &dir_a);
+    let paths = fs::read_dir(dir_a).unwrap();
+
+    for path in paths {
+        println!("Name: {:?}", path.unwrap().path())
+    }
+    
+    let pull_params = pull::Params { repository : Some(&dir_b),
+                                     remote_id : Some(dir_a.to_str().unwrap()),
+                                     set_default : false,
+                                     port : None,
+                                     yes_to_all : true };
+    pull::run(&pull_params).unwrap();
+    println!("pull command finished");
+
+    let fpath_b = dir_b.join("titi");
+
+    let paths = fs::read_dir(&dir_b).unwrap();
+
+    for path in paths {
+        println!("Name: {:?}", path.unwrap().path())
+    }
+
+    println!("Checking {:?}", &fpath_b);
+    let metadata = fs::metadata(fpath_b).unwrap();
+    assert!(metadata.is_file());
+}
+
+#[test]
+fn move_to_dir() {
+    let dir = tempdir::TempDir::new("pijul").unwrap();
+    let dir_a = &dir.path().join("a");
+    let dir_b = &dir.path().join("b");
+    fs::create_dir(dir_a);
+    fs::create_dir(dir_b);
+    let init_params_a = init::Params { location : &dir_a, allow_nested : false};
+    let init_params_b = init::Params { location : &dir_b, allow_nested : false};
+    init::run(&init_params_a).unwrap();
+    init::run(&init_params_b).unwrap();
+    let toto_path = &dir_a.join("toto");
+    let titi_path = &dir_b.join("titi");
+    let file = fs::File::create(&toto_path).unwrap();
+    let add_params = add::Params { repository : Some(&dir_a),
+                                   touched_files : vec![&toto_path] };
+    match add::run(&add_params).unwrap() {
+        Some (()) => (),
+        None => panic!("no file added")
+    };
+    let record_params = record::Params { repository : Some(&dir_a),
+                                         yes_to_all : true,
+                                         authors : Some(vec![]),
+                                         patch_name : Some("file add")
+    };
+    match record::run(&record_params).unwrap() {
+        None => panic!("file add is not going to be recorded"),
+        Some(()) => ()
+    };
+
+    let subdir_a = &dir_a.join("d");
+    fs::create_dir(subdir_a);
+    let add_params = add::Params { repository : Some(&dir_a),
+                                   touched_files : vec![subdir_a] };
+    match add::run(&add_params).unwrap() {
+        Some (()) => (),
+        None => panic!("no dir added")
+    };
+
+    let record_params = record::Params { repository : Some(&dir_a),
+                                         yes_to_all : true,
+                                         authors : Some(vec![]),
+                                         patch_name : Some("dir add")
+    };
+    match record::run(&record_params).unwrap() {
+        None => panic!("file add is not going to be recorded"),
+        Some(()) => ()
+    };
+
+    let mv_params = mv::Params { repository : Some(&dir_a),
+                                 movement : mv::Movement::IntoDir {from: vec![PathBuf::from("toto")],
+                                                                   to: PathBuf::from("d")}
+    };
+    mv::run(&mv_params).unwrap();
+
+    match record::run(&record_params).unwrap() {
+        None => panic!("file move is not going to be recorded"),
+        Some(()) => ()
+    };
+
+    let paths = fs::read_dir(&subdir_a).unwrap();
+
+    for path in paths {
+        println!("Name: {:?}", path.unwrap().path())
+    }
+
+    
+    let pull_params = pull::Params { repository : Some(&dir_b),
+                                     remote_id : Some(dir_a.to_str().unwrap()),
+                                     set_default : false,
+                                     port : None,
+                                     yes_to_all : true };
+    pull::run(&pull_params).unwrap();
+
+    let subdir_b = &dir_b.join("d");
+
+    let metadata = fs::metadata(&subdir_b).unwrap();
+    assert!(metadata.is_dir());
+    
+    let paths = fs::read_dir(&dir_b).unwrap();
+
+    println!("enumerating {:?}", &subdir_b);
+    
+    for path in paths {
+        println!("Name: {:?}", path.unwrap().path())
+    }
+
+    println!("enumeration done");
+    
+    let fpath_b = &dir_b.join("d/toto");
     let metadata = fs::metadata(fpath_b).unwrap();
     assert!(metadata.is_file());
 }
