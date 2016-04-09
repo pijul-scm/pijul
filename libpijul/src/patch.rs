@@ -32,12 +32,9 @@ use std::collections::HashSet;
 extern crate rand;
 extern crate libc;
 use self::libc::{memcmp,c_void,size_t};
-use contents::OwnedInode;
+use file_operations::Inode;
 use std::collections::HashMap;
 
-pub type LocalKey=Vec<u8>;
-pub type ExternalKey=Vec<u8>;
-pub type ExternalHash=Vec<u8>;
 pub type Flag=u8;
 
 use error::Error;
@@ -56,7 +53,7 @@ use std::collections::BTreeMap;
 use super::fs_representation::{patch_path};
 use std::process::{Command};
 
-pub type FileIndex = HashMap<LocalKey, OwnedInode >;
+pub type FileIndex = HashMap<LocalKey, Inode>;
 
 #[derive(Debug,Clone,PartialEq,RustcEncodable,RustcDecodable)]
 pub enum Value {
@@ -250,3 +247,161 @@ pub const LINE_SIZE:usize=4;
 pub const KEY_SIZE:usize=HASH_SIZE+LINE_SIZE;
 pub const ROOT_KEY:&'static[u8]=&[0;KEY_SIZE];
 pub const EDGE_SIZE:usize=1+KEY_SIZE+HASH_SIZE;
+
+pub type LocalKey=Vec<u8>;
+pub type ExternalKey=Vec<u8>;
+pub type ExternalHash=Vec<u8>;
+
+pub struct InternalKey {
+    pub contents : [u8;HASH_SIZE]
+}
+
+impl InternalKey {
+    pub fn zero() -> Self {
+        InternalKey {contents : [0;HASH_SIZE]}
+    }
+    
+    pub fn to_hex(&self) -> String {
+        self.contents.to_hex()
+    }
+
+    pub fn from_array(b: [u8;HASH_SIZE]) -> Self {
+        unsafe { std::mem::transmute(b) }
+    }
+    
+    pub fn from_slice(b: &[u8]) -> &Self {
+        if b.len () >= HASH_SIZE
+        {
+            unsafe {
+                {
+                    std::mem::transmute(b.as_ptr())
+                }
+            }
+        }
+        else
+        {
+            panic!("Invalid internal key pointer")
+        }
+    }
+}
+
+
+
+
+
+use super::backend::*;
+
+
+
+
+/// Gets the external key corresponding to the given key, returning an
+/// owned vector. If the key is just a patch id, it returns the
+/// corresponding external hash.
+pub fn external_key(repository:&Repository,key:&[u8])->ExternalKey {
+    let mut result= external_hash(repository, &key[0..HASH_SIZE]).to_vec();
+    if key.len()==KEY_SIZE { result.extend(&key[HASH_SIZE..KEY_SIZE]) };
+    result
+}
+
+fn external_hash<'a>(repository:&'a Repository,key:&[u8])->&'a [u8] {
+    //println!("internal key:{:?}",&key[0..HASH_SIZE]);
+    if key.len()>=HASH_SIZE
+        && unsafe {memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t)}==0 {
+            //println!("is root key");
+            &ROOT_KEY[0..HASH_SIZE]
+        } else {
+            match repository.get(&repository.db_external(),&key[0..HASH_SIZE]) {
+                Some(pv)=> {
+                    pv
+                },
+                None=>{
+                    println!("internal key or hash:{:?}",key);
+                    panic!("external hash not found !")
+                },
+            }
+        }
+}
+
+
+pub fn internal_hash<'a>(repository:&'a Repository,key:&[u8])->Result<&'a InternalKey,Error> {
+    debug!("internal_hash: {}, {}",key.to_hex(), key.len());
+    if key.len()==HASH_SIZE
+        && unsafe { memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t) }==0 {
+            Ok(InternalKey::from_slice(&ROOT_KEY))
+        } else {
+            match repository.get(&repository.db_internal(),key) {
+                Some(k)=>Ok(InternalKey::from_slice(&k)),
+                None=>Err(Error::InternalHashNotFound(key.to_vec()))
+            }
+        }
+}
+use std::ptr::{copy_nonoverlapping};
+
+/// "intro" is the internal patch number of the patch that introduced this edge.
+fn internal_edge(repository:&Repository,flag:u8,to:&[u8],intro:&InternalKey,result:&mut [u8])->Result<(),Error> {
+    debug_assert!(result.len()>=1+KEY_SIZE+HASH_SIZE);
+    debug_assert!(intro.contents.len() == HASH_SIZE);
+    result[0]=flag;
+    let int_to=try!(internal_hash(repository, &to[0..(to.len()-LINE_SIZE)]));
+    unsafe {
+        copy_nonoverlapping(int_to.contents.as_ptr(),result.as_mut_ptr().offset(1),HASH_SIZE);
+        copy_nonoverlapping(to.as_ptr().offset((to.len()-LINE_SIZE) as isize),
+                            result.as_mut_ptr().offset((1+HASH_SIZE) as isize),
+                            LINE_SIZE);
+        copy_nonoverlapping(intro.contents.as_ptr(),result.as_mut_ptr().offset(1+KEY_SIZE as isize),HASH_SIZE);
+    }
+    Ok(())
+}
+
+/// Create a new internal patch id, register it in the "external" and
+/// "internal" bases, and write the result in its second argument
+/// ("result").
+///
+/// When compiled in debug mode, this function is deterministic
+/// and returns the last registered patch number, plus one (in big
+/// endian binary on HASH_SIZE bytes). Otherwise, it returns a
+/// random patch number not yet registered.
+pub fn new_internal(repository:&mut Repository) -> InternalKey {
+    let mut result = InternalKey::zero();
+    /*
+    if cfg!(debug_assertions){
+        let curs=self.txn.cursor(self.dbi_external).unwrap();
+        if let Ok((k,_))=curs.get(b"",None,lmdb::Op::MDB_LAST) {
+            unsafe { copy_nonoverlapping(k.as_ptr() as *const c_void,
+                                         (&mut result.contents).as_mut_ptr() as *mut c_void, HASH_SIZE) }
+        } else {
+            for i in 0..HASH_SIZE { result.contents[i]=0 }
+        };
+        let mut i=HASH_SIZE-1;
+        while i>0 && result.contents[i]==0xff {
+            result.contents[i]=0;
+            i-=1
+        }
+        if result.contents[i] != 0xff {
+            result.contents[i]+=1
+        } else {
+            panic!("the last patch in the universe has arrived")
+        }
+    } else {
+     */
+    for i in 0..result.contents.len() { result.contents[i]=rand::random() }
+    loop {
+        match repository.get(&repository.db_external(),&result.contents) {
+            None=>break,
+            _=>{for i in 0..result.contents.len() { result.contents[i]=rand::random() }},
+        }
+    }
+    result
+}
+
+pub fn register_hash(repository:&mut Repository,internal:&InternalKey,external:&[u8]) -> Result<(),Error>{
+    debug!(target:"apply","registering patch\n  {}\n  as\n  {}",
+           external.to_hex(),internal.to_hex());
+    let mut db_external = repository.db_external();
+    let mut db_internal = repository.db_internal();
+    try!(repository.put(&mut db_external,&internal.contents,external));
+    try!(repository.put(&mut db_internal,external,&internal.contents));
+    repository.set_db_external(db_external);
+    repository.set_db_internal(db_internal);
+    Ok(())
+}

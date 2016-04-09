@@ -1,11 +1,36 @@
 extern crate std;
 
+/*
 use std::collections::HashSet;
 
 use std::io::Write;
 use std::path::{Path};
 
 use patch::{Patch, FileIndex, Change};
+*/
+
+use super::error::*;
+
+pub trait Backend:Sized {
+    type Db;
+    type Error:std::fmt::Debug;
+    
+    fn db_tree(&self) -> Self::Db;
+    fn set_db_tree(&mut self, db:Self::Db);
+    fn db_revtree(&self) -> Self::Db;
+    fn set_db_revtree(&mut self, db:Self::Db);
+
+    fn commit(self) -> Result<(),Error>;
+
+    fn put(&mut self, &mut Self::Db, key:&[u8], value:&[u8]) -> Result<(),Error>;
+    fn get<'a>(&'a self, &Self::Db, key:&[u8]) -> Result<Option<&'a [u8]>,Error>;
+    fn iterate<'a,F:FnMut(&'a[u8],&'a[u8]) -> bool>(&'a self, db:&Self::Db, key:&[u8], value:Option<&[u8]>, f:F);
+}
+
+
+
+
+/*
 
 /// RepositoryT is a trait containing the core operations on a repository
 pub trait RepositoryT<'b> where Self : Sized {
@@ -62,3 +87,4 @@ pub trait RepositoryT<'b> where Self : Sized {
 
     // new_internal may be or not be a primitive
 }
+*/
