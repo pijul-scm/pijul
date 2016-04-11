@@ -19,7 +19,7 @@
 //! This crate implements operations on Pijul repositories.
 
 use std::path::{Path,PathBuf};
-use std::collections::HashSet;
+use std::collections::{HashSet,HashMap};
 #[macro_use]
 extern crate log;
 extern crate time;
@@ -48,7 +48,7 @@ pub use lmdb_backend::backend;
 
 mod file_operations;
 
-mod graph;
+pub mod graph;
 
 mod optimal_diff;
 pub use optimal_diff::diff;
@@ -70,34 +70,47 @@ pub type Transaction<'env> = backend::Transaction<'env,()>;
 
 pub use backend::{Repository,DEFAULT_BRANCH};
 
+pub use patch::internal_hash;
+
+
 impl<'env,T> backend::Transaction<'env,T> {
-    fn add_file<P:AsRef<Path>>(&mut self, path:P, is_dir:bool)->Result<(),Error>{
+    pub fn add_file<P:AsRef<Path>>(&mut self, path:P, is_dir:bool)->Result<(),Error>{
         let mut db_tree = self.db_tree();
         let mut db_revtree = self.db_revtree();
         file_operations::add_inode(&mut db_tree, &mut db_revtree, None, path.as_ref(), is_dir)
     }
-    fn list_files(&self) -> Vec<PathBuf> {
+    pub fn list_files(&self) -> Vec<PathBuf> {
         file_operations::list_files(self)
     }
 
-    fn remove_file<P:AsRef<Path>>(&mut self, path:P) -> Result<(),Error> {
+    pub fn remove_file<P:AsRef<Path>>(&mut self, path:P) -> Result<(),Error> {
         file_operations::remove_file(self, path.as_ref())
     }
-    fn move_file<P:AsRef<Path>, Q:AsRef<Path>>(&mut self, path:P, path_:Q,is_dir:bool) -> Result<(), Error>{
+    pub fn move_file<P:AsRef<Path>, Q:AsRef<Path>>(&mut self, path:P, path_:Q,is_dir:bool) -> Result<(), Error>{
         file_operations::move_file(self, path.as_ref(), path_.as_ref(), is_dir)
     }
-    fn retrieve_and_output<W:std::io::Write>(&self,branch:&backend::Db,key:&[u8],l:&mut W) {
+    pub fn retrieve_and_output<W:std::io::Write>(&self,branch:&backend::Db,key:&[u8],l:&mut W) {
         let db_contents = self.db_contents();
         let mut redundant_edges = Vec::new();
         let graph = graph::retrieve(branch,key).unwrap();
         graph::output_file(branch, &db_contents, l, graph,&mut redundant_edges);
     }
 
-    fn write_changes_file<P:AsRef<Path>>(&self, branch_name:&str, path:P)->Result<(),Error> {
+    pub fn write_changes_file<P:AsRef<Path>>(&self, branch_name:&str, path:P)->Result<(),Error> {
         unimplemented!()
     }
     pub fn apply_patches(&mut self, branch_name:&str, r:&Path, remote_patches:&HashSet<Vec<u8>>, local_patches:&HashSet<Vec<u8>>) -> Result<(),Error> {
         apply::apply_patches(self, branch_name, r, remote_patches, local_patches)
+    }
+    pub fn apply_local_patch(&mut self, branch_name:&str, location: &Path, patch: patch::Patch, inode_updates:&HashMap<patch::LocalKey,file_operations::Inode>) -> Result<(), Error>{
+        apply::apply_local_patch(self,branch_name,location,patch,inode_updates)
+
+    }
+    pub fn record(&mut self,branch_name:&str, working_copy:&std::path::Path)->Result<(Vec<patch::Change>,HashMap<patch::LocalKey,file_operations::Inode>),Error>{
+        record::record(self,branch_name,working_copy)
+    }
+    pub fn output_repository(&mut self, branch_name:&str, working_copy:&Path, pending:&patch::Patch) -> Result<(),Error>{
+        output::output_repository(self,branch_name,working_copy,pending)
     }
     pub fn debug<W>(&self,branch_name:&str, w:&mut W) where W:std::io::Write {
         unimplemented!() /*

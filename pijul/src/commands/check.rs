@@ -50,7 +50,7 @@ pub fn run(args: &Params) -> Result<(),Error> {
     let wd=try!(get_wd(args.repository));
     match find_repo_root(&wd) {
         Some(ref repo_base) => {
-            let _repository = Repository::new(&pristine_dir(&repo_base)).unwrap(); //.expect("Repository error");
+            let _repository = Repository::open(&pristine_dir(&repo_base)).unwrap(); //.expect("Repository error");
             println!("Your repo looks alright Ma'am/Sir");
             Ok(())
         },

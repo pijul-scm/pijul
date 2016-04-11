@@ -310,9 +310,10 @@ impl<'a> Session<'a> {
             Session::Local{path} =>{
                 let applied_patches:HashSet<Vec<u8>>=try!(self.changes(DEFAULT_BRANCH.as_bytes()));
                 let repo_dir=pristine_dir(path);
-                let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                try!(repo.apply_patches(path,&patch_hashes,&applied_patches));
-                try!(repo.commit());
+                let repo = try!(Repository::open(&repo_dir).map_err(Error::Repository));
+                let mut txn = try!(repo.mut_txn_begin());
+                try!(txn.apply_patches(DEFAULT_BRANCH, path, &patch_hashes,&applied_patches));
+                try!(txn.commit());
                 Ok(())
             }
             _=>{panic!("remote apply not possible")}
@@ -364,9 +365,10 @@ impl<'a> Session<'a> {
             try!(self.download_patch(&target,i));
         }
         let repo_dir=pristine_dir(target);
-        let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-        try!(repo.apply_patches(target,&pullable.remote,&pullable.local));
-        try!(repo.commit());
+        let repo = try!(Repository::open(&repo_dir).map_err(Error::Repository));
+        let mut txn = try!(repo.mut_txn_begin());
+        try!(txn.apply_patches(DEFAULT_BRANCH, target,&pullable.remote,&pullable.local));
+        try!(txn.commit());
         Ok(())
     }
 

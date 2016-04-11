@@ -83,9 +83,10 @@ pub fn run(params : &Params) -> Result<Option<()>, Error> {
             };
             debug!("local={:?}",local);
             let repo_dir=pristine_dir(target);
-            let mut repo = try!(Repository::new(&repo_dir));
-            try!(repo.apply_patches(target,&remote,&local));
-            try!(repo.commit());
+            let repo = try!(Repository::open(&repo_dir));
+            let mut txn = try!(repo.mut_txn_begin());
+            try!(txn.apply_patches(DEFAULT_BRANCH, target,&remote,&local));
+            try!(txn.commit());
             Ok(Some(()))
         }
     }

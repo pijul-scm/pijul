@@ -74,14 +74,14 @@ pub mod backend {
     }
     pub type Repository = lmdb::Env;
     impl Repository {
-        fn open<P:AsRef<Path>>(path:P) -> Result<Self,Error> {
+        pub fn open<P:AsRef<Path>>(path:P) -> Result<Self,Error> {
             let env=try!(lmdb::Env_::new());
             let _=try!(env.reader_check());
             try!(env.set_maxdbs(10));
             try!(env.set_mapsize( (1 << 30) ));
             Ok(try!(env.open(path.as_ref(),0,0o755)))
         }
-        fn mut_txn_begin<'env>(&'env self) -> Result<Transaction<'env,()>,Error> {
+        pub fn mut_txn_begin<'env>(&'env self) -> Result<Transaction<'env,()>,Error> {
             unsafe {
                 let txn=try!(self.unsafe_txn(0));
                 let dbi_nodes=try!(txn.unsafe_dbi_open(b"nodes\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT|lmdb::MDB_DUPFIXED));

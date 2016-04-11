@@ -6,6 +6,7 @@ use self::rustc_serialize::hex::{ToHex};
 extern crate libpijul;
 //use self::libpijul::fs_representation::{patches_dir};
 use self::libpijul::patch::{Change,Value,Patch,LINE_SIZE,HASH_SIZE,KEY_SIZE};
+
 extern crate time;
 //use std::path::Path;
 use std::io::{stdout};
@@ -16,7 +17,7 @@ extern crate termios;
 use self::termios::{tcsetattr,ICANON,ECHO};
 
 use super::error::Error;
-use self::libpijul::Repository;
+use self::libpijul::{Repository,Transaction,internal_hash};
 use self::libpijul::graph::{FOLDER_EDGE,PARENT_EDGE};
 use std::io::stdin;
 use std::char::from_u32_unchecked;
@@ -235,7 +236,7 @@ fn change_deps(id:usize,c:&Change,provided_by:&mut HashMap<u32,usize>)->HashSet<
     s
 }
 
-fn print_change<'a>(repo:&Repository<'a>,c:&Change)->Result<(),Error> {
+fn print_change(repo:&Transaction,c:&Change)->Result<(),Error> {
     match *c {
         Change::NewNodes{/*ref up_context,ref down_context,ref line_num,*/ref flag,ref nodes,..}=>{
             for n in nodes {
@@ -259,7 +260,8 @@ fn print_change<'a>(repo:&Repository<'a>,c:&Change)->Result<(),Error> {
                         if h_targets.insert(&e.from) { Some(&e.from) } else { None }
                     };
                 if let Some(target)=target {
-                    let int=try!(repo.internal_hash(&target[0..target.len()-LINE_SIZE]));
+                    let db_internal = repo.db_internal();
+                    let int=try!(internal_hash(&db_internal, &target[0..target.len()-LINE_SIZE]));
                     let mut internal=[0;KEY_SIZE];
                     unsafe {
                         copy_nonoverlapping(int.contents.as_ptr(),internal.as_mut_ptr(),HASH_SIZE);
@@ -267,7 +269,10 @@ fn print_change<'a>(repo:&Repository<'a>,c:&Change)->Result<(),Error> {
                                             internal.as_mut_ptr().offset(HASH_SIZE as isize),
                                             LINE_SIZE)
                     };
-                    print!("- {}",str::from_utf8(repo.contents(&internal[..])).unwrap_or(""));
+                    let db_contents = repo.db_contents();
+                    for l in db_contents.contents(&internal[..]).unwrap() {
+                        print!("- {}",str::from_utf8(l).unwrap_or(""))
+                    }
                 }
             }
             Ok(())
@@ -275,7 +280,7 @@ fn print_change<'a>(repo:&Repository<'a>,c:&Change)->Result<(),Error> {
     }
 }
 
-pub fn ask_record<'a>(repository:&Repository<'a>,changes:&[Change])->Result<HashMap<usize,bool>,Error> {
+pub fn ask_record(repository:&Transaction,changes:&[Change])->Result<HashMap<usize,bool>,Error> {
     try!(init_getch());
     let mut i=0;
     let mut choices:HashMap<usize,bool>=HashMap::new();

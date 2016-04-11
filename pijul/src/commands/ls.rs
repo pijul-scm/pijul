@@ -54,8 +54,9 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error> {
         Some(ref r) =>
         {
             let repo_dir=pristine_dir(r);
-            let repo = try!(Repository::new(&repo_dir).map_err(error::Error::Repository));
-            let files=repo.list_files();
+            let repo = try!(Repository::open(&repo_dir).map_err(error::Error::Repository));
+            let txn = try!(repo.mut_txn_begin());
+            let files = txn.list_files();
             for f in files {
                 println!("{:?}",f)
             }

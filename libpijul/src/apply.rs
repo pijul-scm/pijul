@@ -29,6 +29,11 @@ use std::ptr::copy_nonoverlapping;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
+use time;
+use std::sync::Arc;
+use std::thread;
+use super::fs_representation::patches_dir;
+use rustc_serialize::hex::ToHex;
 
 /// Test whether a node has edges unknown to the patch we're applying.
 fn has_exclusive_edge(branch: &Db,
@@ -798,4 +803,72 @@ pub fn apply_patches<T>(repository:&mut Transaction<T>,
         repository.debug(branch_name, &mut buffer);
     }
     Ok(())
+}
+
+/// Apply a patch from a local record: register it, give it a hash, and then apply.
+pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, location: &Path, patch: Patch, inode_updates:&HashMap<LocalKey,Inode>)
+                         -> Result<(), Error>{
+    info!("registering a patch with {} changes", patch.changes.len());
+    let patch = Arc::new(patch);
+    let child_patch = patch.clone();
+    let patches_dir = patches_dir(location);
+    let hash_child = thread::spawn(move || {
+        let t0 = time::precise_time_s();
+        let hash = child_patch.save(&patches_dir);
+        let t1 = time::precise_time_s();
+        info!("hashed patch in {}s", t1-t0);
+        hash
+    });
+
+    let t0 = time::precise_time_s();
+    let internal : &InternalKey = &new_internal(repository);// InternalKey::new( &internal );
+    debug!(target:"pijul", "applying patch");
+    try!(apply(repository, branch_name, &patch, internal, &HashSet::new()));
+    debug!(target:"pijul", "synchronizing tree");
+    {
+        let mut branch = repository.db_nodes(branch_name);
+        let mut db_inodes = repository.db_inodes();
+        let mut db_revinodes = repository.db_revinodes();
+        {
+            let mut key=[0;3+KEY_SIZE];
+            unsafe {copy_nonoverlapping(internal.contents.as_ptr(),key.as_mut_ptr().offset(3),HASH_SIZE)}
+            for (local_key,inode) in inode_updates.iter() {
+                unsafe {
+                    copy_nonoverlapping(local_key.as_ptr().offset(2),
+                                        key.as_mut_ptr().offset(3+HASH_SIZE as isize),LINE_SIZE);
+                    copy_nonoverlapping(local_key.as_ptr(),
+                                        key.as_mut_ptr().offset(1),2);
+                }
+                // If this file addition was finally recorded (i.e. in dbi_nodes)
+                debug!(target:"record_all","apply_local_patch: {:?}",key.to_hex());
+                if branch.get(&key[3..]).is_some() {
+                    debug!(target:"record_all","it's in here!: {:?} {:?}",key.to_hex(),inode.to_hex());
+                    try!(db_inodes.put(inode.as_ref(),&key[..]));
+                    try!(db_revinodes.put(&key[3..],inode.as_ref()));
+                }
+            }
+        }
+        if cfg!(debug_assertions){
+            let mut buffer = BufWriter::new(File::create(location.join("debug")).unwrap());
+            repository.debug(branch_name, &mut buffer);
+        }
+    }
+    let t2 = time::precise_time_s();
+    info!("applied patch in {}s", t2 - t0);
+    match hash_child.join() {
+        Ok(Ok(hash))=> {
+            register_hash(repository, internal,&hash[..]);
+            debug!(target:"record","hash={}, local={}",hash.to_hex(),internal.to_hex());
+            try!(repository.write_changes_file(branch_name, location));
+            let t3=time::precise_time_s();
+            info!("changes files took {}s to write", t3-t2);
+            Ok(())
+        },
+        Ok(Err(x)) => {
+            Err(x)
+        },
+        Err(_)=>{
+            panic!("saving patch")
+        }
+    }
 }

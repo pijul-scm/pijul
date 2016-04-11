@@ -21,7 +21,7 @@ use clap::{SubCommand, ArgMatches,Arg};
 
 use commands::StaticSubcommand;
 extern crate libpijul;
-use self::libpijul::{Repository};
+use self::libpijul::{Repository,DEFAULT_BRANCH};
 use self::libpijul::patch::{Patch};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
 use std::path::{Path};
@@ -53,8 +53,9 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error> {
         Some(ref r) =>
         {
             let repo_dir=pristine_dir(r);
-            let mut repo = try!(Repository::new(&repo_dir));
-            try!(repo.output_repository(&r,&Patch::empty()));
+            let repo = try!(Repository::open(&repo_dir));
+            let mut txn = try!(repo.mut_txn_begin());
+            try!(txn.output_repository(DEFAULT_BRANCH, &r,&Patch::empty()));
             Ok(())
         }
     }

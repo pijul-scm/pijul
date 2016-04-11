@@ -21,7 +21,7 @@ use clap::{SubCommand, ArgMatches, Arg};
 
 extern crate libpijul;
 use commands::StaticSubcommand;
-use self::libpijul::{Repository};
+use self::libpijul::{Repository,DEFAULT_BRANCH};
 use self::libpijul::patch::{Patch,Value};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
 
@@ -90,10 +90,11 @@ pub fn run(args : &Params) -> Result<Option<()>, Error> {
             let repo_dir=pristine_dir(r);
             let t0=time::precise_time_s();
             let (changes,syncs)= {
-                let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                let (changes,syncs)=try!(repo.record(&r).map_err(Error::Repository));
+                let repo = try!(Repository::open(&repo_dir).map_err(Error::Repository));
+                let mut txn = try!(repo.mut_txn_begin());
+                let (changes,syncs)=try!(txn.record(DEFAULT_BRANCH, &r).map_err(Error::Repository));
                 if !args.yes_to_all {
-                    let c=try!(super::ask::ask_record(&repo,&changes));
+                    let c=try!(super::ask::ask_record(&txn,&changes));
                     let selected =
                         changes.into_iter()
                         .enumerate()
@@ -162,9 +163,10 @@ pub fn run(args : &Params) -> Result<Option<()>, Error> {
                 };
                 debug!("register_patch");
                 // save patch
-                let mut repo = try!(Repository::new(&repo_dir).map_err(Error::Repository));
-                let () = try!(repo.apply_local_patch(r, patch, &syncs).map_err(Error::Repository));
-                try!(repo.commit());
+                let repo = try!(Repository::open(&repo_dir).map_err(Error::Repository));
+                let mut txn = try!(repo.mut_txn_begin());
+                try!(txn.apply_local_patch(DEFAULT_BRANCH, r, patch, &syncs).map_err(Error::Repository));
+                try!(txn.commit());
                 Ok(Some(()))
             }
         }

@@ -97,11 +97,12 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
 pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error> {
     let repo_root = try!(get_wd(args.repository));
     let pristine = pristine_dir(&repo_root);
-    let mut repo = try!(Repository::new(&pristine).map_err(error::Error::Repository));
+    let repo = try!(Repository::open(&pristine).map_err(error::Error::Repository));
+    let mut txn = try!(repo.mut_txn_begin()); 
     match args.movement {
         Movement::FileToFile { from : ref orig_path, to : ref dest_path } =>
         {
-            try!(repo.move_file(orig_path.as_path(), dest_path.as_path(), false));
+            try!(txn.move_file(orig_path.as_path(), dest_path.as_path(), false));
             try!(rename(repo_root.join(orig_path.as_path()), repo_root.join(dest_path.as_path())));
             Ok(())
         },
@@ -115,7 +116,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error> {
                     dest_dir.as_path().join(&target_basename)
                 };
                 let is_dir = try!(metadata(&repo_root.join(f))).is_dir();
-                try!(repo.move_file(f, &repo_target_name.as_path(), is_dir));
+                try!(txn.move_file(f, &repo_target_name.as_path(), is_dir));
             };
             for file in orig_paths {
                 let f = & file.as_path();

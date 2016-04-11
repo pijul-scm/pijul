@@ -40,14 +40,15 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
         {
             debug!(target:"mv","repo {:?}",r);
             let repo_dir=pristine_dir(r);
-            let mut repo = try!(Repository::new(&repo_dir).map_err(error::Error::Repository));
+            let repo = try!(Repository::open(&repo_dir).map_err(error::Error::Repository));
+            let mut txn = try!(repo.mut_txn_begin());
             match op {
                 Operation::Add =>{
                     for file in &files[..] {
                         let p=try!(canonicalize(wd.join(*file)));
                         let m=try!(metadata(&p));
                         if let Some(file)=iter_after(p.components(), r.components()) {
-                            try!(repo.add_file(file.as_path(),m.is_dir()))
+                            try!(txn.add_file(file.as_path(),m.is_dir()))
                         } else {
                             return Err(Error::InvalidPath(file.to_string_lossy().into_owned()))
                         }
@@ -57,14 +58,14 @@ pub fn run<'a>(args : &Params<'a>, op : Operation)
                     for file in &files[..] {
                         let p=try!(canonicalize(wd.join(*file)));
                         if let Some(file)=iter_after(p.components(), r.components()) {
-                            try!(repo.remove_file(file.as_path()))
+                            try!(txn.remove_file(file.as_path()))
                         } else {
                             return Err(Error::InvalidPath(file.to_string_lossy().into_owned()))
                         }
                     }
                 }
             }
-            try!(repo.commit());
+            try!(txn.commit());
             Ok(Some(()))
         }
     }
