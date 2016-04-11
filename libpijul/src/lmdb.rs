@@ -202,7 +202,7 @@ impl <'a>Txn<'a> {
             } else {Err(Error::from_raw_os_error(e))}
         }
     }
-    pub fn put<'b>(&'b mut self,dbi:Dbi,key:&[u8],value:&[u8],flags:c_uint)->Result<bool,Error> {
+    pub fn put<'b>(&'b self,dbi:Dbi,key:&[u8],value:&[u8],flags:c_uint)->Result<bool,Error> {
         unsafe {
             let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             let mut v=MDB_val { mv_data:value.as_ptr() as *const c_void, mv_size:value.len() as size_t };
@@ -219,7 +219,7 @@ impl <'a>Txn<'a> {
         }
     }
 
-    pub fn del<'b>(&'b mut self,dbi:Dbi,key:&[u8],val:Option<&[u8]>)->Result<bool,io::Error> {
+    pub fn del<'b>(&'b self,dbi:Dbi,key:&[u8],val:Option<&[u8]>)->Result<bool,io::Error> {
         unsafe {
             let mut k=MDB_val { mv_data:key.as_ptr() as *const c_void, mv_size:key.len() as size_t };
             let e= match val {

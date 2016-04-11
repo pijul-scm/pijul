@@ -29,7 +29,7 @@ pub mod backend {
     use super::super::Len;
 
 
-    pub struct Repository<'env> {
+    pub struct Transaction<'env,Parent> {
         txn: lmdb::Txn<'env>,
         dbi_tree: lmdb::Dbi,
         dbi_revtree: lmdb::Dbi,
@@ -38,7 +38,10 @@ pub mod backend {
         dbi_nodes: lmdb::Dbi,
         dbi_contents: lmdb::Dbi,
         dbi_internal: lmdb::Dbi,
-        dbi_external: lmdb::Dbi
+        dbi_external: lmdb::Dbi,
+        dbi_branches: lmdb::Dbi,
+        dbi_revdep: lmdb::Dbi,
+        parent:Parent
     }
     const MAIN_BRANCH:&'static [u8] = b"main";
 
@@ -69,8 +72,8 @@ pub mod backend {
             Contents { contents: self.contents }
         }
     }
-
-    impl lmdb::Env {
+    pub type Repository = lmdb::Env;
+    impl Repository {
         fn open<P:AsRef<Path>>(&self, path:P) -> Result<Self,Error> {
             let env=try!(lmdb::Env_::new());
             let _=try!(env.reader_check());
@@ -78,7 +81,7 @@ pub mod backend {
             try!(env.set_mapsize( (1 << 30) ));
             Ok(try!(env.open(path.as_ref(),0,0o755)))
         }
-        fn mut_txn_begin<'env>(&'env self) -> Result<Repository<'env>,Error> {
+        fn mut_txn_begin<'env>(&'env self) -> Result<Transaction<'env,()>,Error> {
             unsafe {
                 let txn=try!(self.unsafe_txn(0));
                 let dbi_nodes=try!(txn.unsafe_dbi_open(b"nodes\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT|lmdb::MDB_DUPFIXED));
@@ -89,9 +92,11 @@ pub mod backend {
                 let dbi_contents=try!(txn.unsafe_dbi_open(b"contents\0",lmdb::MDB_CREATE));
                 let dbi_internal=try!(txn.unsafe_dbi_open(b"internal\0",lmdb::MDB_CREATE));
                 let dbi_external=try!(txn.unsafe_dbi_open(b"external\0",lmdb::MDB_CREATE));
+                let dbi_branches=try!(txn.unsafe_dbi_open(b"branches\0",lmdb::MDB_CREATE));
+                let dbi_revdep=try!(txn.unsafe_dbi_open(b"revdep\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT));
 
 
-                let repo = Repository{
+                let repo = Transaction {
                     txn: txn,
                     dbi_tree: dbi_tree,
                     dbi_revtree: dbi_revtree,
@@ -100,76 +105,84 @@ pub mod backend {
                     dbi_nodes: dbi_nodes,
                     dbi_contents: dbi_contents,
                     dbi_internal: dbi_internal,
-                    dbi_external: dbi_external
+                    dbi_external: dbi_external,
+                    dbi_branches: dbi_branches,
+                    dbi_revdep: dbi_revdep,
+                    parent:()
                 };
                 Ok(repo)
             }
         }
     }
 
-    pub type Db = lmdb::Dbi;
-    impl<'env> Repository<'env>{
+    pub struct Db<'txn,'env:'txn> { dbi: lmdb::Dbi, txn:&'txn lmdb::Txn<'env> }
+
+    impl<'env,T> Transaction<'env,T>{
         
-        pub fn db_tree(&self) -> Db { self.dbi_tree }
-        pub fn set_db_tree(&mut self, db:Db) { self.dbi_tree = db }
-        pub fn db_revtree(&self) -> Db { self.dbi_revtree }
-        pub fn set_db_revtree(&mut self, db:Db) { self.dbi_revtree = db }
-        pub fn db_inodes(&self) -> Db { self.dbi_inodes }
-        pub fn set_db_inodes(&mut self, db:Db) { self.dbi_inodes = db }
-        pub fn db_revinodes(&self) -> Db { self.dbi_revinodes }
-        pub fn set_db_revinodes(&mut self, db:Db) { self.dbi_revinodes = db }
-        pub fn db_nodes(&self, branch:&[u8]) -> Db {
+        pub fn db_tree<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi:self.dbi_tree,txn:&self.txn } }
+        pub fn db_revtree<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi:self.dbi_revtree, txn:&self.txn } }
+
+        pub fn db_inodes<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi: self.dbi_inodes, txn:&self.txn } }
+        pub fn db_revinodes<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi:self.dbi_revinodes, txn:&self.txn } }
+
+        pub fn db_contents<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi: self.dbi_contents, txn:&self.txn } }
+
+        pub fn db_revdep<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi: self.dbi_revdep, txn:&self.txn } }
+
+        pub fn db_nodes<'txn>(&'txn self, branch:&[u8]) -> Db<'txn,'env> {
             if branch == MAIN_BRANCH {
-                self.dbi_nodes
+                Db { dbi:self.dbi_nodes, txn:&self.txn }
             } else {
                 panic!("The LMDB backend does not handle multi-head repositories")
             }
         }
-        pub fn set_db_nodes(&mut self, branch:&[u8], db: Db) {
-            if branch == MAIN_BRANCH {
-                self.dbi_nodes = db
-            } else {
-                panic!("The LMDB backend does not handle multi-head repositories")
-            }
+
+        pub fn db_branches<'txn>(&'txn self) -> Db<'txn,'env> {
+            Db { dbi:self.dbi_branches, txn:&self.txn }
         }
 
-        pub fn db_internal(&self) -> Db { self.dbi_internal }
-        pub fn set_db_internal(&mut self, db:Db) { self.dbi_internal = db }
-        pub fn db_external(&self) -> Db { self.dbi_external }
-        pub fn set_db_external(&mut self, db:Db) { self.dbi_external = db }
+        pub fn db_internal(&self) -> Db { Db { dbi: self.dbi_internal, txn: &self.txn } }
+        pub fn db_external(&self) -> Db { Db { dbi: self.dbi_external, txn: &self.txn } }
 
-
-        
-        pub fn put(&mut self, db:&mut Db, key:&[u8], value:&[u8]) -> Result<(),Error> {
-            try!(self.txn.put(*db, key, value, 0));
-            Ok(())
-        }
-        pub fn del(&mut self, db:&mut Db, key:&[u8], value:Option<&[u8]>) -> Result<(),Error> {
-            try!(self.txn.del(*db, key, value));
-            Ok(())
-        }
-        pub fn get<'a>(&'a self, db:&Db, key:&[u8]) -> Option<&'a[u8]> {
-            self.txn.get(*db, key).unwrap_or(None)
-        }
-
-        pub fn contents<'a>(&'a self, key:&[u8]) -> Option<Contents<'a>> {
-            let db = self.dbi_contents;
-            self.get(&db, key).and_then(|contents| Some(Contents { contents:Some(contents) }))
-        }
-
-        pub fn iter<'a>(&'a self, db:&Db, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a,'env> {
-            unimplemented!()
-        }
         pub fn commit(self) -> Result<(),Error> {
             try!(self.txn.commit());
             Ok(())
         }
+        pub fn abort(self) {
+            self.txn.abort();
+        }
+        pub fn child(&mut self) -> Transaction<'env, Self> {
+            unimplemented!()
+        }
     }
-    pub struct Iter<'a,'env:'a> {
+
+    impl<'txn,'env> Db<'txn,'env> {
+        
+        pub fn put(&mut self, key:&[u8], value:&[u8]) -> Result<(),Error> {
+            try!(self.txn.put(self.dbi, key, value, 0));
+            Ok(())
+        }
+        pub fn del(&mut self, key:&[u8], value:Option<&[u8]>) -> Result<(),Error> {
+            try!(self.txn.del(self.dbi, key, value));
+            Ok(())
+        }
+        pub fn get<'a>(&'a self, key:&[u8]) -> Option<&'a[u8]> {
+            self.txn.get(self.dbi, key).unwrap_or(None)
+        }
+        pub fn iter<'a>(&'a self, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a,'txn,'env> {
+            unimplemented!()
+        }
+
+        pub fn contents<'a>(&'a self, key:&[u8]) -> Option<Contents<'a>> {
+            self.get(key).and_then(|contents| Some(Contents { contents:Some(contents) }))
+        }
+
+    }
+    pub struct Iter<'a,'txn:'a,'env:'txn> {
         current:Option<(&'a[u8],&'a[u8])>,
-        repo:&'a Repository<'env>
+        repo:&'a Db<'txn,'env>
     }
-    impl<'a,'b> Iterator for Iter<'a,'b> {
+    impl<'a,'b,'c> Iterator for Iter<'a,'b,'c> {
         type Item = (&'a[u8],&'a[u8]);
         fn next(&mut self) -> Option<Self::Item> {
             unimplemented!()

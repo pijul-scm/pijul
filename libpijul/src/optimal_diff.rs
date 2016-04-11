@@ -29,16 +29,17 @@ pub mod diff {
     use std::path::Path;
     use std::io::Read;
 
-    fn delete_edges(repository:&Repository, branch:&Db, edges:&mut Vec<Edge>, key:&[u8],flag:u8) {
+    fn delete_edges<T>(repository:&Transaction<T>, branch:&Db, edges:&mut Vec<Edge>, key:&[u8],flag:u8) {
         if key.len() > 0 {
-            let ext_key=external_key(repository,key);
-            for (k,v) in repository.iter(branch, key, Some(&[flag])) {
+            let ext = repository.db_external();
+            let ext_key=external_key(&ext,key);
+            for (k,v) in branch.iter(key, Some(&[flag])) {
                 if v[0] >= flag && v[0] <= flag | (PSEUDO_EDGE|FOLDER_EDGE) {
                     if v[0]&PSEUDO_EDGE == 0 {
                         edges.push(Edge {
                             from:ext_key.clone(),
-                            to:external_key(repository, &v[1..(1+KEY_SIZE)]),
-                            introduced_by:external_key(repository, &v[(1+KEY_SIZE)..]) });
+                            to:external_key(&ext, &v[1..(1+KEY_SIZE)]),
+                            introduced_by:external_key(&ext, &v[(1+KEY_SIZE)..]) });
                     }
                 } else {
                     break
@@ -47,13 +48,14 @@ pub mod diff {
         }
     }
 
-    fn add_lines(repository:&Repository, line_num:&mut usize, up_context:&[u8],
-                 down_context:&[&[u8]], lines:&[&[u8]])
-                 -> patch::Change
+    fn add_lines<T>(repository:&Transaction<T>, line_num:&mut usize, up_context:&[u8],
+                    down_context:&[&[u8]], lines:&[&[u8]])
+                    -> patch::Change
     {
+        let ext = repository.db_external();
         let changes = Change::NewNodes {
-            up_context:vec!(external_key(repository, up_context)),
-            down_context:down_context.iter().map(|x|{external_key(repository, x)}).collect(),
+            up_context:vec!(external_key(&ext, up_context)),
+            down_context:down_context.iter().map(|x|{external_key(&ext, x)}).collect(),
             line_num: *line_num as u32,
             flag:0,
             nodes:lines.iter().map(|x|{x.to_vec()}).collect()
@@ -63,7 +65,7 @@ pub mod diff {
     }
 
 
-    fn delete_lines(repository:&Repository, branch:&Db, lines:&[&[u8]]) -> Change
+    fn delete_lines<T>(repository:&Transaction<T>, branch:&Db, lines:&[&[u8]]) -> Change
     {
         let mut edges=Vec::with_capacity(lines.len());
         for i in 0..lines.len() {
@@ -73,7 +75,7 @@ pub mod diff {
         Change::Edges{edges:edges, flag:PARENT_EDGE|DELETED_EDGE}
     }
 
-    fn local_diff(repository:&Repository, branch:&Db, actions:&mut Vec<Change>,
+    fn local_diff<T>(repository:&Transaction<T>, branch:&Db, actions:&mut Vec<Change>,
                   line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[Contents], b:&[&[u8]])
     {
         debug!(target:"conflictdiff","local_diff {} {}",contents_a.len(),b.len());
@@ -192,7 +194,7 @@ pub mod diff {
         }
     }
 
-    pub fn diff<'a>(repository:&Repository,branch:&Db,line_num:&mut usize, actions:&mut Vec<Change>,
+    pub fn diff<'a,T>(repository:&Transaction<T>,branch:&Db,line_num:&mut usize, actions:&mut Vec<Change>,
                     redundant:&mut Vec<u8>,
                     a:Graph<'a>, b:&Path)->Result<(),std::io::Error> {
         
@@ -220,8 +222,9 @@ pub mod diff {
         match err {
             Ok(_)=>{
                 //let t0=time::precise_time_s();
+                let db_contents = repository.db_contents();
                 let mut d = Diff { lines_a:Vec::new(), contents_a:Vec::new() };
-                graph::output_file(repository,branch, &mut d,a,redundant);
+                graph::output_file(branch, &db_contents, &mut d,a,redundant);
                 //let t1=time::precise_time_s();
                 //info!("output_file took {}s",t1-t0);
                 local_diff(repository, branch, actions, line_num,

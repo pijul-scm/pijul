@@ -17,7 +17,7 @@ use self::termios::{tcsetattr,ICANON,ECHO};
 
 use super::error::Error;
 use self::libpijul::Repository;
-use self::libpijul::contents::{FOLDER_EDGE,PARENT_EDGE};
+use self::libpijul::graph::{FOLDER_EDGE,PARENT_EDGE};
 use std::io::stdin;
 use std::char::from_u32_unchecked;
 use std::str;

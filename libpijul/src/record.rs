@@ -46,8 +46,8 @@ fn permissions(attr:&std::fs::Metadata)->usize{
 
 
 macro_rules! iterate_parents {
-    ($repository:expr, $branch:expr, $key:expr) => {
-        $repository.iter($branch, $key, Some(&[FOLDER_EDGE|PARENT_EDGE][..]))
+    ($branch:expr, $key:expr) => {
+        $branch.iter($key, Some(&[FOLDER_EDGE|PARENT_EDGE][..]))
             .take_while(|&(k,parent)| {
                 k == $key && parent[0] >= FOLDER_EDGE|PARENT_EDGE && parent[0] <= FOLDER_EDGE|PARENT_EDGE|PSEUDO_EDGE
             })
@@ -56,8 +56,8 @@ macro_rules! iterate_parents {
 }
 
 
-pub fn record_all (
-    repository:&Repository,
+pub fn record_all<T> (
+    repository:&Transaction<T>,
     branch:&Db,
     actions:&mut Vec<Change>,
     line_num:&mut usize,
@@ -74,9 +74,11 @@ pub fn record_all (
     //debug!(target:"record_all","inode:{:?}",current_inode.to_hex());
 
     let mut l2=[0;LINE_SIZE];
+    let db_external = repository.db_external();
+    let db_contents = repository.db_contents();
     let current_node=
         if parent_inode.is_some() {
-            match repository.get(branch, current_inode.as_ref()) {
+            match branch.get(current_inode.as_ref()) {
                 Some(current_node)=>{
                     let old_attr=((current_node[1] as usize) << 8) | (current_node[2] as usize);
                     // Add the new name.
@@ -105,22 +107,21 @@ pub fn record_all (
                         name.push(((int_attr >> 8) & 0xff) as u8);
                         name.push((int_attr & 0xff) as u8);
                         name.extend(basename);
-
-                        for parent in iterate_parents!(repository, branch, &current_node[3..]) {
+                        for parent in iterate_parents!(branch, &current_node[3..]) {
                             let mut previous_name=
-                                match repository.contents(&parent[1..(1+KEY_SIZE)]) {
+                                match db_contents.contents(&parent[1..(1+KEY_SIZE)]) {
                                     None=>Contents::from_slice(b""),
                                     Some(n)=>n
                                 };
                             let name_changed = !super::eq(&mut Contents::from_slice(&name[..]),
                                                           &mut previous_name);
-                            for grandparent in iterate_parents!(repository, branch, &parent[1..(1+KEY_SIZE)]) {
+                            for grandparent in iterate_parents!(branch, &parent[1..(1+KEY_SIZE)]) {
                                 if &grandparent[1..(1+KEY_SIZE)] != parent_node.unwrap()
                                     || name_changed {
                                         edges.push(Edge {
-                                            from:external_key(repository, &parent[1..(1+KEY_SIZE)]),
-                                            to:external_key(repository, &grandparent[1..(1+KEY_SIZE)]),
-                                            introduced_by:external_key(repository, &grandparent[1+KEY_SIZE..])
+                                            from:external_key(&db_external, &parent[1..(1+KEY_SIZE)]),
+                                            to:external_key(&db_external, &grandparent[1..(1+KEY_SIZE)]),
+                                            introduced_by:external_key(&db_external, &grandparent[1+KEY_SIZE..])
                                         })
                                     }
                             }
@@ -157,13 +158,13 @@ pub fn record_all (
                             actions.push(
                                 Change::NewNodes { up_context:{
                                     let p=parent_node.unwrap();
-                                    vec!(if p.len()>LINE_SIZE { external_key(repository, &p) }
+                                    vec!(if p.len()>LINE_SIZE { external_key(&db_external, &p) }
                                          else { p.to_vec() })
                                 },
                                                    line_num: *line_num as u32,
                                                    down_context:{
                                                        let p=&current_node[3..];
-                                                       vec!(if p.len()>LINE_SIZE { external_key(repository, &p) }
+                                                       vec!(if p.len()>LINE_SIZE { external_key(&db_external, &p) }
                                                             else { p.to_vec() })
                                                    },
                                                    nodes: vec!(name),
@@ -175,7 +176,7 @@ pub fn record_all (
                         if old_attr & DIRECTORY_FLAG == 0 {
                             info!("retrieving");
                             //let time0=time::precise_time_s();
-                            let ret = retrieve(repository, branch, &current_node[3..]);
+                            let ret = retrieve(branch, &current_node[3..]);
                             //let time1=time::precise_time_s();
                             //info!("retrieve took {}s, now calling diff", time1-time0);
                             diff::diff(repository, branch, line_num,actions, redundant,ret.unwrap(), realpath.as_path()).unwrap();
@@ -187,12 +188,12 @@ pub fn record_all (
 
                         let mut edges=Vec::new();
                         // Now take all grandparents of l2, delete them.
-                        for parent in iterate_parents!(repository, branch, &current_node[3..]) {
-                            for grandparent in iterate_parents!(repository, branch, &parent[1..(1+KEY_SIZE)]) {
+                        for parent in iterate_parents!(branch, &current_node[3..]) {
+                            for grandparent in iterate_parents!(branch, &parent[1..(1+KEY_SIZE)]) {
                                 edges.push(Edge {
-                                    from: external_key(repository, &parent[1..(1+KEY_SIZE)]),
-                                    to: external_key(repository, &grandparent[1..(1+KEY_SIZE)]),
-                                    introduced_by: external_key(repository, &grandparent[1+KEY_SIZE..])
+                                    from: external_key(&db_external, &parent[1..(1+KEY_SIZE)]),
+                                    to: external_key(&db_external, &grandparent[1..(1+KEY_SIZE)]),
+                                    introduced_by: external_key(&db_external, &grandparent[1+KEY_SIZE..])
                                 })
                             }
                         }
@@ -201,18 +202,18 @@ pub fn record_all (
                         let mut file_edges=vec!();
                         {
                             //debug!(target:"record_all","del={}",current_node.to_hex());
-                            let ret = retrieve(repository, branch, &current_node[3..]).unwrap();
+                            let ret = retrieve(branch, &current_node[3..]).unwrap();
                             for l in ret.lines {
                                 if l.key.len()>0 {
-                                    let ext_key = external_key(repository, l.key);
+                                    let ext_key = external_key(&db_external, l.key);
                                     //debug!(target:"record_all","ext_key={}",ext_key.to_hex());
-                                    for v in iterate_parents!(repository, branch, l.key) {
+                                    for v in iterate_parents!(branch, l.key) {
 
                                         //debug!(target:"record_all","v={}",v.to_hex());
                                         if v[0] & FOLDER_EDGE != 0 { &mut edges } else { &mut file_edges }
                                         .push(Edge { from: ext_key.clone(),
-                                                     to: external_key(repository, &v[1..(1+KEY_SIZE)]),
-                                                     introduced_by: external_key(repository, &v[(1+KEY_SIZE)..]) });
+                                                     to: external_key(&db_external, &v[1..(1+KEY_SIZE)]),
+                                                     introduced_by: external_key(&db_external, &v[(1+KEY_SIZE)..]) });
                                     }
                                 }
                             }
@@ -225,7 +226,7 @@ pub fn record_all (
                     } else if current_node[0]==0 {
                         if old_attr & DIRECTORY_FLAG == 0 {
                             //let time0=time::precise_time_s();
-                            let ret = retrieve(repository, branch, &current_node[3..]);
+                            let ret = retrieve(branch, &current_node[3..]);
                             //let time1=time::precise_time_s();
                             //info!(target:"record_all","record: retrieve took {}s, now calling diff", time1-time0);
                             diff::diff(repository, branch, line_num, actions, redundant,
@@ -266,7 +267,7 @@ pub fn record_all (
                             actions.push(
                                 Change::NewNodes { up_context: vec!(
                                     if parent_node.unwrap().len()>LINE_SIZE {
-                                        external_key(repository, parent_node.unwrap())
+                                        external_key(&db_external, parent_node.unwrap())
                                     } else {parent_node.unwrap().to_vec()}
                                 ),
                                                    line_num: *line_num as u32,
@@ -320,7 +321,7 @@ pub fn record_all (
         Some(current_node)=>{
             //debug!(target:"record_all","children of current_inode {}",current_inode.to_hex());
             let db_tree = repository.db_tree();
-            for (k,v) in repository.iter(&db_tree, current_inode.as_ref(), None) {
+            for (k,v) in db_tree.iter(current_inode.as_ref(), None) {
 
                 if k == current_inode.as_ref() {
 
@@ -343,4 +344,24 @@ pub fn record_all (
     }
     if parent_inode.is_some() { let _=realpath.pop(); }
     Ok(())
+}
+
+pub fn record<T>(repository:&mut Transaction<T>,branch_name:&[u8], working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<LocalKey,Inode>),Error>{
+    let mut actions:Vec<Change>=Vec::new();
+    let mut line_num=1;
+    let mut updatables:HashMap<LocalKey,Inode>=HashMap::new();
+    let mut redundant=vec!();
+    let mut branch = repository.db_nodes(branch_name);
+    {
+        let mut realpath=PathBuf::from(working_copy);
+        try!(record_all(repository, &branch,
+                        &mut actions, &mut line_num,&mut redundant,&mut updatables,
+                        None,None, ROOT_INODE,&mut realpath,
+                        &[]));
+        debug!(target:"record","record done, {} changes", actions.len());
+    }
+    super::graph::remove_redundant_edges(&mut branch, &mut redundant);
+    //repository.set_db_nodes(branch_name, branch);
+    debug!("remove_redundant_edges done");
+    Ok((actions,updatables))
 }

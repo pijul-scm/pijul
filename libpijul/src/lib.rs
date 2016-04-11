@@ -21,6 +21,7 @@
 use std::path::{Path,PathBuf};
 #[macro_use]
 extern crate log;
+extern crate time;
 
 mod lmdb;
 pub mod error;
@@ -43,6 +44,7 @@ pub mod patch;
 
 mod lmdb_backend;
 pub use lmdb_backend::backend;
+
 mod file_operations;
 
 mod graph;
@@ -60,10 +62,19 @@ impl <'a,W> graph::LineBuffer<'a> for W where W:std::io::Write {
 
 
 mod record;
+mod output;
+mod apply;
 
-impl<'env> backend::Repository<'env> {
+pub const DEFAULT_BRANCH:&'static str = "main";
+pub type Transaction<'env> = backend::Transaction<'env,()>;
+
+pub use backend::Repository;
+
+impl<'env,T> backend::Transaction<'env,T> {
     fn add_file<P:AsRef<Path>>(&mut self, path:P, is_dir:bool)->Result<(),Error>{
-        file_operations::add_inode(self,None,path.as_ref(),is_dir)
+        let mut db_tree = self.db_tree();
+        let mut db_revtree = self.db_revtree();
+        file_operations::add_inode(&mut db_tree, &mut db_revtree, None, path.as_ref(), is_dir)
     }
     fn list_files(&self) -> Vec<PathBuf> {
         file_operations::list_files(self)
@@ -76,10 +87,51 @@ impl<'env> backend::Repository<'env> {
         file_operations::move_file(self, path.as_ref(), path_.as_ref(), is_dir)
     }
     fn retrieve_and_output<W:std::io::Write>(&self,branch:&backend::Db,key:&[u8],l:&mut W) {
+        let db_contents = self.db_contents();
         let mut redundant_edges = Vec::new();
-        let graph = graph::retrieve(self,branch,key).unwrap();
-        graph::output_file(self,branch, l, graph,&mut redundant_edges);
+        let graph = graph::retrieve(branch,key).unwrap();
+        graph::output_file(branch, &db_contents, l, graph,&mut redundant_edges);
     }
+
+    fn write_changes_file<P:AsRef<Path>>(&self, branch_name:&[u8], path:P)->Result<(),Error> {
+        unimplemented!()
+    }
+
+    pub fn debug<W>(&self,branch_name:&[u8], w:&mut W) where W:std::io::Write {
+        unimplemented!() /*
+            let mut styles=Vec::with_capacity(16);
+            for i in 0..16 {
+            styles.push(("color=").to_string()
+            +["red","blue","green","black"][(i >> 1)&3]
+            +if (i as u8)&DELETED_EDGE!=0 { ", style=dashed"} else {""}
+            +if (i as u8)&PSEUDO_EDGE!=0 { ", style=dotted"} else {""})
+    }
+            w.write(b"digraph{\n").unwrap();
+            let curs=self.txn.cursor(self.dbi_nodes).unwrap();
+            let mut op=lmdb::Op::MDB_FIRST;
+            let mut cur=&[][..];
+            while let Ok((k,v))=curs.get(cur,None,op) {
+            op=lmdb::Op::MDB_NEXT;
+            if k!=cur {
+            let f=self.txn.get(self.dbi_contents, k);
+            let cont:&[u8]=
+            match f {
+            Ok(Some(ww))=>ww,
+            _=>&[]
+    };
+            write!(w,"n_{}[label=\"{}: {}\"];\n", k.to_hex(), k.to_hex(),
+            match str::from_utf8(&cont) { Ok(x)=>x.to_string(), Err(_)=> cont.to_hex() }
+    ).unwrap();
+            cur=k;
+    }
+            let flag=v[0];
+            if true || flag & PARENT_EDGE == 0 {
+            write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", k.to_hex(), &v[1..(1+KEY_SIZE)].to_hex(), styles[(flag&0xff) as usize], flag).unwrap();
+    }
+    }
+            w.write(b"}\n").unwrap();*/
+    }
+
 }
 
 
