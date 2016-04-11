@@ -346,7 +346,7 @@ pub fn record_all<T> (
     Ok(())
 }
 
-pub fn record<T>(repository:&mut Transaction<T>,branch_name:&[u8], working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<LocalKey,Inode>),Error>{
+pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<LocalKey,Inode>),Error>{
     let mut actions:Vec<Change>=Vec::new();
     let mut line_num=1;
     let mut updatables:HashMap<LocalKey,Inode>=HashMap::new();

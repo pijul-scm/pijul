@@ -43,7 +43,7 @@ pub mod backend {
         dbi_revdep: lmdb::Dbi,
         parent:Parent
     }
-    const MAIN_BRANCH:&'static [u8] = b"main";
+    pub const DEFAULT_BRANCH:&'static str = "main";
 
 
 
@@ -74,7 +74,7 @@ pub mod backend {
     }
     pub type Repository = lmdb::Env;
     impl Repository {
-        fn open<P:AsRef<Path>>(&self, path:P) -> Result<Self,Error> {
+        fn open<P:AsRef<Path>>(path:P) -> Result<Self,Error> {
             let env=try!(lmdb::Env_::new());
             let _=try!(env.reader_check());
             try!(env.set_maxdbs(10));
@@ -129,8 +129,8 @@ pub mod backend {
 
         pub fn db_revdep<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi: self.dbi_revdep, txn:&self.txn } }
 
-        pub fn db_nodes<'txn>(&'txn self, branch:&[u8]) -> Db<'txn,'env> {
-            if branch == MAIN_BRANCH {
+        pub fn db_nodes<'txn>(&'txn self, branch:&str) -> Db<'txn,'env> {
+            if branch == DEFAULT_BRANCH {
                 Db { dbi:self.dbi_nodes, txn:&self.txn }
             } else {
                 panic!("The LMDB backend does not handle multi-head repositories")

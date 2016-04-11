@@ -19,6 +19,7 @@
 //! This crate implements operations on Pijul repositories.
 
 use std::path::{Path,PathBuf};
+use std::collections::HashSet;
 #[macro_use]
 extern crate log;
 extern crate time;
@@ -65,10 +66,9 @@ mod record;
 mod output;
 mod apply;
 
-pub const DEFAULT_BRANCH:&'static str = "main";
 pub type Transaction<'env> = backend::Transaction<'env,()>;
 
-pub use backend::Repository;
+pub use backend::{Repository,DEFAULT_BRANCH};
 
 impl<'env,T> backend::Transaction<'env,T> {
     fn add_file<P:AsRef<Path>>(&mut self, path:P, is_dir:bool)->Result<(),Error>{
@@ -93,11 +93,13 @@ impl<'env,T> backend::Transaction<'env,T> {
         graph::output_file(branch, &db_contents, l, graph,&mut redundant_edges);
     }
 
-    fn write_changes_file<P:AsRef<Path>>(&self, branch_name:&[u8], path:P)->Result<(),Error> {
+    fn write_changes_file<P:AsRef<Path>>(&self, branch_name:&str, path:P)->Result<(),Error> {
         unimplemented!()
     }
-
-    pub fn debug<W>(&self,branch_name:&[u8], w:&mut W) where W:std::io::Write {
+    pub fn apply_patches(&mut self, branch_name:&str, r:&Path, remote_patches:&HashSet<Vec<u8>>, local_patches:&HashSet<Vec<u8>>) -> Result<(),Error> {
+        apply::apply_patches(self, branch_name, r, remote_patches, local_patches)
+    }
+    pub fn debug<W>(&self,branch_name:&str, w:&mut W) where W:std::io::Write {
         unimplemented!() /*
             let mut styles=Vec::with_capacity(16);
             for i in 0..16 {

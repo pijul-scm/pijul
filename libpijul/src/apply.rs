@@ -305,7 +305,7 @@ pub fn has_edge(branch:&Db, key:&[u8],flag0:u8,include_pseudo:bool)->bool {
 }
 
 
-pub fn has_patch<T>(repository:&Transaction<T>, branch_name:&[u8], hash:&[u8])->Result<bool,Error>{
+pub fn has_patch<T>(repository:&Transaction<T>, branch_name:&str, hash:&[u8])->Result<bool,Error>{
     if hash.len()==HASH_SIZE && hash == ROOT_KEY {
         Ok(true)
     } else {
@@ -313,8 +313,8 @@ pub fn has_patch<T>(repository:&Transaction<T>, branch_name:&[u8], hash:&[u8])->
         match internal_hash(&db_internal, hash) {
             Ok(internal) => {
                 let db_branches = repository.db_branches();
-                for (k,v) in db_branches.iter(branch_name, Some(internal.as_slice())) {
-                    return Ok(k==branch_name && internal.as_slice() == v)
+                for (k,v) in db_branches.iter(branch_name.as_bytes(), Some(internal.as_slice())) {
+                    return Ok(k==branch_name.as_bytes() && internal.as_slice() == v)
                 }
                 Ok(false)                
             },
@@ -385,7 +385,7 @@ fn kill_obsolete_pseudo_edges(branch:&mut Db, pv:&[u8]) ->Result<(),Error> {
 
 
 /// Applies a patch to a repository. "new_patches" are patches that just this repository has, and the remote repository doesn't have.
-pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&[u8], patch:&Patch, internal: &'b InternalKey, new_patches:&HashSet<&[u8]>)->Result<(),Error> {
+pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patch, internal: &'b InternalKey, new_patches:&HashSet<&[u8]>)->Result<(),Error> {
     
     let mut db_branches = repository.db_branches();
     if db_branches.get(internal.as_slice()).is_some() {
@@ -396,7 +396,7 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&[u8], patch:&Pat
     let mut db_nodes = repository.db_nodes(branch_name);
     let mut db_contents = repository.db_contents();
     {
-        try!(db_branches.put(branch_name, internal.as_slice()));
+        try!(db_branches.put(branch_name.as_bytes(), internal.as_slice()));
         //repository.set_db_branches(db_branches);
         
         try!(unsafe_apply(&db_internal, &db_external, &mut db_nodes, &mut db_contents,
@@ -747,10 +747,10 @@ pub fn sync_file_additions<T>(repository: &mut Transaction<T>, branch:&mut Db, c
 /// to apply, and the fourth one `local_patches` at least all the patches the other
 /// party doesn't have.
 pub fn apply_patches<T>(repository:&mut Transaction<T>,
-                     branch_name:&[u8],
-                     r:&Path,
-                     remote_patches:&HashSet<Vec<u8>>,
-                     local_patches:&HashSet<Vec<u8>>) -> Result<(), Error> {
+                        branch_name:&str,
+                        r:&Path,
+                        remote_patches:&HashSet<Vec<u8>>,
+                        local_patches:&HashSet<Vec<u8>>) -> Result<(), Error> {
     debug!("local {}, remote {}",local_patches.len(),remote_patches.len());
     let pullable=remote_patches.difference(&local_patches);
     let only_local={
@@ -758,7 +758,7 @@ pub fn apply_patches<T>(repository:&mut Transaction<T>,
         for i in local_patches.difference(&remote_patches) { only_local.insert(&i[..]); };
         only_local
     };
-    fn apply_patches<'a,T>(repository:&mut Transaction<'a,T>, branch_name:&[u8], repo_root:&Path, patch_hash:&[u8], patches_were_applied:&mut bool, only_local:&HashSet<&[u8]>)->Result<(),Error>{
+    fn apply_patches<'a,T>(repository:&mut Transaction<'a,T>, branch_name:&str, repo_root:&Path, patch_hash:&[u8], patches_were_applied:&mut bool, only_local:&HashSet<&[u8]>)->Result<(),Error>{
         if !try!(has_patch(repository, branch_name,patch_hash)) {
             let patch=try!(Patch::from_repository(repo_root,patch_hash));
             for dep in patch.dependencies.iter() {

@@ -397,7 +397,7 @@ pub fn retrieve_and_output<'a, 'b, 'c, L:LineBuffer<'a>>(branch:&'a Db<'a,'b>, d
 }
 
 /// Apply a patch from a local record: register it, give it a hash, and then apply.
-pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&[u8], location: &Path, patch: Patch, inode_updates:&HashMap<LocalKey,Inode>)
+pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, location: &Path, patch: Patch, inode_updates:&HashMap<LocalKey,Inode>)
                          -> Result<(), Error>{
     info!("registering a patch with {} changes", patch.changes.len());
     let patch = Arc::new(patch);
@@ -464,7 +464,7 @@ pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&[u8], l
     }
 }
 
-pub fn output_repository<T>(repository:&mut Transaction<T>, branch_name:&[u8], working_copy:&Path, pending:&Patch) -> Result<(),Error>{
+pub fn output_repository<T>(repository:&mut Transaction<T>, branch_name:&str, working_copy:&Path, pending:&Patch) -> Result<(),Error>{
     debug!(target:"output_repository","begin output repository");
     // First output the repository to change the trees/inodes tables (and their revs).
     // Do not output the files (do_output = false).
