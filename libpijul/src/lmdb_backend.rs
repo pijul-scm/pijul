@@ -24,10 +24,10 @@ pub mod backend {
     use super::super::lmdb;
     use std::path::Path;
     use super::super::error::Error;
-    use std::mem::replace;
+    use std::mem::{replace,transmute};
 
     use super::super::Len;
-
+    use std::ptr::null_mut;
 
     pub struct Transaction<'env,Parent> {
         txn: lmdb::Txn<'env>,
@@ -83,7 +83,7 @@ pub mod backend {
         }
         pub fn mut_txn_begin<'env>(&'env self) -> Result<Transaction<'env,()>,Error> {
             unsafe {
-                let txn=try!(self.unsafe_txn(0));
+                let txn=try!(self.txn(0));
                 let dbi_nodes=try!(txn.unsafe_dbi_open(b"nodes\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT|lmdb::MDB_DUPFIXED));
                 let dbi_tree=try!(txn.unsafe_dbi_open(b"tree\0",lmdb::MDB_CREATE));
                 let dbi_revtree=try!(txn.unsafe_dbi_open(b"revtree\0",lmdb::MDB_CREATE));
@@ -144,18 +144,42 @@ pub mod backend {
         pub fn db_internal(&self) -> Db { Db { dbi: self.dbi_internal, txn: &self.txn } }
         pub fn db_external(&self) -> Db { Db { dbi: self.dbi_external, txn: &self.txn } }
 
+        pub fn abort(self) {
+            self.txn.abort();
+        }
+        pub fn child(&mut self) -> Transaction<'env, &mut Self> {
+            unsafe {
+                let parent_txn = self.txn.txn;
+                let txn = null_mut();
+                let e = lmdb::mdb_txn_begin(self.txn.env.env,self.txn.txn,0,transmute(&txn));
+                assert!(e==0);
+                let repo = Transaction {
+                    txn: lmdb::Txn { txn:txn, env:self.txn.env },
+                    dbi_tree: self.dbi_tree,
+                    dbi_revtree: self.dbi_revtree,
+                    dbi_inodes: self.dbi_inodes,
+                    dbi_revinodes: self.dbi_revinodes,
+                    dbi_nodes: self.dbi_nodes,
+                    dbi_contents: self.dbi_contents,
+                    dbi_internal: self.dbi_internal,
+                    dbi_external: self.dbi_external,
+                    dbi_branches: self.dbi_branches,
+                    dbi_revdep: self.dbi_revdep,
+                    parent: self
+                };
+                repo
+            }
+        }
+    }
+
+    impl <'env,T> Transaction<'env,T> {
         pub fn commit(self) -> Result<(),Error> {
             try!(self.txn.commit());
             Ok(())
         }
-        pub fn abort(self) {
-            self.txn.abort();
-        }
-        pub fn child(&mut self) -> Transaction<'env, Self> {
-            unimplemented!()
-        }
     }
 
+    
     impl<'txn,'env> Db<'txn,'env> {
         
         pub fn put(&mut self, key:&[u8], value:&[u8]) -> Result<(),Error> {
@@ -169,8 +193,15 @@ pub mod backend {
         pub fn get<'a>(&'a self, key:&[u8]) -> Option<&'a[u8]> {
             self.txn.get(self.dbi, key).unwrap_or(None)
         }
-        pub fn iter<'a>(&'a self, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a,'txn,'env> {
-            unimplemented!()
+        pub fn iter<'a>(&'a self, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a> {
+            unsafe {
+                let curs = self.txn.cursor(self.dbi).unwrap();
+                let current = lmdb::cursor_get(curs.cursor, starting_key, starting_value, lmdb::Op::MDB_SET_RANGE).ok();
+                Iter {
+                    current: current,
+                    cursor: curs
+                }
+            }
         }
 
         pub fn contents<'a>(&'a self, key:&[u8]) -> Option<Contents<'a>> {
@@ -178,14 +209,22 @@ pub mod backend {
         }
 
     }
-    pub struct Iter<'a,'txn:'a,'env:'txn> {
+    pub struct Iter<'a> {
         current:Option<(&'a[u8],&'a[u8])>,
-        repo:&'a Db<'txn,'env>
+        cursor: lmdb::Cursor<'a>,
     }
-    impl<'a,'b,'c> Iterator for Iter<'a,'b,'c> {
+
+    impl<'a> Iterator for Iter<'a> {
         type Item = (&'a[u8],&'a[u8]);
         fn next(&mut self) -> Option<Self::Item> {
-            unimplemented!()
+            unsafe {
+                if let Some((key,value)) = self.current {
+                    self.current = lmdb::cursor_get(self.cursor.cursor, key, Some(value), lmdb::Op::MDB_NEXT).ok();
+                    Some((key,value))
+                } else {
+                    None
+                }
+            }
         }
     }
 }

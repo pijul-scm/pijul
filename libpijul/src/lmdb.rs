@@ -85,17 +85,18 @@ extern "C" {
 
 pub struct Env { pub env:*mut MdbEnv }
 
-pub struct Txn<'a> { pub txn:*mut MdbTxn,env:PhantomData<&'a Env> }
+pub struct Txn<'a> { pub txn:*mut MdbTxn, pub env:&'a Env }
 
-unsafe fn txn<'a,'b>(env:&'a Env,parent:*mut MdbTxn,flags:usize)->Result<Txn<'b>,Error> {
+unsafe fn txn<'a>(env:&'a Env,parent:*mut MdbTxn,flags:usize)->Result<Txn<'a>,Error> {
     let txn=ptr::null_mut();
     let e= mdb_txn_begin(env.env,parent,flags as c_uint,mem::transmute(&txn));
     if e==0 {
-        Ok(Txn { txn:txn,env:PhantomData })
+        Ok(Txn { txn:txn,env:env })
     } else {
         Err(Error::from_raw_os_error(e))
     }
 }
+
 pub struct Env_ { env:*mut MdbEnv }
 impl Env_ {
     pub fn new()->Result<Env_,io::Error> {
@@ -150,9 +151,9 @@ impl Env {
     pub fn txn<'a>(&'a self,flags:usize)->Result<Txn<'a>,Error> {
         unsafe { txn(&self,ptr::null_mut(),flags) }
     }
-    pub unsafe fn unsafe_txn<'a,'b>(&'b self,flags:usize)->Result<Txn<'a>,Error> {
+    /*pub unsafe fn unsafe_txn<'a,'b>(&'b self,flags:usize)->Result<Txn<'a>,Error> {
         txn(self,ptr::null_mut(),flags)
-    }
+    }*/
 }
 
 //pub struct Dbi { dbi:MdbDbi }
