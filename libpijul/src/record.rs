@@ -30,6 +30,7 @@ use std::path::{Path,PathBuf};
 use std::fs::metadata;
 use std;
 use std::io::BufRead;
+use rustc_serialize::hex::ToHex;
 
 #[cfg(not(windows))]
 use std::os::unix::fs::PermissionsExt;
@@ -70,7 +71,7 @@ pub fn record_all<T> (
     basename:&[u8])->Result<(),Error> {
 
     if parent_inode.is_some() { realpath.push(std::str::from_utf8(&basename).unwrap()) }
-    debug!(target:"record_all","realpath:{:?}",realpath);
+    debug!("realpath:{:?}",realpath);
     //debug!(target:"record_all","inode:{:?}",current_inode.to_hex());
 
     let mut l2=[0;LINE_SIZE];
@@ -94,7 +95,7 @@ pub fn record_all<T> (
                             }
                         }
                     };
-                    debug!(target:"record_all","current_node[0]={},old_attr={},int_attr={}",
+                    debug!("current_node[0]={},old_attr={},int_attr={}",
                            current_node[0],old_attr,int_attr);
                     if !deleted && (current_node[0]==1 || old_attr!=int_attr) {
                         // file moved
@@ -149,12 +150,12 @@ pub fn record_all<T> (
                             lmdb::mdb_cursor_close(curs_grandparents);
                         }
                          */
-                        debug!(target:"record_all", "edges:{:?}",edges);
+                        debug!("edges:{:?}",edges);
                         if !edges.is_empty(){
                             actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
-                            //debug!(target:"record_all","parent_node: {:?}",parent_node.unwrap());
-                            //debug!(target:"record_all","ext key: {:?}",self.external_key(parent_node.unwrap()));
-                            //debug!(target:"record_all","ext key: {:?}",self.external_key(&current_node[3..]));
+                            debug!("parent_node: {:?}",parent_node.unwrap());
+                            debug!("ext key: {:?}",external_key(&db_external, parent_node.unwrap()));
+                            debug!("ext key: {:?}",external_key(&db_external, &current_node[3..]));
                             actions.push(
                                 Change::NewNodes { up_context:{
                                     let p=parent_node.unwrap();
@@ -172,7 +173,7 @@ pub fn record_all<T> (
                             );
                         }
                         *line_num += 1;
-                        debug!(target:"record_all", "directory_flag:{}",old_attr&DIRECTORY_FLAG);
+                        debug!("directory_flag:{}",old_attr&DIRECTORY_FLAG);
                         if old_attr & DIRECTORY_FLAG == 0 {
                             info!("retrieving");
                             //let time0=time::precise_time_s();
@@ -201,15 +202,15 @@ pub fn record_all<T> (
                         // Delete the file recursively
                         let mut file_edges=vec!();
                         {
-                            //debug!(target:"record_all","del={}",current_node.to_hex());
+                            debug!("del={}",current_node.to_hex());
                             let ret = retrieve(branch, &current_node[3..]).unwrap();
                             for l in ret.lines {
                                 if l.key.len()>0 {
                                     let ext_key = external_key(&db_external, l.key);
-                                    //debug!(target:"record_all","ext_key={}",ext_key.to_hex());
+                                    debug!("ext_key={}",ext_key.to_hex());
                                     for v in iterate_parents!(branch, l.key) {
 
-                                        //debug!(target:"record_all","v={}",v.to_hex());
+                                        debug!("v={}",v.to_hex());
                                         if v[0] & FOLDER_EDGE != 0 { &mut edges } else { &mut file_edges }
                                         .push(Edge { from: ext_key.clone(),
                                                      to: external_key(&db_external, &v[1..(1+KEY_SIZE)]),
@@ -241,7 +242,7 @@ pub fn record_all<T> (
                 },
                 None=>{
                     // File addition, create appropriate Newnodes.
-                    debug!(target:"record_all","metadata");
+                    debug!("metadata");
                     match metadata(&realpath) {
                         Ok(attr) => {
                             let int_attr={
@@ -315,18 +316,18 @@ pub fn record_all<T> (
         } else {
             Some(ROOT_KEY)
         };
-    debug!(target:"record_all","current_node={:?}",current_node);
+    debug!("current_node={:?}",current_node);
     match current_node {
         None => (), // we just added a file
         Some(current_node)=>{
-            //debug!(target:"record_all","children of current_inode {}",current_inode.to_hex());
+            debug!("children of current_inode {}",current_inode.to_hex());
             let db_tree = repository.db_tree();
             for (k,v) in db_tree.iter(current_inode.as_ref(), None) {
 
-                if k == current_inode.as_ref() {
+                if &k[0..INODE_SIZE] == current_inode.as_ref() {
 
                     if v.len()>0 {
-                        //debug!(target:"record_all","  child: {} + {}",&v[0..INODE_SIZE].to_hex(), std::str::from_utf8(&k[INODE_SIZE..]).unwrap());
+                        debug!("  child: {} + {}",&v[0..INODE_SIZE].to_hex(), std::str::from_utf8(&k[INODE_SIZE..]).unwrap());
                         try!(record_all(
                             repository, branch,
                             actions, line_num,redundant,updatables,
@@ -358,7 +359,7 @@ pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&
                         &mut actions, &mut line_num,&mut redundant,&mut updatables,
                         None,None, ROOT_INODE,&mut realpath,
                         &[]));
-        debug!(target:"record","record done, {} changes", actions.len());
+        debug!("record done, {} changes", actions.len());
     }
     super::graph::remove_redundant_edges(&mut branch, &mut redundant);
     //repository.set_db_nodes(branch_name, branch);

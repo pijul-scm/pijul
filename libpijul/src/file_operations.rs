@@ -68,11 +68,10 @@ pub fn create_new_inode(db_revtree:&mut Db,buf: &mut [u8]) {
     unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), buf_.as_mut_ptr(), INODE_SIZE) }
     let mut already_taken = true;
     while already_taken {
+        already_taken = false;
         for (_,x) in db_revtree.iter(&buf_, None) {
-
-            if &buf[0..INODE_SIZE] != &x[0..INODE_SIZE] {
-                already_taken = false
-            } else {
+            if &buf[0..INODE_SIZE] == &x[0..INODE_SIZE] {
+                already_taken = true;
                 for i in 0..INODE_SIZE { buf[i]=rand::random() }
             }
             break

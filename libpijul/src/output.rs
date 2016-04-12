@@ -165,22 +165,30 @@ fn output_aux(branch:&Db,
     for (k,b) in branch.iter(key,Some(&[FOLDER_EDGE][..]))
         .take_while(|&(k,b)| k==key && b[0]<=FOLDER_EDGE|PSEUDO_EDGE) {
 
-            //debug!(target:"output_repository","b={}",to_hex(b));
+            debug_assert!(b.len() == 1+KEY_SIZE+HASH_SIZE);
+            debug!("b={}",b.to_hex());
             let cont_b = db_contents.contents(&b[1..(1+KEY_SIZE)]).unwrap();
             debug_assert!(cont_b.len()>=2);
             filename_buffer.clear();
             for i in cont_b {
                 filename_buffer.extend(i);
             }
+            debug_assert!(filename_buffer.len()>2);
             let filename_bytes=&filename_buffer[2..];
             let filename=std::str::from_utf8(filename_bytes).unwrap();
             let perms= ((filename_buffer[0] as usize) << 8) | (filename_buffer[1] as usize);
 
+            for (k,c) in branch.iter(&b[1..(1+KEY_SIZE)], Some(&[FOLDER_EDGE][..])) {
+                debug!("iter: {:?}, {:?}", k.to_hex(), c.to_hex());
+                debug!("{:?}", k==&b[1..(1+KEY_SIZE)] && c[0]<=FOLDER_EDGE|PSEUDO_EDGE)
+            }
+            
             for (k,c) in branch.iter(&b[1..(1+KEY_SIZE)], Some(&[FOLDER_EDGE][..]))
                 .take_while(|&(k,c)| k==&b[1..(1+KEY_SIZE)] && c[0]<=FOLDER_EDGE|PSEUDO_EDGE) {
 
+                    debug_assert!(c.len() == 1+KEY_SIZE+HASH_SIZE);
                     let cv=&c[1..(1+KEY_SIZE)];
-                    debug!(target:"output_repository","cv={}",cv.to_hex());
+                    debug!("cv={}",cv.to_hex());
                     let c_inode=
                         match db_revinodes.get(cv) {
                             Some(c_inode) => c_inode.to_vec(),
@@ -211,14 +219,14 @@ fn output_aux(branch:&Db,
                         }
                         Entry::Vacant(e)=>{
                             e.insert(vec!(path.clone()));
-                            debug!(target:"output_repository","inode={}",c_inode.to_hex());
+                            debug!("inode={}",c_inode.to_hex());
                             {
                                 let mut buf=PathBuf::from(working_copy);
                                 if filename_of_inode(db_revtree, &c_inode,&mut buf) {
-                                    debug!(target:"output_repository","former_path={:?}",buf);
+                                    debug!("former_path={:?}",buf);
                                     if buf.as_os_str() != path.as_os_str() {
                                         // move on filesystem
-                                        debug!(target:"output_repository","moving {:?} to {:?}",buf,path);
+                                        debug!("moving {:?} to {:?}",buf,path);
                                         if fs::rename(&buf,&path).is_err() {
                                             let mut filename=path.file_name().unwrap().to_str().unwrap().to_string();
                                             let l=filename.len();
@@ -231,11 +239,11 @@ fn output_aux(branch:&Db,
                                                 i+=1
                                             }
                                         }
-                                        debug!(target:"output_repository","done");
+                                        debug!("done");
                                         moves.push(Tree::Move { tree_key:inode_v,tree_value:c_inode.to_vec() })
                                     }
                                 } else {
-                                    debug!(target:"output_repository","no former_path");
+                                    debug!("no former_path");
                                     moves.push(Tree::Addition { tree_key:inode_v,tree_value:c_inode.to_vec() });
                                     if perms&DIRECTORY_FLAG==0 {
                                         std::fs::File::create(&path).unwrap();
@@ -248,9 +256,9 @@ fn output_aux(branch:&Db,
                                 if do_output {
                                     let mut redundant_edges=vec!();
                                     let l = retrieve(branch, &cv).unwrap();
-                                    debug!(target:"output_repository","creating file {:?}",path);
+                                    debug!("creating file {:?}",path);
                                     let mut f=std::fs::File::create(&path).unwrap();
-                                    debug!(target:"output_repository","done");
+                                    debug!("done");
                                     output_file(branch, db_contents, &mut f,l,&mut redundant_edges);
                                 }
                             } else {
@@ -260,7 +268,7 @@ fn output_aux(branch:&Db,
                     }
                     path.pop();
                 }
-                debug!(target:"output_repository","/b");
+                debug!("/b");
     }
 
     // Update inodes: add files that were not on the filesystem before this output.
@@ -397,7 +405,7 @@ pub fn retrieve_and_output<'a, 'b, 'c, L:LineBuffer<'a>>(branch:&'a Db<'a,'b>, d
 }
 
 pub fn output_repository<T>(repository:&mut Transaction<T>, branch_name:&str, working_copy:&Path, pending:&Patch) -> Result<(),Error>{
-    debug!(target:"output_repository","begin output repository");
+    debug!("begin output repository");
     // First output the repository to change the trees/inodes tables (and their revs).
     // Do not output the files (do_output = false).
     {
@@ -415,7 +423,7 @@ pub fn output_repository<T>(repository:&mut Transaction<T>, branch_name:&str, wo
     // Then, apply pending and output in an aborted transaction.
     let mut child_repository = repository.child();
     let internal = new_internal(&mut child_repository);
-    //debug!(target:"output_repository","pending patch: {}",internal.to_hex());
+    debug!("pending patch: {}",internal.to_hex());
     try!(apply(&mut child_repository, branch_name, pending,&internal,&HashSet::new()));
     // Now output all files (do_output=true)
     {

@@ -1,5 +1,5 @@
 extern crate tempdir;
-
+extern crate env_logger;
 use commands::{init, info, record, add, remove, pull, remote, mv};
 use commands::error;
 use std::fs;
@@ -8,6 +8,7 @@ use std::path::PathBuf;
 #[test]
 fn init_creates_repo() -> ()
 {
+    env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let init_params = init::Params { location : &dir.path(), allow_nested : false};
     init::run(&init_params).unwrap();
@@ -17,6 +18,7 @@ fn init_creates_repo() -> ()
 
 #[test]
 fn init_nested_forbidden() {
+    env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let init_params = init::Params { location : &dir.path(), allow_nested : false};
     init::run(&init_params).unwrap();
@@ -34,6 +36,7 @@ fn init_nested_forbidden() {
 
 #[test]
 fn init_nested_allowed() {
+    env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let init_params = init::Params { location : &dir.path(), allow_nested : false};
     init::run(&init_params).unwrap();
@@ -45,6 +48,7 @@ fn init_nested_allowed() {
 
 #[test]
 fn in_empty_dir_nothing_to_record() {
+    env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let init_params = init::Params { location : &dir.path(), allow_nested : false};
     init::run(&init_params).unwrap();
@@ -60,6 +64,7 @@ fn in_empty_dir_nothing_to_record() {
 
 #[test]
 fn with_changes_sth_to_record() {
+    env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let init_params = init::Params { location : &dir.path(), allow_nested : false};
     init::run(&init_params).unwrap();
@@ -84,6 +89,7 @@ fn with_changes_sth_to_record() {
 
 #[test]
 fn add_remove_nothing_to_record() {
+    env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let init_params = init::Params { location : &dir.path(), allow_nested : false};
     init::run(&init_params).unwrap();
@@ -112,6 +118,7 @@ fn add_remove_nothing_to_record() {
 
 #[test]
 fn no_remove_without_add() {
+    env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let init_params = init::Params { location : &dir.path(), allow_nested : false};
     init::run(&init_params).unwrap();
@@ -127,6 +134,7 @@ fn no_remove_without_add() {
 
 #[test]
 fn add_record_pull() {
+    env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let dir_a = &dir.path().join("a");
     let dir_b = &dir.path().join("b");
@@ -166,6 +174,7 @@ fn add_record_pull() {
 
 #[test]
 fn move_to_file() {
+    env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let dir_a = &dir.path().join("a");
     let dir_b = &dir.path().join("b");
@@ -236,6 +245,7 @@ fn move_to_file() {
 
 #[test]
 fn move_to_dir() {
+    env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let dir_a = &dir.path().join("a");
     let dir_b = &dir.path().join("b");

@@ -120,7 +120,7 @@ pub fn retrieve<'a>(branch:&Db, key:&'a [u8])->Result<Graph<'a>,()>{
             Entry::Vacant(e) => {
                 let idx=lines.len();
                 e.insert(idx);
-                debug!(target:"retrieve","{}",key.to_hex());
+                debug!("{}",key.to_hex());
                 let is_zombie={
                     let mut tag=PARENT_EDGE|DELETED_EDGE;
                     let mut is_zombie = false;
@@ -156,7 +156,7 @@ pub fn retrieve<'a>(branch:&Db, key:&'a [u8])->Result<Graph<'a>,()>{
         let idx=lines.len()-1;
         let l_children=lines[idx].children;
         let n_children=lines[idx].n_children;
-        debug!(target:"retrieve", "n_children: {}",n_children);
+        debug!("n_children: {}",n_children);
         for i in 0..n_children {
             let (a,_)=children[l_children+i];
             let child_key = unsafe {
@@ -191,7 +191,7 @@ fn tarjan(line:&mut Graph)->Vec<Vec<usize>> {
             (*l).index = *index;
             (*l).lowlink = *index;
             (*l).flags |= LINE_ONSTACK | LINE_VISITED;
-            debug!(target:"tarjan", "{} {} chi",(*l).key.to_hex(),(*l).n_children);
+            debug!("{} {} chi",(*l).key.to_hex(),(*l).n_children);
             //unsafe {println!("contents: {}",std::str::from_utf8_unchecked(repo.contents((*l).key))); }
         }
         stack.push(n_l);
@@ -230,11 +230,17 @@ fn tarjan(line:&mut Graph)->Vec<Vec<usize>> {
             //*scc+=1
         }
     }
-    let mut stack=vec!();
-    let mut index=0;
     let mut scc=Vec::with_capacity(line.lines.len());
-    //let mut scc=0;
-    dfs(&mut scc, &mut stack, &mut index, line, 1);
+    if line.lines.len() > 1 {
+        let mut stack=vec!();
+        let mut index=0;
+        //let mut scc=0;
+        debug!("tarjan, line.lines.len()=={}",line.lines.len());
+        dfs(&mut scc, &mut stack, &mut index, line, 1);
+    } else {
+        scc.push(vec!(0))
+    }
+    debug!("/tarjan");
     scc
 }
 
@@ -242,7 +248,7 @@ fn tarjan(line:&mut Graph)->Vec<Vec<usize>> {
 
 
 pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a Db<'a,'b>, buf:&mut B,mut graph:Graph<'a>,forward:&mut Vec<u8>) {
-    debug!(target:"conflict","output_file");
+    debug!("output_file");
 
     //let t0=time::precise_time_s();
     let mut scc = tarjan(&mut graph); // SCCs are given here in reverse order.
@@ -267,12 +273,12 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
         let mut skipped=vec!(n_scc);
         loop {
             first_visit[n_scc] = *step;
-            debug!(target:"output_file","step={} scc={}",*step,n_scc);
+            debug!("step={} scc={}",*step,n_scc);
             *step += 1;
             child_components.clear();
             let mut next_scc=0;
             for cousin in scc[n_scc].iter() {
-                debug!(target:"output_file","cousin: {}",*cousin);
+                debug!("cousin: {}",*cousin);
                 let n=graph.lines[*cousin].n_children;
                 for i in 0 .. n {
                     let (_,n_child) = graph.children[graph.lines[*cousin].children + i];
@@ -291,10 +297,10 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
         let mut forward_scc=HashSet::new();
         for component in child_components.iter().rev() {
             if first_visit[*component] > first_visit[n_scc] { // forward edge
-                debug!(target:"output_file","forward ! {} {}",n_scc,*component);
+                debug!("forward ! {} {}",n_scc,*component);
                 forward_scc.insert(*component);
             } else {
-                debug!(target:"output_file","visiting scc {} {}",*component,graph.lines[scc[*component][0]].key.to_hex());
+                debug!("visiting scc {} {}",*component,graph.lines[scc[*component][0]].key.to_hex());
                 dfs(graph,first_visit,last_visit,forward,zero,step,scc,*component)
             }
         }
@@ -335,9 +341,9 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
         // test for conflict
         // scc[i] has at least one element (from tarjan).
         if scc[i].len() == 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0]  && graph.lines[scc[i][0]].flags & LINE_HALF_DELETED == 0 {
-            //debug!(target:"conflict","/flag = {} {}",graph.lines[scc[i][0]].flags,LINE_HALF_DELETED);
+            //debug!("/flag = {} {}",graph.lines[scc[i][0]].flags,LINE_HALF_DELETED);
             let key=graph.lines[scc[i][0]].key;
-            debug!(target:"conflict","key = {}",key.to_hex());
+            debug!("key = {}",key.to_hex());
             if key.len()>0 {
                 if let Some(cont) = db_contents.contents(key) {
                     buf.output_line(key, cont)
@@ -345,9 +351,9 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
             }
             if i==0 { break } else { i-=1 }
         } else {
-            debug!(target:"conflict","flag = {} {}",graph.lines[scc[i][0]].flags,LINE_HALF_DELETED);
+            debug!("flag = {} {}",graph.lines[scc[i][0]].flags,LINE_HALF_DELETED);
             let key=graph.lines[scc[i][0]].key;
-            debug!(target:"conflict","key = {}",key.to_hex());
+            debug!("key = {}",key.to_hex());
 
             fn get_conflict<'a,'b, B:LineBuffer<'a>>(
                 branch:&'a Db<'a,'b>,
@@ -366,7 +372,7 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
 
                 if scc[i].len() == 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] && graph.lines[scc[i][0]].flags & LINE_HALF_DELETED == 0 {
                     // End of conflict.
-                    debug!(target:"conflict","end of conflict");
+                    debug!("end of conflict");
                     let mut first=false; // Detect the first line
                     for key in nodes.iter() {
                         if let Some(cont) = db_contents.contents(key) {
@@ -403,16 +409,16 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
                         j:usize,
                         next_vertices:&mut HashSet<usize>) {
                         
-                        debug!(target:"conflict","permutations:j={}, nodes={:?}",j,nodes);
+                        debug!("permutations:j={}, nodes={:?}",j,nodes);
                         if j<scc[i].len() {
-                            debug!(target:"conflict","next? j={} {}",j,next_vertices.len());
+                            debug!("next? j={} {}",j,next_vertices.len());
                             let n=graph.lines[scc[i][j]].n_children;
-                            debug!(target:"conflict","n={}",n);
+                            debug!("n={}",n);
                             for c in 0 .. n {
                                 let (edge_child,n_child) = graph.children[graph.lines[scc[i][j]].children + c];
                                 if n_child != 0 || edge_child.is_null() {
                                     // Not a forward edge (forward edges are (!=NULL, 0)).
-                                    debug!(target:"conflict","n_child={}",n_child);
+                                    debug!("n_child={}",n_child);
                                     next_vertices.insert(graph.lines[n_child].scc);
                                 }
                             }
@@ -442,7 +448,7 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
                                             break
                                         }
                                     }
-                                    debug!(target:"conflict","forced:{:?}",is_forced);
+                                    debug!("forced:{:?}",is_forced);
                                     // If this zombie line is not forced in, try without it.
                                     if !is_defined {
                                         // pas defini, on le definit.
@@ -478,15 +484,15 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
                                 }
                             }
                         } else {
-                            debug!(target:"conflict","next? {}",next_vertices.len());
+                            debug!("next? {}",next_vertices.len());
                             for chi in next_vertices.iter() {
-                                debug!(target:"conflict","rec: get_conflict {}",*chi);
+                                debug!("rec: get_conflict {}",*chi);
                                 get_conflict(branch,db_contents,graph,first_visit,last_visit,scc,nodes,b,is_first,selected_zombies,next,*chi);
                             }
                         }
                     }
                     let mut next_vertices=HashSet::new();
-                    debug!(target:"conflict","permutations");
+                    debug!("permutations");
                     permutations(branch,db_contents, graph,first_visit,last_visit,scc,nodes,b,is_first,selected_zombies,next,i,0,&mut next_vertices);
                 }
             }
@@ -505,7 +511,7 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
             if i==0 { break } else { i=std::cmp::min(i-1,next) }
         }
     }
-    debug!(target:"conflict","/output_file");
+    debug!("/output_file");
 }
 
 

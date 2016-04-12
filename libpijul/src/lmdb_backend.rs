@@ -217,6 +217,7 @@ pub mod backend {
     impl<'a> Iterator for Iter<'a> {
         type Item = (&'a[u8],&'a[u8]);
         fn next(&mut self) -> Option<Self::Item> {
+            debug!("{:?}", self.current);
             unsafe {
                 if let Some((key,value)) = self.current {
                     self.current = lmdb::cursor_get(self.cursor.cursor, key, Some(value), lmdb::Op::MDB_NEXT).ok();

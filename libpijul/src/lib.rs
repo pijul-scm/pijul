@@ -34,7 +34,7 @@ pub trait RepositoryEnv<'env, R>:Sized {
 }
 
 extern crate rustc_serialize;
-
+use rustc_serialize::hex::ToHex;
 //use self::contents::{Inode, OwnedInode, Line, Graph, LineBuffer};
 //use self::contents::{LINE_ONSTACK, LINE_VISITED, DIRECTORY_FLAG, INODE_SIZE, ROOT_INODE};
 
@@ -96,55 +96,79 @@ impl<'env,T> backend::Transaction<'env,T> {
         graph::output_file(branch, &db_contents, l, graph,&mut redundant_edges);
     }
 
+    pub fn branch_patches<'a>(&'a self,db_external:&'a backend::Db<'a,'env>, branch_name:&str)->Result<HashSet<&'a[u8]>,Error> {
+        let mut patches = HashSet::new();
+        let db_patches = self.db_branches();
+        for (br_name,patch_hash) in db_patches.iter(branch_name.as_bytes(),None) {
+            if br_name == branch_name.as_bytes() {
+                patches.insert(patch::external_hash(&db_external, patch_hash));
+            } else {
+                break
+            }
+        }
+        Ok(patches)
+    }
     pub fn write_changes_file<P:AsRef<Path>>(&self, branch_name:&str, path:P)->Result<(),Error> {
-        unimplemented!()
+        let db_external = self.db_external();
+        let patches = try!(self.branch_patches(&db_external, branch_name));
+        let changes_file = fs_representation::branch_changes_file(path.as_ref(), branch_name.as_bytes());
+        try!(patch::write_changes(&patches,&changes_file));
+        Ok(())
     }
     pub fn apply_patches(&mut self, branch_name:&str, r:&Path, remote_patches:&HashSet<Vec<u8>>, local_patches:&HashSet<Vec<u8>>) -> Result<(),Error> {
-        apply::apply_patches(self, branch_name, r, remote_patches, local_patches)
+
+        debug!("apply_patches");
+        let result = apply::apply_patches(self, branch_name, r, remote_patches, local_patches);
+        debug!("/apply_patches");
+        result
     }
     pub fn apply_local_patch(&mut self, branch_name:&str, location: &Path, patch: patch::Patch, inode_updates:&HashMap<patch::LocalKey,file_operations::Inode>) -> Result<(), Error>{
-        apply::apply_local_patch(self,branch_name,location,patch,inode_updates)
 
+        debug!("apply_local_patch");
+        let result = apply::apply_local_patch(self,branch_name,location,patch,inode_updates);
+        debug!("/apply_local_patch");
+        result
     }
     pub fn record(&mut self,branch_name:&str, working_copy:&std::path::Path)->Result<(Vec<patch::Change>,HashMap<patch::LocalKey,file_operations::Inode>),Error>{
         record::record(self,branch_name,working_copy)
     }
     pub fn output_repository(&mut self, branch_name:&str, working_copy:&Path, pending:&patch::Patch) -> Result<(),Error>{
-        output::output_repository(self,branch_name,working_copy,pending)
+        debug!("outputting repository");
+        let result = output::output_repository(self,branch_name,working_copy,pending);
+        debug!("/outputting repository");
+        result
     }
     pub fn debug<W>(&self,branch_name:&str, w:&mut W) where W:std::io::Write {
-        unimplemented!() /*
-            let mut styles=Vec::with_capacity(16);
-            for i in 0..16 {
+        debug!("debugging branch {:?}", branch_name);
+        let mut styles=Vec::with_capacity(16);
+        for i in 0..16 {
             styles.push(("color=").to_string()
-            +["red","blue","green","black"][(i >> 1)&3]
-            +if (i as u8)&DELETED_EDGE!=0 { ", style=dashed"} else {""}
-            +if (i as u8)&PSEUDO_EDGE!=0 { ", style=dotted"} else {""})
-    }
-            w.write(b"digraph{\n").unwrap();
-            let curs=self.txn.cursor(self.dbi_nodes).unwrap();
-            let mut op=lmdb::Op::MDB_FIRST;
-            let mut cur=&[][..];
-            while let Ok((k,v))=curs.get(cur,None,op) {
-            op=lmdb::Op::MDB_NEXT;
+                        +["red","blue","green","black"][(i >> 1)&3]
+                        +if (i as u8)&graph::DELETED_EDGE!=0 { ", style=dashed"} else {""}
+                        +if (i as u8)&graph::PSEUDO_EDGE!=0 { ", style=dotted"} else {""})
+        }
+        w.write(b"digraph{\n").unwrap();
+        let db_nodes = self.db_nodes(branch_name);
+        let db_contents = self.db_contents();
+        let mut cur=&[][..];
+        for (k,v) in db_nodes.iter(b"",None) {
             if k!=cur {
-            let f=self.txn.get(self.dbi_contents, k);
-            let cont:&[u8]=
-            match f {
-            Ok(Some(ww))=>ww,
-            _=>&[]
-    };
-            write!(w,"n_{}[label=\"{}: {}\"];\n", k.to_hex(), k.to_hex(),
-            match str::from_utf8(&cont) { Ok(x)=>x.to_string(), Err(_)=> cont.to_hex() }
-    ).unwrap();
-            cur=k;
-    }
+                let f=db_contents.contents(k);
+                let cont:&[u8]=
+                    match f.and_then(|mut x| x.next()) {
+                        Some(ww)=>ww,
+                        _=>b""
+                    };
+                write!(w,"n_{}[label=\"{}: {}\"];\n", k.to_hex(), k.to_hex(),
+                       match std::str::from_utf8(&cont) { Ok(x)=>x.to_string(), Err(_)=> cont.to_hex() }
+                ).unwrap();
+                cur=k;
+            }
+            debug!("debug: {:?}", v);
             let flag=v[0];
-            if true || flag & PARENT_EDGE == 0 {
-            write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", k.to_hex(), &v[1..(1+KEY_SIZE)].to_hex(), styles[(flag&0xff) as usize], flag).unwrap();
-    }
-    }
-            w.write(b"}\n").unwrap();*/
+            write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", k.to_hex(), &v[1..(1+patch::KEY_SIZE)].to_hex(), styles[(flag&0xff) as usize], flag).unwrap();
+        }
+        w.write(b"}\n").unwrap();
     }
 
 }
