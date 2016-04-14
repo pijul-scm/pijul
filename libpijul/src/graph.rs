@@ -91,24 +91,25 @@ pub trait LineBuffer<'a> {
     fn output_line(&mut self, key:&'a [u8], contents: Contents<'a>);
 
     fn begin_conflict(&mut self) {
-        let mut l = Contents::from_slice(b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
+        let l = Contents::from_slice(b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
         self.output_line(&[], l);
     }
     fn conflict_next(&mut self) {
-        let mut l = Contents::from_slice(b"================================\n");
+        let l = Contents::from_slice(b"================================\n");
         self.output_line(&[], l);
     }
     fn end_conflict(&mut self) {
-        let mut l = Contents::from_slice(b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n");
+        let l = Contents::from_slice(b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n");
         self.output_line(&[], l);
     }
 }
 
 
 
-pub fn retrieve<'a>(branch:&Db, key:&'a [u8])->Result<Graph<'a>,()>{
+pub fn retrieve<'a>(ws:&mut Workspace, branch:&Db, key:&'a [u8])->Result<Graph<'a>,()>{
 
     fn retr<'a>(
+        ws:&mut Workspace,
         db_nodes: &Db,
         cache: &mut HashMap<&'a [u8],usize>,
         lines: &mut Vec<Line<'a>>,
@@ -124,14 +125,14 @@ pub fn retrieve<'a>(branch:&Db, key:&'a [u8])->Result<Graph<'a>,()>{
                 let is_zombie={
                     let mut tag=PARENT_EDGE|DELETED_EDGE;
                     let mut is_zombie = false;
-                    for (k,v) in db_nodes.iter(key, Some(&[tag][..])) {
+                    for (k,v) in db_nodes.iter(ws, key, Some(&[tag][..])) {
                         if k==key && v[0] == tag {
                             is_zombie = true
                         }
                         break
                     }
                     tag=PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE;
-                    for (k,v) in db_nodes.iter(key, Some(&[tag][..])) {
+                    for (k,v) in db_nodes.iter(ws, key, Some(&[tag][..])) {
                         if k==key && v[0] == tag {
                             is_zombie = true
                         }
@@ -143,7 +144,7 @@ pub fn retrieve<'a>(branch:&Db, key:&'a [u8])->Result<Graph<'a>,()>{
                     key:key,flags:if is_zombie {LINE_HALF_DELETED} else {0},
                     children:children.len(),n_children:0,index:0,lowlink:0,scc:0
                 };
-                for (k,v) in db_nodes.iter(key, Some(&[0][..])) {
+                for (k,v) in db_nodes.iter(ws, key, Some(&[0][..])) {
                     if k == key && v[0] <= PSEUDO_EDGE|FOLDER_EDGE {
                         children.push((v.as_ptr(),0));
                         l.n_children += 1;
@@ -162,7 +163,7 @@ pub fn retrieve<'a>(branch:&Db, key:&'a [u8])->Result<Graph<'a>,()>{
             let child_key = unsafe {
                 std::slice::from_raw_parts(a.offset(1),KEY_SIZE)
             };
-            children[l_children+i] = (a, retr(db_nodes,cache,lines,children,child_key))
+            children[l_children+i] = (a, retr(ws, db_nodes,cache,lines,children,child_key))
         }
         if n_children==0 {
             children.push((std::ptr::null(),0));
@@ -178,7 +179,7 @@ pub fn retrieve<'a>(branch:&Db, key:&'a [u8])->Result<Graph<'a>,()>{
     });
     cache.insert(&b""[..],0);
     let mut children=Vec::new();
-    retr(&branch, &mut cache, &mut lines, &mut children, key);
+    retr(ws, &branch, &mut cache, &mut lines, &mut children, key);
     Ok(Graph { lines:lines, children:children })
 }
 
@@ -247,7 +248,7 @@ fn tarjan(line:&mut Graph)->Vec<Vec<usize>> {
 
 
 
-pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a Db<'a,'b>, buf:&mut B,mut graph:Graph<'a>,forward:&mut Vec<u8>) {
+pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'b>, db_contents:&'a Db<'a,'b>, buf:&mut B,mut graph:Graph<'a>,forward:&mut Vec<u8>) {
     debug!("output_file");
 
     //let t0=time::precise_time_s();
@@ -356,6 +357,7 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
             debug!("key = {}",key.to_hex());
 
             fn get_conflict<'a,'b, B:LineBuffer<'a>>(
+                ws:&mut Workspace,
                 branch:&'a Db<'a,'b>,
                 db_contents:&'a Db<'a,'b>,
                 graph:&Graph<'a>,
@@ -393,6 +395,7 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
                 } else {
                     // Pour chaque permutation de la SCC, ajouter tous les sommets sur la pile, et appel recursif de chaque arete non-forward.
                     fn permutations<'a, 'b, B:LineBuffer<'a>>(
+                        ws: &mut Workspace,
                         branch:&'a Db<'a,'b>,
                         db_contents:&'a Db<'a,'b>,
                         graph:&Graph<'a>,
@@ -432,7 +435,7 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
                                     let mut is_defined:bool = false;
 
 
-                                    for (k,v) in branch.iter(key, Some(&[PARENT_EDGE][..])) {
+                                    for (k,v) in branch.iter(ws, key, Some(&[PARENT_EDGE][..])) {
                                         if v[0] <= PARENT_EDGE|PSEUDO_EDGE|FOLDER_EDGE && k == key {
                                             let f=&v[(1+KEY_SIZE)..(1+KEY_SIZE+HASH_SIZE)];
                                             match selected_zombies.get(f) {
@@ -459,7 +462,7 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
                                         key_is_present = is_forced
                                     }
                                     if !is_forced {
-                                        permutations(branch,db_contents, graph,first_visit,last_visit,
+                                        permutations(ws, branch,db_contents, graph,first_visit,last_visit,
                                                      scc,nodes,b,is_first,selected_zombies,next,
                                                      i,j+1,next_vertices)
                                     }
@@ -471,7 +474,7 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
                                 }
                                 if key_is_present {
                                     nodes.push(key);
-                                    permutations(branch,db_contents, graph,first_visit,last_visit,
+                                    permutations(ws, branch,db_contents, graph,first_visit,last_visit,
                                                  scc,nodes,b,is_first,selected_zombies,next,
                                                  i,j+1,next_vertices);
                                     nodes.pop();
@@ -487,20 +490,20 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
                             debug!("next? {}",next_vertices.len());
                             for chi in next_vertices.iter() {
                                 debug!("rec: get_conflict {}",*chi);
-                                get_conflict(branch,db_contents,graph,first_visit,last_visit,scc,nodes,b,is_first,selected_zombies,next,*chi);
+                                get_conflict(ws, branch,db_contents,graph,first_visit,last_visit,scc,nodes,b,is_first,selected_zombies,next,*chi);
                             }
                         }
                     }
                     let mut next_vertices=HashSet::new();
                     debug!("permutations");
-                    permutations(branch,db_contents, graph,first_visit,last_visit,scc,nodes,b,is_first,selected_zombies,next,i,0,&mut next_vertices);
+                    permutations(ws, branch,db_contents, graph,first_visit,last_visit,scc,nodes,b,is_first,selected_zombies,next,i,0,&mut next_vertices);
                 }
             }
             nodes.clear();
             let (next,is_first)={
                 let mut is_first = true;
                 let mut next = 0;
-                get_conflict(branch,db_contents,&graph,&mut first_visit[..],&mut last_visit[..],&mut scc, &mut nodes,
+                get_conflict(ws, branch,db_contents,&graph,&mut first_visit[..],&mut last_visit[..],&mut scc, &mut nodes,
                              buf,
                              &mut is_first,
                              &mut selected_zombies,
@@ -515,11 +518,11 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(branch:&'a Db<'a,'b>, db_contents:&'a
 }
 
 
-pub fn remove_redundant_edges(branch:&mut Db, forward:&mut Vec<u8>) -> Result<(),Error> {
+pub fn remove_redundant_edges(ws:&mut Workspace, branch:&mut Db, forward:&mut Vec<u8>) -> Result<(),Error> {
     let mut i=0;
     while i<forward.len() {
         let mut found = false;
-        for (k,v) in branch.iter(&forward[(i+1)..(i+1+KEY_SIZE)],
+        for (k,v) in branch.iter(ws, &forward[(i+1)..(i+1+KEY_SIZE)],
                                  Some(&forward[(i+1+KEY_SIZE+HASH_SIZE) .. (i+1+KEY_SIZE+HASH_SIZE+1+KEY_SIZE)])) {
 
             if k == &forward[(i+1) .. (i+1+KEY_SIZE)]

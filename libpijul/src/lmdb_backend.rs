@@ -17,15 +17,13 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-use super::error::*;
-use std;
 
 pub mod backend {
     use super::super::lmdb;
     use std::path::Path;
     use super::super::error::Error;
     use std::mem::{replace,transmute};
-
+    use std::marker::PhantomData;
     use super::super::Len;
     use std::ptr::null_mut;
 
@@ -149,7 +147,6 @@ pub mod backend {
         }
         pub fn child(&mut self) -> Transaction<'env, &mut Self> {
             unsafe {
-                let parent_txn = self.txn.txn;
                 let txn = null_mut();
                 let e = lmdb::mdb_txn_begin(self.txn.env.env,self.txn.txn,0,transmute(&txn));
                 assert!(e==0);
@@ -178,8 +175,13 @@ pub mod backend {
             Ok(())
         }
     }
+    pub struct Workspace { phantom:PhantomData<()> }
+    impl Workspace {
+        pub fn new() -> Workspace {
+            Workspace{ phantom:PhantomData }
+        }
+    }
 
-    
     impl<'txn,'env> Db<'txn,'env> {
         
         pub fn put(&mut self, key:&[u8], value:&[u8]) -> Result<(),Error> {
@@ -193,7 +195,8 @@ pub mod backend {
         pub fn get<'a>(&'a self, key:&[u8]) -> Option<&'a[u8]> {
             self.txn.get(self.dbi, key).unwrap_or(None)
         }
-        pub fn iter<'a>(&'a self, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a> {
+
+        pub fn iter<'a>(&'a self, _:&mut Workspace, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a> {
             unsafe {
                 let curs = self.txn.cursor(self.dbi).unwrap();
                 let current = lmdb::cursor_get(curs.cursor, starting_key, starting_value, lmdb::Op::MDB_SET_RANGE).ok();

@@ -77,29 +77,34 @@ impl<'env,T> backend::Transaction<'env,T> {
     pub fn add_file<P:AsRef<Path>>(&mut self, path:P, is_dir:bool)->Result<(),Error>{
         let mut db_tree = self.db_tree();
         let mut db_revtree = self.db_revtree();
-        file_operations::add_inode(&mut db_tree, &mut db_revtree, None, path.as_ref(), is_dir)
+        let mut workspace = backend::Workspace::new();
+        file_operations::add_inode(&mut workspace, &mut db_tree, &mut db_revtree, None, path.as_ref(), is_dir)
     }
     pub fn list_files(&self) -> Vec<PathBuf> {
         file_operations::list_files(self)
     }
 
     pub fn remove_file<P:AsRef<Path>>(&mut self, path:P) -> Result<(),Error> {
-        file_operations::remove_file(self, path.as_ref())
+        let mut workspace = backend::Workspace::new();
+        file_operations::remove_file(&mut workspace, self, path.as_ref())
     }
     pub fn move_file<P:AsRef<Path>, Q:AsRef<Path>>(&mut self, path:P, path_:Q,is_dir:bool) -> Result<(), Error>{
-        file_operations::move_file(self, path.as_ref(), path_.as_ref(), is_dir)
+        let mut workspace = backend::Workspace::new();
+        file_operations::move_file(&mut workspace, self, path.as_ref(), path_.as_ref(), is_dir)
     }
     pub fn retrieve_and_output<W:std::io::Write>(&self,branch:&backend::Db,key:&[u8],l:&mut W) {
         let db_contents = self.db_contents();
         let mut redundant_edges = Vec::new();
-        let graph = graph::retrieve(branch,key).unwrap();
-        graph::output_file(branch, &db_contents, l, graph,&mut redundant_edges);
+        let mut workspace = backend::Workspace::new();
+        let graph = graph::retrieve(&mut workspace, branch,key).unwrap();
+        graph::output_file(&mut workspace, branch, &db_contents, l, graph,&mut redundant_edges);
     }
 
     pub fn branch_patches<'a>(&'a self,db_external:&'a backend::Db<'a,'env>, branch_name:&str)->Result<HashSet<&'a[u8]>,Error> {
         let mut patches = HashSet::new();
+        let mut ws = backend::Workspace::new();
         let db_patches = self.db_branches();
-        for (br_name,patch_hash) in db_patches.iter(branch_name.as_bytes(),None) {
+        for (br_name,patch_hash) in db_patches.iter(&mut ws, branch_name.as_bytes(),None) {
             if br_name == branch_name.as_bytes() {
                 patches.insert(patch::external_hash(&db_external, patch_hash));
             } else {
@@ -141,6 +146,7 @@ impl<'env,T> backend::Transaction<'env,T> {
     pub fn debug<W>(&self,branch_name:&str, w:&mut W) where W:std::io::Write {
         debug!("debugging branch {:?}", branch_name);
         let mut styles=Vec::with_capacity(16);
+        let mut ws = backend::Workspace::new();
         for i in 0..16 {
             styles.push(("color=").to_string()
                         +["red","blue","green","black"][(i >> 1)&3]
@@ -151,7 +157,7 @@ impl<'env,T> backend::Transaction<'env,T> {
         let db_nodes = self.db_nodes(branch_name);
         let db_contents = self.db_contents();
         let mut cur=&[][..];
-        for (k,v) in db_nodes.iter(b"",None) {
+        for (k,v) in db_nodes.iter(&mut ws, b"",None) {
             if k!=cur {
                 let f=db_contents.contents(k);
                 let cont:&[u8]=

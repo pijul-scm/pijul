@@ -29,12 +29,12 @@ pub mod diff {
     use std::path::Path;
     use std::io::Read;
 
-    fn delete_edges<T>(repository:&Transaction<T>, branch:&Db, edges:&mut Vec<Edge>, key:&[u8],flag:u8) {
+    fn delete_edges<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Db, edges:&mut Vec<Edge>, key:&[u8],flag:u8) {
         if key.len() > 0 {
             let ext = repository.db_external();
             let ext_key=external_key(&ext,key);
-            for (k,v) in branch.iter(key, Some(&[flag])) {
-                if v[0] >= flag && v[0] <= flag | (PSEUDO_EDGE|FOLDER_EDGE) {
+            for (k,v) in branch.iter(ws, key, Some(&[flag])) {
+                if k==key && v[0] >= flag && v[0] <= flag | (PSEUDO_EDGE|FOLDER_EDGE) {
                     if v[0]&PSEUDO_EDGE == 0 {
                         edges.push(Edge {
                             from:ext_key.clone(),
@@ -65,18 +65,18 @@ pub mod diff {
     }
 
 
-    fn delete_lines<T>(repository:&Transaction<T>, branch:&Db, lines:&[&[u8]]) -> Change
+    fn delete_lines<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Db, lines:&[&[u8]]) -> Change
     {
         let mut edges=Vec::with_capacity(lines.len());
         for i in 0..lines.len() {
             //debug!(target:"conflictdiff","deleting line {}",lines[i].to_hex());
-            delete_edges(repository, branch, &mut edges, lines[i], PARENT_EDGE)
+            delete_edges(ws, repository, branch, &mut edges, lines[i], PARENT_EDGE)
         }
         Change::Edges{edges:edges, flag:PARENT_EDGE|DELETED_EDGE}
     }
 
-    fn local_diff<T>(repository:&Transaction<T>, branch:&Db, actions:&mut Vec<Change>,
-                  line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[Contents], b:&[&[u8]])
+    fn local_diff<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Db, actions:&mut Vec<Change>,
+                     line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[Contents], b:&[&[u8]])
     {
         debug!(target:"conflictdiff","local_diff {} {}",contents_a.len(),b.len());
         let mut opt=vec![vec![0;b.len()+1];contents_a.len()+1];
@@ -112,7 +112,7 @@ pub mod diff {
             if super::super::eq(&mut contents_a_i, &mut Contents::from_slice(&b[j])) {
                 if let Some(i0)=oi {
                     debug!(target:"diff","deleting from {} to {} / {}",i0,i,lines_a.len());
-                    let dels = delete_lines(repository, branch, &lines_a[i0..i]);
+                    let dels = delete_lines(ws, repository, branch, &lines_a[i0..i]);
                     actions.push(dels);
                     oi=None
                 } else if let Some(j0)=oj {
@@ -144,7 +144,7 @@ pub mod diff {
                 } else {
                     // We will add things starting from j.
                     if let Some(i0)=oi {
-                        let dels = delete_lines(repository, branch, &lines_a[i0..i]);
+                        let dels = delete_lines(ws, repository, branch, &lines_a[i0..i]);
                         actions.push(dels);
                         last_alive_context=i0-1;
                         oi=None
@@ -165,11 +165,11 @@ pub mod diff {
                 actions.push(adds)
                     
             }
-            let dels = delete_lines(repository, branch, &lines_a[i..lines_a.len()]);
+            let dels = delete_lines(ws, repository, branch, &lines_a[i..lines_a.len()]);
             actions.push(dels)
         } else if j < b.len() {
             if let Some(i0)=oi {
-                delete_lines(repository, branch, &lines_a[i0..i]);
+                delete_lines(ws, repository, branch, &lines_a[i0..i]);
                 let adds =
                     add_lines(repository, line_num, lines_a[i0-1], &[], &b[j..b.len()]);
                 actions.push(adds);
@@ -179,7 +179,7 @@ pub mod diff {
             }
         }
     }
-
+    
 
     struct Diff<'a> {
         lines_a:Vec<&'a[u8]>,
@@ -224,10 +224,11 @@ pub mod diff {
                 //let t0=time::precise_time_s();
                 let db_contents = repository.db_contents();
                 let mut d = Diff { lines_a:Vec::new(), contents_a:Vec::new() };
-                graph::output_file(branch, &db_contents, &mut d,a,redundant);
+                let mut ws = Workspace::new();
+                graph::output_file(&mut ws, branch, &db_contents, &mut d,a,redundant);
                 //let t1=time::precise_time_s();
                 //info!("output_file took {}s",t1-t0);
-                local_diff(repository, branch, actions, line_num,
+                local_diff(&mut ws, repository, branch, actions, line_num,
                            &d.lines_a,
                            &d.contents_a[..],
                            &lines_b);

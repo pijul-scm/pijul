@@ -21,7 +21,7 @@ use super::backend::*;
 use super::error::Error;
 use super::patch::{Change, HASH_SIZE, KEY_SIZE, LINE_SIZE, ROOT_KEY, EDGE_SIZE, InternalKey, internal_hash, external_hash, Patch, LocalKey, new_internal, register_hash};
 use super::graph::{PSEUDO_EDGE, FOLDER_EDGE, PARENT_EDGE, DELETED_EDGE};
-use super::file_operations::{INODE_SIZE, create_new_inode, Inode};
+use super::file_operations::{Inode};
 use super::Len;
 
 use std::collections::{HashSet, HashMap};
@@ -36,13 +36,14 @@ use super::fs_representation::patches_dir;
 use rustc_serialize::hex::ToHex;
 
 /// Test whether a node has edges unknown to the patch we're applying.
-fn has_exclusive_edge(branch: &Db,
+fn has_exclusive_edge(ws:&mut Workspace,
+                      branch: &Db,
                       db_external: &Db,
                       internal_patch_id:&InternalKey,
                       key:&[u8],
                       flag0:u8,
                       dependencies:&HashSet<Vec<u8>>)->bool {
-    for (k,neighbor) in branch.iter(&key[1..(1+KEY_SIZE)], Some(&[flag0][..])) {
+    for (k,neighbor) in branch.iter(ws, &key[1..(1+KEY_SIZE)], Some(&[flag0][..])) {
         //,include_folder,include_pseudo) {
         if k == &key[1..(1+KEY_SIZE)] && neighbor[0] <= flag0|PSEUDO_EDGE|FOLDER_EDGE {
 
@@ -82,7 +83,8 @@ fn internal_edge(internal:&Db,flag:u8,to:&[u8],intro:&InternalKey,result:&mut [u
 }
 
 
-fn unsafe_apply(db_internal:&Db, db_external:&Db, branch:&mut Db, db_contents:&mut Db, changes:&[Change],
+fn unsafe_apply(ws:&mut Workspace,
+                db_internal:&Db, db_external:&Db, branch:&mut Db, db_contents:&mut Db, changes:&[Change],
                 internal_patch_id:& InternalKey,dependencies:&HashSet<Vec<u8>>)->Result<(),Error>{
 
     debug!(target:"conflictdiff","unsafe_apply");
@@ -114,15 +116,15 @@ fn unsafe_apply(db_internal:&Db, db_external:&Db, branch:&mut Db, db_contents:&m
                     if *flag & DELETED_EDGE != 0 {
                         // Will we need zombies?
                         // We need internal_patch_id here: previous hunks of this patch could have added edges to us.
-                        if has_exclusive_edge(branch, &db_external, internal_patch_id,&pv,PARENT_EDGE, dependencies)
-                            || has_exclusive_edge(branch, &db_external, internal_patch_id,&pu,0,dependencies) {
+                        if has_exclusive_edge(ws, branch, &db_external, internal_patch_id,&pv,PARENT_EDGE, dependencies)
+                            || has_exclusive_edge(ws, branch, &db_external, internal_patch_id,&pu,0,dependencies) {
                                 //debug!(target:"exclusive","add_zombies:\n{}\n{}", e.to.to_hex(),e.from.to_hex());
                                 add_zombies=true;
                             } else {
                                 debug!(target:"exclusive","not add zombies: {}",add_zombies);
                             }
                         //
-                        try!(kill_obsolete_pseudo_edges(branch, if *flag&PARENT_EDGE == 0 { &mut pv } else { &mut pu }))
+                        try!(kill_obsolete_pseudo_edges(ws, branch, if *flag&PARENT_EDGE == 0 { &mut pv } else { &mut pu }))
                     }
                 }
                 // Then add the new edges.
@@ -148,17 +150,17 @@ fn unsafe_apply(db_internal:&Db, db_external:&Db, branch:&mut Db, db_contents:&m
                             // collect alive parents/children of hunk
                             let (pu,pv)= if *flag&PARENT_EDGE==0 { (&pu,&pv) } else { (&pv,&pu) };
                             //debug!(target:"apply","pu has_edge\n  {}",&pu[1..(1+KEY_SIZE)].to_hex());
-                            if has_edge(branch, &pu[1..(1+KEY_SIZE)],PARENT_EDGE,true) {
+                            if has_edge(ws, branch, &pu[1..(1+KEY_SIZE)],PARENT_EDGE,true) {
                                 let i=parents.len();
                                 parents.extend(&pu[..]);
                                 parents[i]^= PSEUDO_EDGE | DELETED_EDGE;
                             }
                             //debug!(target:"apply","pv={}",&pv[1..(1+KEY_SIZE)].to_hex());
-                            for (k,neighbor) in branch.iter(&pv[1..(1+KEY_SIZE)], Some(&[PARENT_EDGE][..])) {
+                            for (k,neighbor) in branch.iter(ws, &pv[1..(1+KEY_SIZE)], Some(&[PARENT_EDGE][..])) {
 
                                 if k == &pv[1..(1+KEY_SIZE)] && neighbor[0] <= PARENT_EDGE|PSEUDO_EDGE|FOLDER_EDGE {
                                     //debug!(target:"apply","parent has_edge\n  {}",neighbor.to_hex());
-                                    if has_edge(branch, &neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true) {
+                                    if has_edge(ws, branch, &neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true) {
                                         let i=parents.len();
                                         parents.extend(neighbor);
                                         parents[i]^=PSEUDO_EDGE;
@@ -167,11 +169,11 @@ fn unsafe_apply(db_internal:&Db, db_external:&Db, branch:&mut Db, db_contents:&m
                                     break
                                 }
                             }
-                            for (k,neighbor) in branch.iter(&pv[1..(1+KEY_SIZE)], Some(&[0][..])) {
+                            for (k,neighbor) in branch.iter(ws, &pv[1..(1+KEY_SIZE)], Some(&[0][..])) {
 
                                 if k == &pv[1..(1+KEY_SIZE)] && neighbor[0] <= PSEUDO_EDGE|FOLDER_EDGE {
                                     //debug!(target:"apply","children has_edge\n  {}",neighbor.to_hex());
-                                    if has_edge(branch,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true) {
+                                    if has_edge(ws, branch,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true) {
                                         let i=children.len();
                                         children.extend(neighbor);
                                         children[i]^=PSEUDO_EDGE;
@@ -190,16 +192,16 @@ fn unsafe_apply(db_internal:&Db, db_external:&Db, branch:&mut Db, db_contents:&m
                     while i<children.len() {
                         let mut j=0;
                         while j<parents.len() {
-                            if ! connected(branch,
+                            if ! connected(ws, branch,
                                            &parents[j+1 .. j+1+KEY_SIZE],
                                            &mut children[i .. i+1+KEY_SIZE+HASH_SIZE]) {
                                 /*debug!(target:"apply","reconnect:\n  {}\n  {}",
                                        &parents[j..(j+1+KEY_SIZE+HASH_SIZE)].to_hex(),
                                        &mut children[i..(i+1+KEY_SIZE+HASH_SIZE)].to_hex());*/
                                 if &parents[(j+1)..(j+1+KEY_SIZE)] != &children[(i+1)..(i+1+KEY_SIZE)] {
-                                    add_edge(branch,
-                                             &parents[j..(j+1+KEY_SIZE+HASH_SIZE)],
-                                             &mut children[i..(i+1+KEY_SIZE+HASH_SIZE)]);
+                                    try!(add_edge(branch,
+                                                  &parents[j..(j+1+KEY_SIZE+HASH_SIZE)],
+                                                  &mut children[i..(i+1+KEY_SIZE+HASH_SIZE)]));
                                 }
                             }
                             j+=1+KEY_SIZE+HASH_SIZE;
@@ -301,9 +303,9 @@ fn unsafe_apply(db_internal:&Db, db_external:&Db, branch:&mut Db, db_contents:&m
 
 
 /// Test whether `key` has a neighbor with flag `flag0`. If `include_pseudo`, this includes pseudo-neighbors.
-pub fn has_edge(branch:&Db, key:&[u8],flag0:u8,include_pseudo:bool)->bool {
+pub fn has_edge(ws:&mut Workspace, branch:&Db, key:&[u8],flag0:u8,include_pseudo:bool)->bool {
 
-    for (k,v) in branch.iter(key, Some(&[flag0][..])) {
+    for (k,v) in branch.iter(ws, key, Some(&[flag0][..])) {
         return k == key && (v[0] == flag0 || (include_pseudo && v[0] <= flag0|PSEUDO_EDGE))
     }
     false
@@ -314,11 +316,12 @@ pub fn has_patch<T>(repository:&Transaction<T>, branch_name:&str, hash:&[u8])->R
     if hash.len()==HASH_SIZE && hash == ROOT_KEY {
         Ok(true)
     } else {
+        let mut ws = Workspace::new();
         let db_internal = repository.db_internal();
         match internal_hash(&db_internal, hash) {
             Ok(internal) => {
                 let db_branches = repository.db_branches();
-                for (k,v) in db_branches.iter(branch_name.as_bytes(), Some(internal.as_slice())) {
+                for (k,v) in db_branches.iter(&mut ws, branch_name.as_bytes(), Some(internal.as_slice())) {
                     return Ok(k==branch_name.as_bytes() && internal.as_slice() == v)
                 }
                 Ok(false)                
@@ -330,10 +333,10 @@ pub fn has_patch<T>(repository:&Transaction<T>, branch_name:&str, hash:&[u8])->R
 }
 
 // requires pu to be KEY_SIZE, pv to be 1+KEY_SIZE+HASH_SIZE
-fn connected(branch:&Db, pu:&[u8],pv:&mut [u8])->bool {
+fn connected(ws:&mut Workspace, branch:&Db, pu:&[u8],pv:&mut [u8])->bool {
     let pv_0=pv[0];
     pv[0]=0;
-    for (k,v) in branch.iter(pu, Some(pv)) {
+    for (k,v) in branch.iter(ws, pu, Some(pv)) {
         if k == pu && &v[1..(1+KEY_SIZE)] == &pv[1..(1+KEY_SIZE)] && v[0]|PSEUDO_EDGE == pv[0]|PSEUDO_EDGE {
             pv[0]=pv_0;
             return true
@@ -349,7 +352,7 @@ fn add_edge(branch:&mut Db, pu:&[u8],pv:&[u8]) -> Result<(),Error> {
     branch.put(&pv[1..(1+KEY_SIZE)],&pu) // ,lmdb::MDB_NODUPDATA)
 }
 
-fn kill_obsolete_pseudo_edges(branch:&mut Db, pv:&[u8]) ->Result<(),Error> {
+fn kill_obsolete_pseudo_edges(ws:&mut Workspace, branch:&mut Db, pv:&[u8]) ->Result<(),Error> {
     debug_assert!(pv.len()==1+KEY_SIZE+HASH_SIZE);
     let mut a:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
     let mut b:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
@@ -361,7 +364,7 @@ fn kill_obsolete_pseudo_edges(branch:&mut Db, pv:&[u8]) ->Result<(),Error> {
 
         loop {
             let mut found = false;
-            for (k,v) in branch.iter(&pv[1..(1+KEY_SIZE)], Some(&[*flag][..])) {
+            for (k,v) in branch.iter(ws, &pv[1..(1+KEY_SIZE)], Some(&[*flag][..])) {
                 if k == &pv[1..(1+KEY_SIZE)] && v[0] == *flag {
                     unsafe {
                         copy_nonoverlapping(v.as_ptr(),
@@ -391,7 +394,7 @@ fn kill_obsolete_pseudo_edges(branch:&mut Db, pv:&[u8]) ->Result<(),Error> {
 
 /// Applies a patch to a repository. "new_patches" are patches that just this repository has, and the remote repository doesn't have.
 pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patch, internal: &'b InternalKey, new_patches:&HashSet<&[u8]>)->Result<(),Error> {
-    
+    let mut ws = Workspace::new();
     let mut db_branches = repository.db_branches();
     if db_branches.get(internal.as_slice()).is_some() {
         return Err(Error::AlreadyApplied)
@@ -404,7 +407,8 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patc
         try!(db_branches.put(branch_name.as_bytes(), internal.as_slice()));
         //repository.set_db_branches(db_branches);
         
-        try!(unsafe_apply(&db_internal, &db_external, &mut db_nodes, &mut db_contents,
+        try!(unsafe_apply(&mut ws,
+                          &db_internal, &db_external, &mut db_nodes, &mut db_contents,
                           &patch.changes, &internal, &patch.dependencies));
     }
     //let cursor= unsafe {&mut *self.txn.unsafe_cursor(self.dbi_nodes).unwrap() };
@@ -412,7 +416,7 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patc
     {
         let mut relatives=Vec::new();
         // repair_missing_context adds all zombie edges needed.
-        let mut repair_missing_context= |db_nodes:&mut Db, direction_up:bool,c:&[u8] | -> Result<(),Error> {
+        let mut repair_missing_context= |ws:&mut Workspace, db_nodes:&mut Db, direction_up:bool,c:&[u8] | -> Result<(),Error> {
             let mut context:[u8;KEY_SIZE]=[0;KEY_SIZE];
             unsafe {
                 let u : &InternalKey = if c.len()>LINE_SIZE {
@@ -426,9 +430,10 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patc
                                     LINE_SIZE);
             }
             //debug!(target:"missing context","{} context:{}",direction_up,context.to_hex());
-            if if direction_up { !has_edge(&db_nodes, &context[..],PARENT_EDGE,true) } else { has_edge(&db_nodes, &context[..],PARENT_EDGE|DELETED_EDGE,true) } {
+            if if direction_up { !has_edge(ws, &db_nodes, &context[..],PARENT_EDGE,true) } else { has_edge(ws, &db_nodes, &context[..],PARENT_EDGE|DELETED_EDGE,true) } {
                 relatives.clear();
-                find_alive_relatives(repository, db_nodes,
+                find_alive_relatives(ws,
+                                     repository, db_nodes,
                                      &context[..],
                                      if direction_up {DELETED_EDGE|PARENT_EDGE} else {DELETED_EDGE},
                                      internal,new_patches,
@@ -474,8 +479,8 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patc
                                                         LINE_SIZE);
                                 }
                             }
-                            repair_missing_context(&mut db_nodes, (*flag)&PARENT_EDGE != 0,&u[..]);
-                            repair_missing_context(&mut db_nodes, (*flag)&PARENT_EDGE == 0,&v[..]);
+                            try!(repair_missing_context(&mut ws, &mut db_nodes, (*flag)&PARENT_EDGE != 0,&u[..]));
+                            try!(repair_missing_context(&mut ws, &mut db_nodes, (*flag)&PARENT_EDGE == 0,&v[..]));
                         }
                     } else // DELETED_EDGE
                         if (*flag) & FOLDER_EDGE != 0 {
@@ -495,9 +500,9 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patc
                                         Some(cont)=>cont.len()==0,
                                         None=>true
                                     };
-                                if u_is_empty && has_edge(&db_nodes, &u[..],0,true) {
+                                if u_is_empty && has_edge(&mut ws, &db_nodes, &u[..],0,true) {
                                     // If a deleted folder edge has alive children, reconnect it to the root.
-                                    try!(reconnect_zombie_folder(&mut db_nodes, &u[..],internal));
+                                    try!(reconnect_zombie_folder(&mut ws, &mut db_nodes, &u[..],internal));
                                 }
                             }
                         }
@@ -505,10 +510,10 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patc
                 Change::NewNodes { ref up_context,ref down_context, .. } => {
                     // Handle missing contexts.
                     for c in up_context {
-                        try!(repair_missing_context(&mut db_nodes, true,c))
+                        try!(repair_missing_context(&mut ws, &mut db_nodes, true,c))
                     }
                     for c in down_context {
-                        try!(repair_missing_context(&mut db_nodes, false,c))
+                        try!(repair_missing_context(&mut ws, &mut db_nodes, false,c))
                     }
                     debug!(target:"libpijul","apply: newnodes, done");
                 }
@@ -533,10 +538,11 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patc
 }
 
 
-fn find_alive_relatives<T>(repository:&Transaction<T>, branch:&Db, a:&[u8], direction:u8, patch_id:&InternalKey, new_patches:&HashSet<&[u8]>,
+fn find_alive_relatives<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Db, a:&[u8], direction:u8, patch_id:&InternalKey, new_patches:&HashSet<&[u8]>,
                         relatives:&mut Vec<u8>) {
     //let cursor= unsafe { &mut * self.txn.unsafe_cursor(self.dbi_nodes).unwrap() };
-    fn connect<T>(repository:&Transaction<T>,
+    fn connect<T>(ws:&mut Workspace,
+                  repository:&Transaction<T>,
                branch:&Db,
                a:&[u8],
                direction:u8,
@@ -548,7 +554,7 @@ fn find_alive_relatives<T>(repository:&Transaction<T>, branch:&Db, a:&[u8], dire
         if ROOT_KEY != a {
             let db_external = repository.db_external();
             let mut i=result.len();
-            for (k,neighbor) in branch.iter(a, Some(&[direction][..])) {
+            for (k,neighbor) in branch.iter(ws, a, Some(&[direction][..])) {
                 if k==a && neighbor[0] <= direction|PSEUDO_EDGE {
                     // Is this neighbor from one of the newly applied patches?
                     let is_new=
@@ -582,7 +588,7 @@ fn find_alive_relatives<T>(repository:&Transaction<T>, branch:&Db, a:&[u8], dire
                                         copy.as_mut_ptr(),
                                         KEY_SIZE);
                 }
-                connect(repository, branch, &copy[..],direction,result,
+                connect(ws, repository, branch, &copy[..],direction,result,
                         //buffer,
                         patch_id,new_patches);
                 i+= 2*(1+KEY_SIZE+HASH_SIZE)
@@ -591,21 +597,23 @@ fn find_alive_relatives<T>(repository:&Transaction<T>, branch:&Db, a:&[u8], dire
         }
     }
     //let mut buf=Vec::with_capacity(4*KEY_SIZE);
-    connect(repository,branch,a,direction,relatives,patch_id,new_patches);
+    connect(ws, repository,branch,a,direction,relatives,patch_id,new_patches);
     //unsafe { lmdb::mdb_cursor_close(cursor); }
 }
 
 
-fn reconnect_zombie_folder(branch:&mut Db, a:&[u8], patch_id: &InternalKey)->Result<(),Error> {
-    fn connect(branch:&mut Db,
+fn reconnect_zombie_folder(ws:&mut Workspace,
+                           branch:&mut Db, a:&[u8], patch_id: &InternalKey)->Result<(),Error> {
+    fn connect(ws:&mut Workspace,
+               branch:&mut Db,
                a:&[u8],
                patch_id:&InternalKey,
                edges:&mut Vec<u8>) {
         //debug!(target:"missing context","connect zombie: {} {}",a.to_hex(), has_edge(repository, branch, &a,PARENT_EDGE|FOLDER_EDGE,false));
 
-        if a != ROOT_KEY && !has_edge(branch, &a,PARENT_EDGE|FOLDER_EDGE,false) {
+        if a != ROOT_KEY && !has_edge(ws, branch, &a,PARENT_EDGE|FOLDER_EDGE,false) {
             let i=edges.len();
-            for (k,neighbor) in branch.iter(a, Some(&[PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE][..])) {
+            for (k,neighbor) in branch.iter(ws, a, Some(&[PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE][..])) {
                 if k == a && neighbor[0] <= PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE|PSEUDO_EDGE {
                     //debug!(target:"missing context","pushing from {}",a.to_hex());
                     //debug!(target:"missing context","pushing {}",neighbor.to_hex());
@@ -628,7 +636,7 @@ fn reconnect_zombie_folder(branch:&mut Db, a:&[u8], patch_id: &InternalKey)->Res
                                         neighbor.as_mut_ptr(),
                                         KEY_SIZE)
                 }
-                connect(branch,&neighbor[..],patch_id,edges);
+                connect(ws, branch,&neighbor[..],patch_id,edges);
                 j+=2*EDGE_SIZE
             }
         }
@@ -637,7 +645,7 @@ fn reconnect_zombie_folder(branch:&mut Db, a:&[u8], patch_id: &InternalKey)->Res
     //let mut buf=Vec::with_capacity(4*KEY_SIZE);
     let mut edges=Vec::new();
     //let cursor= unsafe { &mut * self.txn.unsafe_cursor(self.dbi_nodes).unwrap() };
-    connect(branch,a,patch_id,&mut edges);
+    connect(ws, branch,a,patch_id,&mut edges);
     debug!(target:"missing context","edges.len()={}",edges.len());
     let mut i=0;
     while i<edges.len() {
@@ -649,7 +657,12 @@ fn reconnect_zombie_folder(branch:&mut Db, a:&[u8], patch_id: &InternalKey)->Res
     Ok(())
 }
 
-pub fn sync_file_additions<T>(repository: &mut Transaction<T>, branch:&mut Db, changes:&[Change], updates:&HashMap<LocalKey,Inode>,
+
+/*
+// This functions synchronizes the inodes and revinodes table, which
+// is something also done by output_repository. Remove when we're 100%
+// sure it's not needed.
+pub fn sync_file_additions<T>(repository: &mut Transaction<T>, ws:&mut Workspace, branch:&mut Db, changes:&[Change], updates:&HashMap<LocalKey,Inode>,
                               internal_patch_id:&InternalKey) -> Result<(),Error> {
     let mut node=[0;3+KEY_SIZE];
     let mut node_=[0;3+KEY_SIZE];
@@ -670,7 +683,7 @@ pub fn sync_file_additions<T>(repository: &mut Transaction<T>, branch:&mut Db, c
                     match updates.get(&node[(3+HASH_SIZE)..]) {
                         None => {
                             // This file comes from a remote patch
-                            create_new_inode(&mut db_revtree, &mut inode);
+                            create_new_inode(ws, &mut db_revtree, &mut inode);
                             //debug!(target:"sync_file_additions","create {}",inode.to_hex());
                         },
                         Some(up_inode)=> {
@@ -705,7 +718,7 @@ pub fn sync_file_additions<T>(repository: &mut Transaction<T>, branch:&mut Db, c
                         }
                         let mut unique_child= true;
 
-                        for (k,child) in branch.iter(&node[3..], Some(&[FOLDER_EDGE][..])) { //CursIter::new(cursor,&node[3..],FOLDER_EDGE,true,false) {
+                        for (k,child) in branch.iter(ws, &node[3..], Some(&[FOLDER_EDGE][..])) { //CursIter::new(cursor,&node[3..],FOLDER_EDGE,true,false) {
                             if k == &node[3..] && child[0] <= FOLDER_EDGE|PSEUDO_EDGE {
                                 // Invariant: there "should be" only one child here.
                                 debug_assert!(unique_child);
@@ -746,7 +759,7 @@ pub fn sync_file_additions<T>(repository: &mut Transaction<T>, branch:&mut Db, c
     //repository.set_db_revinodes(db_revinodes);
     Ok(())
 }
-
+*/
 /// Assumes all patches have been downloaded. The third argument
 /// `remote_patches` needs to contain at least all the patches we want
 /// to apply, and the fourth one `local_patches` at least all the patches the other
@@ -773,8 +786,9 @@ pub fn apply_patches<T>(repository:&mut Transaction<T>,
             //println!("pulling and applying patch {}",to_hex(patch_hash));
             try!(apply(repository, branch_name, &patch, &internal,only_local));
             *patches_were_applied=true;
-            //repo.sync_file_additions(&patch.changes[..],&HashMap::new(), &internal);
-            register_hash(repository, &internal,patch_hash);
+            // This is not necessary anymore, output_files does this.
+            //sync_file_additions(repository, ws, &patch.changes[..],&HashMap::new(), &internal);
+            try!(register_hash(repository, &internal,patch_hash));
             Ok(())
         } else {
             Ok(())
@@ -826,7 +840,7 @@ pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, lo
     try!(apply(repository, branch_name, &patch, internal, &HashSet::new()));
     debug!(target:"pijul", "synchronizing tree");
     {
-        let mut branch = repository.db_nodes(branch_name);
+        let branch = repository.db_nodes(branch_name);
         let mut db_inodes = repository.db_inodes();
         let mut db_revinodes = repository.db_revinodes();
         {
@@ -857,7 +871,7 @@ pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, lo
     info!("applied patch in {}s", t2 - t0);
     match hash_child.join() {
         Ok(Ok(hash))=> {
-            register_hash(repository, internal,&hash[..]);
+            try!(register_hash(repository, internal,&hash[..]));
             debug!(target:"record","hash={}, local={}",hash.to_hex(),internal.to_hex());
             try!(repository.write_changes_file(branch_name, location));
             let t3=time::precise_time_s();
