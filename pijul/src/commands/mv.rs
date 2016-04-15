@@ -17,8 +17,6 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-use commands::fs_operation;
-use commands::fs_operation::Operation;
 use commands::StaticSubcommand;
 use clap::{SubCommand, ArgMatches,Arg};
 use commands::error;
@@ -26,7 +24,7 @@ use std::path::{PathBuf, Path};
 use std::fs::{rename, metadata};
 
 extern crate libpijul;
-use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root, repo_path};
+use self::libpijul::fs_representation::{pristine_dir, find_repo_root, repo_path};
 use self::libpijul::Repository;
 
 use super::get_wd;

@@ -25,7 +25,7 @@ use super::graph::*;
 use super::diff;
 
 use std::collections::HashMap;
-use std::path::{Path,PathBuf};
+use std::path::{PathBuf};
 use std::fs::metadata;
 use std;
 use std::io::BufRead;
@@ -133,29 +133,6 @@ pub fn record_all<T> (
                                     }
                             }
                         }
-                        /*
-                        for parent in CursIter::new(curs_parents,&current_node[3..],FOLDER_EDGE|PARENT_EDGE,true,false) {
-                            let previous_name=
-                                match try!(self.txn.get(self.dbi_contents,&parent[1..(1+KEY_SIZE)])) {
-                                    None=>"".as_bytes(),
-                                    Some(n)=>n
-                                };
-                            for grandparent in CursIter::new(curs_grandparents,&parent[1..(1+KEY_SIZE)],FOLDER_EDGE|PARENT_EDGE,true,false) {
-                                if &grandparent[1..(1+KEY_SIZE)] != parent_node.unwrap()
-                                    || &name[..] != previous_name {
-                                        edges.push(Edge {
-                                            from:self.external_key(&parent[1..(1+KEY_SIZE)]),
-                                            to:self.external_key(&grandparent[1..(1+KEY_SIZE)]),
-                                            introduced_by:self.external_key(&grandparent[1+KEY_SIZE..])
-                                        });
-                                    }
-                            }
-                        }
-                        unsafe {
-                            lmdb::mdb_cursor_close(curs_parents);
-                            lmdb::mdb_cursor_close(curs_grandparents);
-                        }
-                         */
                         debug!("edges:{:?}",edges);
                         if !edges.is_empty(){
                             actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
@@ -186,7 +163,8 @@ pub fn record_all<T> (
                             let ret = retrieve(ws0, branch, &current_node[3..]);
                             //let time1=time::precise_time_s();
                             //info!("retrieve took {}s, now calling diff", time1-time0);
-                            diff::diff(repository, branch, line_num,actions, redundant,ret.unwrap(), realpath.as_path()).unwrap();
+                            debug!("diff");
+                            try!(diff::diff(repository, branch, line_num,actions, redundant,ret.unwrap(), realpath.as_path()));
                             //let time2=time::precise_time_s();
                             //info!("total diff took {}s", time2-time1);
                         }
@@ -235,9 +213,9 @@ pub fn record_all<T> (
                             //let time0=time::precise_time_s();
                             let ret = retrieve(ws0, branch, &current_node[3..]);
                             //let time1=time::precise_time_s();
-                            //info!(target:"record_all","record: retrieve took {}s, now calling diff", time1-time0);
-                            diff::diff(repository, branch, line_num, actions, redundant,
-                                 ret.unwrap(), realpath.as_path()).unwrap();
+                            info!("now calling diff");
+                            try!(diff::diff(repository, branch, line_num, actions, redundant,
+                                            ret.unwrap(), realpath.as_path()));
                             //let time2=time::precise_time_s();
                             //info!(target:"record_all","total diff took {}s", time2-time1);
                         }

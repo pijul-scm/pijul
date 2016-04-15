@@ -25,9 +25,6 @@
 //! Lines are organised in a Graph, which encodes which line belongs to what
 //! file, in what order they appear, and any conflict.
 
-extern crate libc;
-use self::libc::{c_uchar};
-
 extern crate rustc_serialize;
 use rustc_serialize::hex::ToHex;
 
@@ -49,9 +46,13 @@ use std;
 
 pub const DIRECTORY_FLAG:usize = 0x200;
 
-pub const LINE_HALF_DELETED:c_uchar=4;
-pub const LINE_VISITED:c_uchar=2;
-pub const LINE_ONSTACK:c_uchar=1;
+bitflags! {
+    pub flags Flags: u8 {
+        const LINE_HALF_DELETED = 4,
+        const LINE_VISITED = 2,
+        const LINE_ONSTACK = 1,
+    }
+}
 
 /// The elementary datum in the representation of the repository state
 /// at any given point in time.
@@ -61,29 +62,33 @@ pub struct Line<'a> {
                  /// appears in a commit, and locally unique
                  /// otherwise.
 
-    pub flags:u8,    /// The status of the line with respect to a dfs of
+    flags:Flags,    /// The status of the line with respect to a dfs of
                  /// a graph it appears in. This is 0 or
                  /// LINE_HALF_DELETED unless some dfs is being run.
 
-    pub children:usize,
-    pub n_children:usize,
-    pub index:usize,
-    pub lowlink:usize,
-    pub scc:usize
+    children:usize,
+    n_children:usize,
+    index:usize,
+    lowlink:usize,
+    scc:usize
 }
 
 
 impl <'a>Line<'a> {
     pub fn is_zombie(&self)->bool {
-        self.flags & LINE_HALF_DELETED != 0
+        self.flags.contains(LINE_HALF_DELETED)
     }
 }
 
 /// A graph, representing the whole content of a state of the repository at a point in time.
-/// Vertices are Lines.
 pub struct Graph<'a> {
+    /// Array of all alive lines in the graph. Line 0 is a dummy line
+    /// at the end, so that all nodes have a common successor
     pub lines:Vec<Line<'a>>,
-    pub children:Vec<(*const u8,usize)> // raw pointer because we might need the edge address. We need the first element anyway, replace "*const u8" by "u8" if the full address is not needed. The index is the index in the array of lines.
+    /// Edge + index of the line in the "lines" array above. "None"
+    /// means "dummy line at the end", and corresponds to line number
+    /// 0.
+    pub children:Vec<(Option<&'a[u8]>,usize)>
 }
 
 pub trait LineBuffer<'a> {
@@ -105,15 +110,19 @@ pub trait LineBuffer<'a> {
 }
 
 
+/// This function constructs a graph by reading the branch from the
+/// input key. It guarantees that all nodes but the first one (index
+/// 0) have a common descendant, which is index 0.
+pub fn retrieve<'a,'b>(ws:&mut Workspace, branch:&'a Db<'a,'b>, key:&'a [u8])->Result<Graph<'a>,()>{
 
-pub fn retrieve<'a>(ws:&mut Workspace, branch:&Db, key:&'a [u8])->Result<Graph<'a>,()>{
-
-    fn retr<'a>(
+    // In order to identify "merging paths" of the graph correctly, we
+    // maintain a cache of visited lines (mapped to their index in the graph).
+    fn retr<'a,'b>(
         ws:&mut Workspace,
-        db_nodes: &Db,
+        db_nodes: &'a Db<'a,'b>,
         cache: &mut HashMap<&'a [u8],usize>,
         lines: &mut Vec<Line<'a>>,
-        children: &mut Vec<(*const u8,usize)>,
+        children: &mut Vec<(Option<&'a[u8]>,usize)>,
         key: &'a [u8])->usize {
 
         match cache.entry(key) {
@@ -131,27 +140,34 @@ pub fn retrieve<'a>(ws:&mut Workspace, branch:&Db, key:&'a [u8])->Result<Graph<'
                         }
                         break
                     }
-                    tag=PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE;
-                    for (k,v) in db_nodes.iter(ws, key, Some(&[tag][..])) {
-                        if k==key && v[0] == tag {
-                            is_zombie = true
+                    if !is_zombie {
+                        tag=PARENT_EDGE|DELETED_EDGE|FOLDER_EDGE;
+                        for (k,v) in db_nodes.iter(ws, key, Some(&[tag][..])) {
+                            if k==key && v[0] == tag {
+                                is_zombie = true
+                            }
+                            break
                         }
-                        break
                     }
                     is_zombie
                 };
                 let mut l=Line {
-                    key:key,flags:if is_zombie {LINE_HALF_DELETED} else {0},
-                    children:children.len(),n_children:0,index:0,lowlink:0,scc:0
+                    key: key,
+                    flags: if is_zombie {LINE_HALF_DELETED} else {Flags::empty()},
+                    children: children.len(),
+                    n_children:0,index:0,lowlink:0,scc:0
                 };
-                for (k,v) in db_nodes.iter(ws, key, Some(&[0][..])) {
+                for (k,v) in db_nodes.iter(ws, key, None) {
+                    //debug!("iter: {:?} {:?}", k.to_hex(), v.to_hex());
                     if k == key && v[0] <= PSEUDO_EDGE|FOLDER_EDGE {
-                        children.push((v.as_ptr(),0));
+                        //debug!("ok, push");
+                        children.push((Some(v),0));
                         l.n_children += 1;
                     } else {
                         break
                     }
                 }
+                lines.push(l)
             }
         }
         let idx=lines.len()-1;
@@ -160,22 +176,21 @@ pub fn retrieve<'a>(ws:&mut Workspace, branch:&Db, key:&'a [u8])->Result<Graph<'
         debug!("n_children: {}",n_children);
         for i in 0..n_children {
             let (a,_)=children[l_children+i];
-            let child_key = unsafe {
-                std::slice::from_raw_parts(a.offset(1),KEY_SIZE)
-            };
-            children[l_children+i] = (a, retr(ws, db_nodes,cache,lines,children,child_key))
+            if let Some(a)=a {
+                children[l_children+i] = (Some(a), retr(ws, db_nodes,cache,lines,children, &a[1..(1+KEY_SIZE)]))
+            }
         }
         if n_children==0 {
-            children.push((std::ptr::null(),0));
+            children.push((None,0));
             lines[idx].n_children=1;
         }
         idx
     }
     let mut cache=HashMap::new();
     let mut lines=Vec::new();
-    // Insert last line (so that all lines have a common descendant).
+    // Insert last "dummy" line (so that all lines have a common descendant).
     lines.push(Line {
-        key:&b""[..],flags:0,children:0,n_children:0,index:0,lowlink:0,scc:0
+        key:&b""[..],flags:Flags::empty(),children:0,n_children:0,index:0,lowlink:0,scc:0
     });
     cache.insert(&b""[..],0);
     let mut children=Vec::new();
@@ -189,9 +204,10 @@ fn tarjan(line:&mut Graph)->Vec<Vec<usize>> {
                index:&mut usize, g:&mut Graph<'a>, n_l:usize){
         {
             let mut l=&mut (g.lines[n_l]);
+            debug!("tarjan: {:?}", l.key.to_hex());
             (*l).index = *index;
             (*l).lowlink = *index;
-            (*l).flags |= LINE_ONSTACK | LINE_VISITED;
+            (*l).flags = (*l).flags | LINE_ONSTACK | LINE_VISITED;
             debug!("{} {} chi",(*l).key.to_hex(),(*l).n_children);
             //unsafe {println!("contents: {}",std::str::from_utf8_unchecked(repo.contents((*l).key))); }
         }
@@ -203,11 +219,11 @@ fn tarjan(line:&mut Graph)->Vec<Vec<usize>> {
             let (_,n_child) = g.children[g.lines[n_l].children + i];
             //println!("children: {}",to_hex(g.lines[n_child].key));
 
-            if g.lines[n_child].flags & LINE_VISITED == 0 {
+            if ! g.lines[n_child].flags.contains(LINE_VISITED) {
                 dfs(scc,stack,index,g,n_child);
                 g.lines[n_l].lowlink=std::cmp::min(g.lines[n_l].lowlink, g.lines[n_child].lowlink);
             } else {
-                if g.lines[n_child].flags & LINE_ONSTACK != 0 {
+                if g.lines[n_child].flags.contains(LINE_ONSTACK) {
                     g.lines[n_l].lowlink=std::cmp::min(g.lines[n_l].lowlink, g.lines[n_child].index)
                 }
             }
@@ -312,12 +328,14 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'
                 let child_component=graph.lines[n_child].scc;
                 let is_forward=forward_scc.contains(&child_component);
                 if is_forward {
-                    if unsafe {*flag_child} & 1 != 0 {
-                        forward.push(PSEUDO_EDGE|PARENT_EDGE);
-                        forward.extend(graph.lines[*cousin].key);
-                        forward.extend(zero);
-                        forward.push(PSEUDO_EDGE);
-                        forward.extend(graph.lines[n_child].key);
+                    if let Some(flag_child)=flag_child {
+                        if flag_child[0] & PSEUDO_EDGE != 0 {
+                            forward.push(PSEUDO_EDGE|PARENT_EDGE);
+                            forward.extend(graph.lines[*cousin].key);
+                            forward.extend(zero);
+                            forward.push(PSEUDO_EDGE);
+                            forward.extend(graph.lines[n_child].key);
+                        }
                     }
                     // Indicate here that we do not want to follow this edge (it is forward).
                     let (a,_)=graph.children[graph.lines[*cousin].children+i];
@@ -341,7 +359,13 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'
     loop {
         // test for conflict
         // scc[i] has at least one element (from tarjan).
-        if scc[i].len() == 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0]  && graph.lines[scc[i][0]].flags & LINE_HALF_DELETED == 0 {
+        debug!("test: {:?} {:?} {:?} {:?} {:?} {:?}",
+               scc[i].len(),
+               first_visit[i], first_visit[0],
+               last_visit[i], last_visit[0],
+               graph.lines[scc[i][0]].flags);
+        if scc[i].len() == 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] && ! graph.lines[scc[i][0]].flags.contains(LINE_HALF_DELETED) {
+            debug!("true");
             //debug!("/flag = {} {}",graph.lines[scc[i][0]].flags,LINE_HALF_DELETED);
             let key=graph.lines[scc[i][0]].key;
             debug!("key = {}",key.to_hex());
@@ -352,7 +376,8 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'
             }
             if i==0 { break } else { i-=1 }
         } else {
-            debug!("flag = {} {}",graph.lines[scc[i][0]].flags,LINE_HALF_DELETED);
+            debug!("false");
+            debug!("flag = {:?}",graph.lines[scc[i][0]].flags);
             let key=graph.lines[scc[i][0]].key;
             debug!("key = {}",key.to_hex());
 
@@ -361,8 +386,8 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'
                 branch:&'a Db<'a,'b>,
                 db_contents:&'a Db<'a,'b>,
                 graph:&Graph<'a>,
-                first_visit: &mut [usize],
-                last_visit: &mut [usize],
+                first_visit: &[usize],
+                last_visit: &[usize],
                 scc:&mut Vec<Vec<usize>>,
                 nodes:&mut Vec<&'a [u8]>,
                 b:&mut B,
@@ -372,8 +397,8 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'
                 i:usize) {
                 // x.scc[i] has at least one element (from tarjan).
 
-                if scc[i].len() == 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] && graph.lines[scc[i][0]].flags & LINE_HALF_DELETED == 0 {
-                    // End of conflict.
+                if scc[i].len() == 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] && ! graph.lines[scc[i][0]].flags.contains(LINE_HALF_DELETED) {
+                    // End of conflict (or no conflict).
                     debug!("end of conflict");
                     let mut first=false; // Detect the first line
                     for key in nodes.iter() {
@@ -399,8 +424,8 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'
                         branch:&'a Db<'a,'b>,
                         db_contents:&'a Db<'a,'b>,
                         graph:&Graph<'a>,
-                        first_visit: &mut [usize],
-                        last_visit: &mut [usize],
+                        first_visit: &[usize],
+                        last_visit: &[usize],
                         scc:&mut Vec<Vec<usize>>,
                         nodes:&mut Vec<&'a[u8]>,
                         b:&mut B,
@@ -412,14 +437,14 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'
                         j:usize,
                         next_vertices:&mut HashSet<usize>) {
                         
-                        debug!("permutations:j={}, nodes={:?}",j,nodes);
+                        debug!("permutations:j={}, nodes={:?}",j, {let v:Vec<_>= nodes.iter().map(|x| x.to_hex()).collect(); v});
                         if j<scc[i].len() {
                             debug!("next? j={} {}",j,next_vertices.len());
                             let n=graph.lines[scc[i][j]].n_children;
                             debug!("n={}",n);
                             for c in 0 .. n {
                                 let (edge_child,n_child) = graph.children[graph.lines[scc[i][j]].children + c];
-                                if n_child != 0 || edge_child.is_null() {
+                                if n_child != 0 || edge_child.is_none() {
                                     // Not a forward edge (forward edges are (!=NULL, 0)).
                                     debug!("n_child={}",n_child);
                                     next_vertices.insert(graph.lines[n_child].scc);
@@ -503,7 +528,7 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'
             let (next,is_first)={
                 let mut is_first = true;
                 let mut next = 0;
-                get_conflict(ws, branch,db_contents,&graph,&mut first_visit[..],&mut last_visit[..],&mut scc, &mut nodes,
+                get_conflict(ws, branch,db_contents,&graph,&first_visit[..],&last_visit[..],&mut scc, &mut nodes,
                              buf,
                              &mut is_first,
                              &mut selected_zombies,

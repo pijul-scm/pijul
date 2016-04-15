@@ -23,6 +23,8 @@ use std::collections::{HashSet,HashMap};
 #[macro_use]
 extern crate log;
 extern crate time;
+#[macro_use]
+extern crate bitflags;
 
 mod lmdb;
 pub mod error;
@@ -200,6 +202,7 @@ impl<'a> Len for &'a[u8] {
 pub fn eq<'a,'b,C:Iterator<Item=&'a[u8]>+Len, D:Iterator<Item=&'b[u8]>+Len>(c:&mut C, d:&mut D) -> bool {
 
     fn eq_rec<'a,'b,I:Iterator<Item=&'a [u8]>, J:Iterator<Item=&'b [u8]>>(sc:&[u8], c:&mut I, sd:&[u8], d:&mut J) -> bool {
+        //debug!("eq_rec: {:?} {:?}", String::from_utf8_lossy(sc), String::from_utf8_lossy(sd));
         if sc.len() == 0 {
             if let Some(cc) = c.next() {
                 eq_rec(cc, c, sd, d)
@@ -215,7 +218,7 @@ pub fn eq<'a,'b,C:Iterator<Item=&'a[u8]>+Len, D:Iterator<Item=&'b[u8]>+Len>(c:&m
         } else {
             let m = std::cmp::min(sc.len(), sd.len());
             if &sc[0..m] == &sd[0..m] {
-                eq_rec(&sc[m..], c, &sd[0..m], d)
+                eq_rec(&sc[m..], c, &sd[m..], d)
             } else {
                 false
             }

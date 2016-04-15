@@ -136,7 +136,7 @@ fn unsafe_apply(ws:&mut Workspace,
                 for e in edges {
                     try!(internal_edge(db_internal, *flag^PARENT_EDGE,&e.from,internal_patch_id,&mut pu));
                     try!(internal_edge(db_internal, *flag,&e.to,internal_patch_id,&mut pv));
-                    //debug!(target:"apply","new edge:\n  {}\n  {}",pu.to_hex(),pv.to_hex());
+                    debug!("new edge:\n  {}\n  {}",pu.to_hex(),pv.to_hex());
                     try!(branch.put(&pu[1..(1+KEY_SIZE)],&pv));
                     try!(branch.put(&pv[1..(1+KEY_SIZE)],&pu));
                     // Here, there are two options: either we need zombie lines because the currently applied patch doesn't know about some of our edges, or else we just need to reconnect parents and children of a deleted portion of the graph.
@@ -781,14 +781,16 @@ pub fn apply_patches<T>(repository:&mut Transaction<T>,
     fn apply_patches<'a,T>(repository:&mut Transaction<'a,T>, branch_name:&str, repo_root:&Path, patch_hash:&[u8], patches_were_applied:&mut bool, only_local:&HashSet<&[u8]>)->Result<(),Error>{
         if !try!(has_patch(repository, branch_name,patch_hash)) {
             let patch=try!(Patch::from_repository(repo_root,patch_hash));
-            debug!("Applying patch {:?}", patch);
+            debug!("Applying patch {:?}", patch_hash.to_hex());
             for dep in patch.dependencies.iter() {
+                debug!("Applying dependency {:?}", dep.to_hex());
                 try!(apply_patches(repository,branch_name,repo_root,&dep,patches_were_applied, only_local))
             }
+            debug!("Now applying patch {:?}", patch);
             let internal = new_internal(repository);
             //println!("pulling and applying patch {}",to_hex(patch_hash));
             try!(apply(repository, branch_name, &patch, &internal,only_local));
-            *patches_were_applied=true;
+            *patches_were_applied = true;
             // This is not necessary anymore, output_files does this.
             //sync_file_additions(repository, ws, &patch.changes[..],&HashMap::new(), &internal);
             try!(register_hash(repository, &internal,patch_hash));

@@ -369,6 +369,8 @@ impl<'a> Session<'a> {
         let mut txn = try!(repo.mut_txn_begin());
         try!(txn.apply_patches(DEFAULT_BRANCH, target,&pullable.remote,&pullable.local));
         debug!("pull: committing");
+        let mut f = File::create("/tmp/debug").unwrap();
+        txn.debug(DEFAULT_BRANCH, &mut f);
         try!(txn.commit());
         debug!("pull: commited");
         Ok(())

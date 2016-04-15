@@ -5,7 +5,7 @@ use clap::ArgMatches;
 use self::libpijul::{Repository};
 use self::libpijul::fs_representation::{repo_dir, pristine_dir, find_repo_root};
 use std::path::{Path};
-use std::fs::{metadata,rename,canonicalize};
+use std::fs::{metadata, canonicalize};
 use commands::error;
 use super::get_wd;
 #[derive(Debug)]

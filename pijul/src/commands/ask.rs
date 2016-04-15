@@ -17,7 +17,7 @@ extern crate termios;
 use self::termios::{tcsetattr,ICANON,ECHO};
 
 use super::error::Error;
-use self::libpijul::{Repository,Transaction,internal_hash};
+use self::libpijul::{Transaction,internal_hash};
 use self::libpijul::graph::{FOLDER_EDGE,PARENT_EDGE};
 use std::io::stdin;
 use std::char::from_u32_unchecked;

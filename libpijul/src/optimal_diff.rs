@@ -28,14 +28,18 @@ pub mod diff {
     use std;
     use std::path::Path;
     use std::io::Read;
+    use rustc_serialize::hex::ToHex;
 
     fn delete_edges<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Db, edges:&mut Vec<Edge>, key:&[u8],flag:u8) {
+        debug!("deleting edges");
         if key.len() > 0 {
             let ext = repository.db_external();
             let ext_key=external_key(&ext,key);
             for (k,v) in branch.iter(ws, key, Some(&[flag])) {
+                debug!("delete: {:?} {:?}", k.to_hex(), v.to_hex());
                 if k==key && v[0] >= flag && v[0] <= flag | (PSEUDO_EDGE|FOLDER_EDGE) {
                     if v[0]&PSEUDO_EDGE == 0 {
+                        debug!("actually deleting");
                         edges.push(Edge {
                             from:ext_key.clone(),
                             to:external_key(&ext, &v[1..(1+KEY_SIZE)]),
@@ -52,6 +56,7 @@ pub mod diff {
                     down_context:&[&[u8]], lines:&[&[u8]])
                     -> patch::Change
     {
+        debug!("adding lines {}",lines.len());
         let ext = repository.db_external();
         let changes = Change::NewNodes {
             up_context:vec!(external_key(&ext, up_context)),
@@ -67,10 +72,11 @@ pub mod diff {
 
     fn delete_lines<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Db, lines:&[&[u8]]) -> Change
     {
+        debug!("delete_lines: {:?}", lines.len());
         let mut edges=Vec::with_capacity(lines.len());
-        for i in 0..lines.len() {
-            //debug!(target:"conflictdiff","deleting line {}",lines[i].to_hex());
-            delete_edges(ws, repository, branch, &mut edges, lines[i], PARENT_EDGE)
+        for l in lines.iter() {
+            debug!("deleting line {}",l.to_hex());
+            delete_edges(ws, repository, branch, &mut edges, l, PARENT_EDGE)
         }
         Change::Edges{edges:edges, flag:PARENT_EDGE|DELETED_EDGE}
     }
@@ -78,7 +84,7 @@ pub mod diff {
     fn local_diff<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Db, actions:&mut Vec<Change>,
                      line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[Contents], b:&[&[u8]])
     {
-        debug!(target:"conflictdiff","local_diff {} {}",contents_a.len(),b.len());
+        debug!("local_diff {} {}",contents_a.len(),b.len());
         let mut opt=vec![vec![0;b.len()+1];contents_a.len()+1];
         if contents_a.len()>0 {
             let mut i=contents_a.len() - 1;
@@ -87,6 +93,17 @@ pub mod diff {
                 if b.len()>0 {
                     let mut j=b.len()-1;
                     loop {
+                        /*{
+                            let contents_a_i = contents_a[i].clone();
+                            for chunk in contents_a_i {
+                                debug!("chunk: {:?}", std::str::from_utf8(chunk).unwrap());
+                            }
+                            debug!("b[j] = {:?}", std::str::from_utf8(b[j]).unwrap());
+                        }
+                        {
+                            let mut contents_a_i = contents_a[i].clone();
+                            debug!("eq: {:?}", super::super::eq(&mut contents_a_i, &mut Contents::from_slice(&b[j])))
+                        }*/
                         let mut contents_a_i = contents_a[i].clone();
                         opt[i][j]=
                             if super::super::eq(&mut contents_a_i, &mut Contents::from_slice(&b[j])) {
@@ -94,7 +111,7 @@ pub mod diff {
                             } else {
                                 std::cmp::max(opt[i+1][j], opt[i][j+1])
                             };
-                        debug!(target:"diff","opt[{}][{}] = {}",i,j,opt[i][j]);
+                        //debug!("opt[{}][{}] = {}",i,j,opt[i][j]);
                         if j>0 { j-=1 } else { break }
                     }
                 }
@@ -107,15 +124,17 @@ pub mod diff {
         let mut oj=None;
         let mut last_alive_context=0;
         while i<contents_a.len() && j<b.len() {
-            debug!(target:"diff","i={}, j={}",i,j);
+            debug!("i={}, j={}",i,j);
             let mut contents_a_i = contents_a[i].clone();
             if super::super::eq(&mut contents_a_i, &mut Contents::from_slice(&b[j])) {
+                debug!("eq: {:?} {:?}", i, j);
                 if let Some(i0)=oi {
-                    debug!(target:"diff","deleting from {} to {} / {}",i0,i,lines_a.len());
+                    debug!("deleting from {} to {} / {}",i0,i,lines_a.len());
                     let dels = delete_lines(ws, repository, branch, &lines_a[i0..i]);
                     actions.push(dels);
                     oi=None
                 } else if let Some(j0)=oj {
+                    debug!("adding from {} to {} / {}",j0,j,b.len());
                     let adds = add_lines(repository, line_num,
                                          lines_a[last_alive_context], // up context
                                          &lines_a[i..i+1], // down context
@@ -126,6 +145,7 @@ pub mod diff {
                 last_alive_context=i;
                 i+=1; j+=1;
             } else {
+                debug!("not eq");
                 if opt[i+1][j] >= opt[i][j+1] {
                     // we will delete things starting from i (included).
                     if let Some(j0)=oj {
@@ -169,7 +189,8 @@ pub mod diff {
             actions.push(dels)
         } else if j < b.len() {
             if let Some(i0)=oi {
-                delete_lines(ws, repository, branch, &lines_a[i0..i]);
+                let dels = delete_lines(ws, repository, branch, &lines_a[i0..i]);
+                actions.push(dels);
                 let adds =
                     add_lines(repository, line_num, lines_a[i0-1], &[], &b[j..b.len()]);
                 actions.push(adds);
