@@ -368,7 +368,9 @@ impl<'a> Session<'a> {
         let repo = try!(Repository::open(&repo_dir).map_err(Error::Repository));
         let mut txn = try!(repo.mut_txn_begin());
         try!(txn.apply_patches(DEFAULT_BRANCH, target,&pullable.remote,&pullable.local));
+        debug!("pull: committing");
         try!(txn.commit());
+        debug!("pull: commited");
         Ok(())
     }
 

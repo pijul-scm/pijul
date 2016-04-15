@@ -17,12 +17,10 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-use std::path::{Path,PathBuf,MAIN_SEPARATOR};
-use std::fs::{metadata};
+use std::path::{Path, MAIN_SEPARATOR};
 
 use std::io::{BufWriter,BufReader,Read,Write,BufRead};
 use std::fs::File;
-use std::str::{from_utf8};
 
 use std;
 extern crate crypto;

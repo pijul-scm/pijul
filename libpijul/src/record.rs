@@ -49,6 +49,7 @@ macro_rules! iterate_parents {
     ($ws:expr, $branch:expr, $key:expr) => {
         $branch.iter($ws, $key, Some(&[FOLDER_EDGE|PARENT_EDGE][..]))
             .take_while(|&(k,parent)| {
+                debug!("take_while: {:?} {:?}", k.to_hex(), parent.to_hex());
                 k == $key && parent[0] >= FOLDER_EDGE|PARENT_EDGE && parent[0] <= FOLDER_EDGE|PARENT_EDGE|PSEUDO_EDGE
             })
             .map(|(_,b)| b)
@@ -61,6 +62,7 @@ pub fn record_all<T> (
     ws1:&mut Workspace,
     repository:&Transaction<T>,
     branch:&Db,
+    db_inodes:&Db,
     actions:&mut Vec<Change>,
     line_num:&mut usize,
     redundant:&mut Vec<u8>,
@@ -80,7 +82,7 @@ pub fn record_all<T> (
     let db_contents = repository.db_contents();
     let current_node=
         if parent_inode.is_some() {
-            match branch.get(current_inode.as_ref()) {
+            match db_inodes.get(current_inode.as_ref()) {
                 Some(current_node)=>{
                     let old_attr=((current_node[1] as usize) << 8) | (current_node[2] as usize);
                     // Add the new name.
@@ -96,6 +98,7 @@ pub fn record_all<T> (
                             }
                         }
                     };
+                    debug!("current_node={:?}", current_node.to_hex());
                     debug!("current_node[0]={},old_attr={},int_attr={}",
                            current_node[0],old_attr,int_attr);
                     if !deleted && (current_node[0]==1 || old_attr!=int_attr) {
@@ -110,6 +113,7 @@ pub fn record_all<T> (
                         name.push((int_attr & 0xff) as u8);
                         name.extend(basename);
                         for parent in iterate_parents!(ws0, branch, &current_node[3..]) {
+                            debug!("iterate_parents: {:?}", parent.to_hex());
                             let mut previous_name=
                                 match db_contents.contents(&parent[1..(1+KEY_SIZE)]) {
                                     None=>Contents::from_slice(b""),
@@ -118,6 +122,7 @@ pub fn record_all<T> (
                             let name_changed = !super::eq(&mut Contents::from_slice(&name[..]),
                                                           &mut previous_name);
                             for grandparent in iterate_parents!(ws1, branch, &parent[1..(1+KEY_SIZE)]) {
+                                debug!("iterate_parents: grandparent = {:?}", grandparent.to_hex());
                                 if &grandparent[1..(1+KEY_SIZE)] != parent_node.unwrap()
                                     || name_changed {
                                         edges.push(Edge {
@@ -243,7 +248,7 @@ pub fn record_all<T> (
                 },
                 None=>{
                     // File addition, create appropriate Newnodes.
-                    debug!("metadata");
+                    debug!("metadata for {:?}", realpath);
                     match metadata(&realpath) {
                         Ok(attr) => {
                             let int_attr={
@@ -308,8 +313,7 @@ pub fn record_all<T> (
                             }
                         },
                         Err(_)=>{
-                            println!("error adding file {:?} (metadata failed)",realpath);
-                            None
+                            panic!("error adding file {:?} (metadata failed)",realpath);
                         }
                     }
                 }
@@ -324,6 +328,7 @@ pub fn record_all<T> (
             debug!("children of current_inode {}",current_inode.to_hex());
             let db_tree = repository.db_tree();
             let mut ws2 = Workspace::new();
+
             for (k,v) in db_tree.iter(&mut ws2, current_inode.as_ref(), None) {
 
                 if &k[0..INODE_SIZE] == current_inode.as_ref() {
@@ -332,7 +337,7 @@ pub fn record_all<T> (
                         debug!("  child: {} + {}",&v[0..INODE_SIZE].to_hex(), std::str::from_utf8(&k[INODE_SIZE..]).unwrap());
                         try!(record_all(
                             ws0, ws1,
-                            repository, branch,
+                            repository, branch, db_inodes,
                             actions, line_num,redundant,updatables,
                             Some(current_inode), // parent_inode
                             Some(current_node), // parent_node
@@ -356,12 +361,13 @@ pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&
     let mut updatables:HashMap<LocalKey,Inode> = HashMap::new();
     let mut redundant = Vec::new();
     let mut branch = repository.db_nodes(branch_name);
+    let db_inodes = repository.db_inodes();
     let mut ws0 = Workspace::new();
     let mut ws1 = Workspace::new();
     {
         let mut realpath=PathBuf::from(working_copy);
         try!(record_all(&mut ws0, &mut ws1,
-                        repository, &branch,
+                        repository, &branch, &db_inodes,
                         &mut actions, &mut line_num,&mut redundant,&mut updatables,
                         None,None, ROOT_INODE,&mut realpath,
                         &[]));

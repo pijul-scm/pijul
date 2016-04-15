@@ -4,6 +4,7 @@ use commands::{init, info, record, add, remove, pull, remote, mv};
 use commands::error;
 use std::fs;
 use std::path::PathBuf;
+use std;
 
 #[test]
 fn init_creates_repo() -> ()
@@ -176,17 +177,25 @@ fn add_record_pull() {
 fn move_to_file() {
     env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
-    let dir_a = &dir.path().join("a");
-    let dir_b = &dir.path().join("b");
-    fs::create_dir(dir_a);
-    fs::create_dir(dir_b);
+    let dir_a = dir.path().join("a");
+    let dir_b = dir.path().join("b");
+    fs::create_dir(&dir_a);
+    fs::create_dir(&dir_b);
     let init_params_a = init::Params { location : &dir_a, allow_nested : false};
     let init_params_b = init::Params { location : &dir_b, allow_nested : false};
     init::run(&init_params_a).unwrap();
     init::run(&init_params_b).unwrap();
     let toto_path = &dir_a.join("toto");
     let titi_path = &dir_b.join("titi");
-    let file = fs::File::create(&toto_path).unwrap();
+    {
+        let file = fs::File::create(&toto_path).unwrap();
+    }
+    println!("Checking {:?}", toto_path);
+    {let metadata = fs::metadata(toto_path);
+     println!("metadata {:?}", metadata.is_ok());
+    }
+
+
     let add_params = add::Params { repository : Some(&dir_a),
                                    touched_files : vec![&toto_path] };
     match add::run(&add_params).unwrap() {
@@ -209,6 +218,9 @@ fn move_to_file() {
                                                                       to: PathBuf::from("titi")}
     };
     mv::run(&mv_params).unwrap();
+
+    println!("moved successfully");
+
     match record::run(&record_params).unwrap() {
         None => panic!("file move is not going to be recorded"),
         Some(()) => ()
@@ -216,7 +228,7 @@ fn move_to_file() {
     println!("record command finished");
 
     println!("Checking the contents of {:?}", &dir_a);
-    let paths = fs::read_dir(dir_a).unwrap();
+    let paths = fs::read_dir(&dir_a).unwrap();
 
     for path in paths {
         println!("Name: {:?}", path.unwrap().path())
@@ -273,7 +285,7 @@ fn move_to_dir() {
         None => panic!("file add is not going to be recorded"),
         Some(()) => ()
     };
-
+    println!("record 1 done");
     let subdir_a = &dir_a.join("d");
     fs::create_dir(subdir_a);
     let add_params = add::Params { repository : Some(&dir_a),
@@ -292,6 +304,7 @@ fn move_to_dir() {
         None => panic!("file add is not going to be recorded"),
         Some(()) => ()
     };
+    println!("record 2 done");
 
     let mv_params = mv::Params { repository : Some(&dir_a),
                                  movement : mv::Movement::IntoDir {from: vec![PathBuf::from("toto")],

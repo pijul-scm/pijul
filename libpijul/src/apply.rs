@@ -87,7 +87,7 @@ fn unsafe_apply(ws:&mut Workspace,
                 db_internal:&Db, db_external:&Db, branch:&mut Db, db_contents:&mut Db, changes:&[Change],
                 internal_patch_id:& InternalKey,dependencies:&HashSet<Vec<u8>>)->Result<(),Error>{
 
-    debug!(target:"conflictdiff","unsafe_apply");
+    debug!("unsafe_apply");
     let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
     let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
     //let alive= unsafe { &mut *self.txn.unsafe_cursor(self.dbi_nodes).unwrap() };
@@ -100,6 +100,7 @@ fn unsafe_apply(ws:&mut Workspace,
         match *ch {
             Change::Edges{ref flag, ref edges} => {
                 // If this hunk deletes nodes that are not known to the author of the current patch, add pseudo-edges (zombie lines) to each edge of this hunk.
+                debug!("edges");
                 let mut add_zombies=false;
                 for e in edges {
                     // First remove the deleted version of the edge
@@ -121,7 +122,7 @@ fn unsafe_apply(ws:&mut Workspace,
                                 //debug!(target:"exclusive","add_zombies:\n{}\n{}", e.to.to_hex(),e.from.to_hex());
                                 add_zombies=true;
                             } else {
-                                debug!(target:"exclusive","not add zombies: {}",add_zombies);
+                                debug!("not add zombies: {}",add_zombies);
                             }
                         //
                         try!(kill_obsolete_pseudo_edges(ws, branch, if *flag&PARENT_EDGE == 0 { &mut pv } else { &mut pu }))
@@ -185,7 +186,7 @@ fn unsafe_apply(ws:&mut Workspace,
                         }
                     }
                 }
-                debug!(target:"apply","/edges");
+                debug!("/edges");
                 // Finally: reconnect
                 if *flag &DELETED_EDGE != 0 {
                     let mut i=0;
@@ -209,11 +210,11 @@ fn unsafe_apply(ws:&mut Workspace,
                         i+=1+KEY_SIZE+HASH_SIZE;
                     }
                 }
-                debug!(target:"libpijul","unsafe_apply:edges.done");
+                debug!("unsafe_apply:edges.done");
             },
             Change::NewNodes { ref up_context,ref down_context,ref line_num,ref flag,ref nodes } => {
                 assert!(!nodes.is_empty());
-                debug!(target:"libpijul","unsafe_apply: newnodes");
+                debug!("unsafe_apply: newnodes");
                 let mut pu:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                 let mut pv:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
                 let mut lnum0= *line_num;
@@ -404,9 +405,10 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patc
     let mut db_nodes = repository.db_nodes(branch_name);
     let mut db_contents = repository.db_contents();
     {
+        debug!("apply: registering {:?} in branch {:?}", internal.as_slice().to_hex(), branch_name);
         try!(db_branches.put(branch_name.as_bytes(), internal.as_slice()));
         //repository.set_db_branches(db_branches);
-        
+        debug!("done");
         try!(unsafe_apply(&mut ws,
                           &db_internal, &db_external, &mut db_nodes, &mut db_contents,
                           &patch.changes, &internal, &patch.dependencies));
@@ -515,7 +517,7 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patc
                     for c in down_context {
                         try!(repair_missing_context(&mut ws, &mut db_nodes, false,c))
                     }
-                    debug!(target:"libpijul","apply: newnodes, done");
+                    debug!("apply: newnodes, done");
                 }
             }
         }
@@ -646,7 +648,7 @@ fn reconnect_zombie_folder(ws:&mut Workspace,
     let mut edges=Vec::new();
     //let cursor= unsafe { &mut * self.txn.unsafe_cursor(self.dbi_nodes).unwrap() };
     connect(ws, branch,a,patch_id,&mut edges);
-    debug!(target:"missing context","edges.len()={}",edges.len());
+    debug!("edges.len()={}",edges.len());
     let mut i=0;
     while i<edges.len() {
         try!(branch.put(&edges[(i+1)..(i+1+KEY_SIZE)], &edges[(i+EDGE_SIZE)..(i+2*EDGE_SIZE)]));
@@ -779,6 +781,7 @@ pub fn apply_patches<T>(repository:&mut Transaction<T>,
     fn apply_patches<'a,T>(repository:&mut Transaction<'a,T>, branch_name:&str, repo_root:&Path, patch_hash:&[u8], patches_were_applied:&mut bool, only_local:&HashSet<&[u8]>)->Result<(),Error>{
         if !try!(has_patch(repository, branch_name,patch_hash)) {
             let patch=try!(Patch::from_repository(repo_root,patch_hash));
+            debug!("Applying patch {:?}", patch);
             for dep in patch.dependencies.iter() {
                 try!(apply_patches(repository,branch_name,repo_root,&dep,patches_were_applied, only_local))
             }
@@ -791,6 +794,7 @@ pub fn apply_patches<T>(repository:&mut Transaction<T>,
             try!(register_hash(repository, &internal,patch_hash));
             Ok(())
         } else {
+            debug!("Patch {:?} has already been applied", patch_hash);
             Ok(())
         }
     }
@@ -806,15 +810,18 @@ pub fn apply_patches<T>(repository:&mut Transaction<T>,
     for p in pullable {
         try!(apply_patches(repository,branch_name,&r,p,&mut patches_were_applied,&only_local))
     }
-    debug!(target:"pull","patches applied? {}",patches_were_applied);
+    debug!("patches applied? {}",patches_were_applied);
+    if cfg!(debug_assertions){
+        debug!("debugging");
+        let mut buffer = BufWriter::new(File::create(r.join("debug_")).unwrap());
+        repository.debug(branch_name, &mut buffer);
+        debug!("/debugging");
+    }
     if patches_were_applied {
         try!(repository.write_changes_file(branch_name, r));
-        debug!(target:"pull","output_repository");
-        try!(super::output::output_repository(repository, branch_name, &r,&pending))
-    }
-    if cfg!(debug_assertions){
-        let mut buffer = BufWriter::new(File::create(r.join("debug")).unwrap());
-        repository.debug(branch_name, &mut buffer);
+        debug!("output_repository");
+        try!(super::output::output_repository(repository, branch_name, &r,&pending));
+        debug!("done outputting_repository");
     }
     Ok(())
 }
@@ -822,7 +829,7 @@ pub fn apply_patches<T>(repository:&mut Transaction<T>,
 /// Apply a patch from a local record: register it, give it a hash, and then apply.
 pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, location: &Path, patch: Patch, inode_updates:&HashMap<LocalKey,Inode>)
                          -> Result<(), Error>{
-    info!("registering a patch with {} changes", patch.changes.len());
+    info!("registering a patch with {} changes: {:?}", patch.changes.len(), patch);
     let patch = Arc::new(patch);
     let child_patch = patch.clone();
     let patches_dir = patches_dir(location);
@@ -836,9 +843,9 @@ pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, lo
 
     let t0 = time::precise_time_s();
     let internal : &InternalKey = &new_internal(repository);// InternalKey::new( &internal );
-    debug!(target:"pijul", "applying patch");
+    debug!("applying patch");
     try!(apply(repository, branch_name, &patch, internal, &HashSet::new()));
-    debug!(target:"pijul", "synchronizing tree");
+    debug!("synchronizing tree");
     {
         let branch = repository.db_nodes(branch_name);
         let mut db_inodes = repository.db_inodes();
@@ -854,17 +861,19 @@ pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, lo
                                         key.as_mut_ptr().offset(1),2);
                 }
                 // If this file addition was finally recorded (i.e. in dbi_nodes)
-                debug!(target:"record_all","apply_local_patch: {:?}",key.to_hex());
+                debug!("apply_local_patch: {:?}",key.to_hex());
                 if branch.get(&key[3..]).is_some() {
-                    debug!(target:"record_all","it's in here!: {:?} {:?}",key.to_hex(),inode.to_hex());
+                    debug!("it's in here!: {:?} {:?}",key.to_hex(),inode.to_hex());
                     try!(db_inodes.put(inode.as_ref(),&key[..]));
                     try!(db_revinodes.put(&key[3..],inode.as_ref()));
                 }
             }
         }
         if cfg!(debug_assertions){
-            let mut buffer = BufWriter::new(File::create(location.join("debug")).unwrap());
+            debug!("debugging");
+            let mut buffer = BufWriter::new(File::create(location.join("debug_")).unwrap());
             repository.debug(branch_name, &mut buffer);
+            debug!("/debugging");
         }
     }
     let t2 = time::precise_time_s();
@@ -872,7 +881,7 @@ pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, lo
     match hash_child.join() {
         Ok(Ok(hash))=> {
             try!(register_hash(repository, internal,&hash[..]));
-            debug!(target:"record","hash={}, local={}",hash.to_hex(),internal.to_hex());
+            debug!("hash={}, local={}",hash.to_hex(),internal.to_hex());
             try!(repository.write_changes_file(branch_name, location));
             let t3=time::precise_time_s();
             info!("changes files took {}s to write", t3-t2);

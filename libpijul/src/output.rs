@@ -31,7 +31,6 @@ use std::collections::{HashMap,HashSet};
 use std::collections::hash_map::Entry;
 use std;
 use std::fs;
-use std::fs::File;
 use std::ptr::copy_nonoverlapping;
 
 // Used between functions of unsafe_output_repository (Rust does not allow enum inside the class)
@@ -319,13 +318,14 @@ fn output_aux(ws0:&mut Workspace,
     // Now do all the recursive calls
     for (filename,cv,c_inode) in recursive_calls {
         path.push(filename);
-        debug!(target:"output_repository","> {:?}",path);
+        debug!("> {:?}",path);
         try!(output_aux(ws0,ws1,ws2,
                         branch,db_contents,db_inodes, db_revinodes, db_tree, db_revtree,
                         working_copy,do_output,visited,path,&cv,&c_inode,moves));
-        debug!(target:"output_repository","< {:?}",path);
+        debug!("< {:?}",path);
         path.pop();
     }
+    debug!("/output_aux");
     Ok(())
 }
 
@@ -353,7 +353,7 @@ fn unsafe_output_repository(ws0:&mut Workspace, ws1:&mut Workspace, ws2:&mut Wor
         for (u,v) in db_inodes.iter(ws0, b"",None) {
             if ! has_edge(ws0, branch, &v[3..],PARENT_EDGE|FOLDER_EDGE,true) {
                 // v is dead.
-                debug!(target:"output_repository","dead:{:?} {:?}",u.to_hex(),v.to_hex());
+                debug!("dead:{:?} {:?}",u.to_hex(),v.to_hex());
                 dead.push((u.to_vec(),(&v[3..]).to_vec()))
             }
         }
@@ -368,6 +368,7 @@ fn unsafe_output_repository(ws0:&mut Workspace, ws1:&mut Workspace, ws2:&mut Wor
         let mut uu = Vec::new();
         let mut vv = Vec::new();
         for (ref inode,ref key) in dead {
+            debug!("kill dead {:?}", inode.to_hex());
             try!(db_inodes.del(inode,None));
             try!(db_revinodes.del(key,None));
             let mut kills = Vec::new();
@@ -377,9 +378,10 @@ fn unsafe_output_repository(ws0:&mut Workspace, ws1:&mut Workspace, ws2:&mut Wor
             }
             for &(ref k,ref v) in kills.iter() {
                 try!(db_tree.del(&v,Some(&k[..])));
-                try!(db_tree.del(&k,Some(&v[..])));
+                try!(db_revtree.del(&k,Some(&v[..])));
             }
 
+            debug!("loop");
             loop {
                 let mut found = false;
                 for (u,v) in db_tree.iter(ws0, inode, None) {
@@ -390,12 +392,18 @@ fn unsafe_output_repository(ws0:&mut Workspace, ws1:&mut Workspace, ws2:&mut Wor
                     vv.extend(v);
                     break
                 }
-                try!(db_tree.del(&uu[..], Some(&vv[..])));
-                try!(db_revtree.del(&vv[..], Some(&uu[..])));
+                if found {
+                    debug!("delete {:?} {:?}", uu.to_hex(), vv.to_hex());
+                    try!(db_tree.del(&uu[..], Some(&vv[..])));
+                    debug!("delete 0");
+                    try!(db_revtree.del(&vv[..], Some(&uu[..])));
+                    debug!("delete 1");
+                }
                 if !found { break }
             }
         }
     }
+    debug!("done unsafe_output_repository");
     Ok(())
 }
 

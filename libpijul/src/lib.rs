@@ -104,10 +104,14 @@ impl<'env,T> backend::Transaction<'env,T> {
         let mut patches = HashSet::new();
         let mut ws = backend::Workspace::new();
         let db_patches = self.db_branches();
-        for (br_name,patch_hash) in db_patches.iter(&mut ws, branch_name.as_bytes(),None) {
+        for (br_name,patch_hash) in db_patches.iter(&mut ws, branch_name.as_bytes(), None) {
+            debug!("branch_patches: {:?}, {:?}",
+                   std::str::from_utf8(br_name).unwrap(),
+                   patch_hash.to_hex());
             if br_name == branch_name.as_bytes() {
                 patches.insert(patch::external_hash(&db_external, patch_hash));
             } else {
+                debug!("not the right branch name");
                 break
             }
         }
@@ -116,6 +120,7 @@ impl<'env,T> backend::Transaction<'env,T> {
     pub fn write_changes_file<P:AsRef<Path>>(&self, branch_name:&str, path:P)->Result<(),Error> {
         let db_external = self.db_external();
         let patches = try!(self.branch_patches(&db_external, branch_name));
+        debug!("write_changes_file, patches = {:?}", patches);
         let changes_file = fs_representation::branch_changes_file(path.as_ref(), branch_name.as_bytes());
         try!(patch::write_changes(&patches,&changes_file));
         Ok(())
@@ -132,6 +137,7 @@ impl<'env,T> backend::Transaction<'env,T> {
         debug!("apply_local_patch");
         let result = apply::apply_local_patch(self,branch_name,location,patch,inode_updates);
         debug!("/apply_local_patch");
+        try!(self.write_changes_file(branch_name, location));
         result
     }
     pub fn record(&mut self,branch_name:&str, working_copy:&std::path::Path)->Result<(Vec<patch::Change>,HashMap<patch::LocalKey,file_operations::Inode>),Error>{
@@ -157,7 +163,7 @@ impl<'env,T> backend::Transaction<'env,T> {
         let db_nodes = self.db_nodes(branch_name);
         let db_contents = self.db_contents();
         let mut cur=&[][..];
-        for (k,v) in db_nodes.iter(&mut ws, b"",None) {
+        for (k,v) in db_nodes.iter(&mut ws, b"", None) {
             if k!=cur {
                 let f=db_contents.contents(k);
                 let cont:&[u8]=
@@ -170,7 +176,7 @@ impl<'env,T> backend::Transaction<'env,T> {
                 ).unwrap();
                 cur=k;
             }
-            debug!("debug: {:?}", v);
+            debug!("debug: {:?}", v.to_hex());
             let flag=v[0];
             write!(w,"n_{}->n_{}[{},label=\"{}\"];\n", k.to_hex(), &v[1..(1+patch::KEY_SIZE)].to_hex(), styles[(flag&0xff) as usize], flag).unwrap();
         }

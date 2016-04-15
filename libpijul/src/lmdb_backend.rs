@@ -90,7 +90,7 @@ pub mod backend {
                 let dbi_contents=try!(txn.unsafe_dbi_open(b"contents\0",lmdb::MDB_CREATE));
                 let dbi_internal=try!(txn.unsafe_dbi_open(b"internal\0",lmdb::MDB_CREATE));
                 let dbi_external=try!(txn.unsafe_dbi_open(b"external\0",lmdb::MDB_CREATE));
-                let dbi_branches=try!(txn.unsafe_dbi_open(b"branches\0",lmdb::MDB_CREATE));
+                let dbi_branches=try!(txn.unsafe_dbi_open(b"branches\0",lmdb::MDB_CREATE | lmdb::MDB_DUPSORT));
                 let dbi_revdep=try!(txn.unsafe_dbi_open(b"revdep\0",lmdb::MDB_CREATE|lmdb::MDB_DUPSORT));
 
 
@@ -113,34 +113,35 @@ pub mod backend {
         }
     }
 
-    pub struct Db<'txn,'env:'txn> { dbi: lmdb::Dbi, txn:&'txn lmdb::Txn<'env> }
+    pub struct Db<'txn,'env:'txn> { dbi: lmdb::Dbi, txn:&'txn lmdb::Txn<'env>, is_nodes:bool }
 
     impl<'env,T> Transaction<'env,T>{
         
-        pub fn db_tree<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi:self.dbi_tree,txn:&self.txn } }
-        pub fn db_revtree<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi:self.dbi_revtree, txn:&self.txn } }
+        pub fn db_tree<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi:self.dbi_tree,txn:&self.txn, is_nodes:false } }
+        pub fn db_revtree<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi:self.dbi_revtree, txn:&self.txn, is_nodes:false } }
 
-        pub fn db_inodes<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi: self.dbi_inodes, txn:&self.txn } }
-        pub fn db_revinodes<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi:self.dbi_revinodes, txn:&self.txn } }
+        pub fn db_inodes<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi: self.dbi_inodes, txn:&self.txn, is_nodes:false } }
+        pub fn db_revinodes<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi:self.dbi_revinodes, txn:&self.txn, is_nodes:false } }
 
-        pub fn db_contents<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi: self.dbi_contents, txn:&self.txn } }
+        pub fn db_contents<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi: self.dbi_contents, txn:&self.txn, is_nodes:false } }
 
-        pub fn db_revdep<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi: self.dbi_revdep, txn:&self.txn } }
+        pub fn db_revdep<'txn>(&'txn self) -> Db<'txn,'env> { Db { dbi: self.dbi_revdep, txn:&self.txn, is_nodes:false } }
 
         pub fn db_nodes<'txn>(&'txn self, branch:&str) -> Db<'txn,'env> {
             if branch == DEFAULT_BRANCH {
-                Db { dbi:self.dbi_nodes, txn:&self.txn }
+                debug!("db_nodes:{:?}",self.dbi_nodes);
+                Db { dbi:self.dbi_nodes, txn:&self.txn, is_nodes:true }
             } else {
                 panic!("The LMDB backend does not handle multi-head repositories")
             }
         }
 
         pub fn db_branches<'txn>(&'txn self) -> Db<'txn,'env> {
-            Db { dbi:self.dbi_branches, txn:&self.txn }
+            Db { dbi:self.dbi_branches, txn:&self.txn, is_nodes:false }
         }
 
-        pub fn db_internal(&self) -> Db { Db { dbi: self.dbi_internal, txn: &self.txn } }
-        pub fn db_external(&self) -> Db { Db { dbi: self.dbi_external, txn: &self.txn } }
+        pub fn db_internal(&self) -> Db { Db { dbi: self.dbi_internal, txn: &self.txn, is_nodes:false } }
+        pub fn db_external(&self) -> Db { Db { dbi: self.dbi_external, txn: &self.txn, is_nodes:false } }
 
         pub fn abort(self) {
             self.txn.abort();
@@ -185,6 +186,10 @@ pub mod backend {
     impl<'txn,'env> Db<'txn,'env> {
         
         pub fn put(&mut self, key:&[u8], value:&[u8]) -> Result<(),Error> {
+            debug!("putting {:?} into {:?}",key.to_hex(),self.dbi);
+            if self.is_nodes && value.len() != 45 {
+                panic!("len = {:?}", value.len())
+            }
             try!(self.txn.put(self.dbi, key, value, 0));
             Ok(())
         }
@@ -199,7 +204,12 @@ pub mod backend {
         pub fn iter<'a>(&'a self, _:&mut Workspace, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a> {
             unsafe {
                 let curs = self.txn.cursor(self.dbi).unwrap();
-                let current = lmdb::cursor_get(curs.cursor, starting_key, starting_value, lmdb::Op::MDB_SET_RANGE).ok();
+                // LMDB does not compare empty keys properly.
+                let current =
+                    lmdb::cursor_get(curs.cursor, starting_key, starting_value,
+                                     if starting_key.len() == 0 { lmdb::Op::MDB_FIRST }
+                                     else if starting_value.is_some() { lmdb::Op::MDB_GET_BOTH_RANGE }
+                                     else { lmdb::Op::MDB_SET_RANGE }).ok();
                 Iter {
                     current: current,
                     cursor: curs
@@ -216,11 +226,16 @@ pub mod backend {
         current:Option<(&'a[u8],&'a[u8])>,
         cursor: lmdb::Cursor<'a>,
     }
+    use rustc_serialize::hex::ToHex;
 
     impl<'a> Iterator for Iter<'a> {
         type Item = (&'a[u8],&'a[u8]);
         fn next(&mut self) -> Option<Self::Item> {
-            debug!("{:?}", self.current);
+            if let Some((a,b))=self.current {
+                debug!("iter: Some({:?},{:?})",a.to_hex(),b.to_hex());
+            } else {
+                debug!("iter: None")
+            }
             unsafe {
                 if let Some((key,value)) = self.current {
                     self.current = lmdb::cursor_get(self.cursor.cursor, key, Some(value), lmdb::Op::MDB_NEXT).ok();

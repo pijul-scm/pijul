@@ -91,12 +91,6 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
     match find_repo_root(&wd){
         None => return Err(Error::NotInARepository),
         Some(ref r) => {
-            /*let mut meta=Meta::load(r).unwrap_or(Meta::new());
-
-            let pe="pmeunier".to_string();
-            meta.authors=vec!(pe.clone());
-            meta.save(r);
-            */
             let meta = match Meta::load(r) { Ok(m)=>m, Err(_)=> { Meta::new() } };
             let mut savable=false;
             let remote={

@@ -104,6 +104,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error> {
         {
             try!(txn.move_file(orig_path.as_path(), dest_path.as_path(), false));
             try!(rename(repo_root.join(orig_path.as_path()), repo_root.join(dest_path.as_path())));
+            try!(txn.commit());
             Ok(())
         },
         Movement::IntoDir { from : ref orig_paths, to : ref dest_dir } =>
@@ -127,6 +128,7 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), error::Error> {
                 };
                 try!(rename(&repo_root.join(f), repo_root.join(full_target_name.as_path())));
             };
+            try!(txn.commit());
             Ok(())
         }
     }
