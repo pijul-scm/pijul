@@ -75,7 +75,14 @@ fn with_changes_sth_to_record() {
     let init_params = init::Params { location : &dir.path(), allow_nested : false};
     init::run(&init_params).unwrap();
     let fpath = &dir.path().join("toto");
-    { fs::File::create(&fpath).unwrap(); }
+    {
+        let text0 = random_text();
+        let mut file = fs::File::create(&fpath).unwrap();
+        for line in text0.iter() {
+            file.write_all(line.as_bytes()).unwrap();
+        }
+    }
+
     let add_params = add::Params { repository : Some(&dir.path()), touched_files : vec![&fpath] };
     match add::run(&add_params).unwrap() {
         Some (()) => (),
@@ -106,10 +113,12 @@ fn add_remove_nothing_to_record() {
         Some (()) => (),
         None => panic!("no file added")        
     };
+    println!("added");
     match remove::run(&add_params).unwrap() {
         Some (()) => (),
         None => panic!("no file removed")
     };
+    println!("removed");
     
     let record_params = record::Params { repository : Some(&dir.path()),
                                          yes_to_all : true,
@@ -139,11 +148,12 @@ fn no_remove_without_add() {
 }
 
 #[test]
-fn add_record_pull() {
+fn add_record_pull_stop() {
     env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
     let dir_a = &dir.path().join("a");
     let dir_b = &dir.path().join("b");
+    std::mem::forget(dir);
     fs::create_dir(dir_a).unwrap();
     fs::create_dir(dir_b).unwrap();
     let init_params_a = init::Params { location : &dir_a, allow_nested : false};

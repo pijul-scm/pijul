@@ -28,7 +28,7 @@ use rustc_serialize::hex::ToHex;
 use std::iter::{Iterator};
 
 /// An Inode is a handle to a file; it is attached to a Line.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Inode { contents: [u8; INODE_SIZE] }
 
 impl ToHex for Inode {
@@ -51,12 +51,9 @@ impl Inode {
         unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), i.contents.as_mut_ptr(), INODE_SIZE) };
         i
     }
-    pub fn as_ptr(&self) -> *const u8 {
-        self.contents.as_ptr()
-    }
 }
 
-pub fn create_new_inode(ws:&mut Workspace, db_revtree:&mut Db,buf: &mut [u8]) {
+pub fn create_new_inode<T>(ws:&mut Workspace, db_revtree:&mut Db<T>,buf: &mut [u8]) {
     for i in 0..INODE_SIZE { buf[i]=rand::random() }
     let mut buf_ = [0;INODE_SIZE];
     unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), buf_.as_mut_ptr(), INODE_SIZE) }
@@ -73,7 +70,7 @@ pub fn create_new_inode(ws:&mut Workspace, db_revtree:&mut Db,buf: &mut [u8]) {
     }
 }
 
-pub fn add_inode(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
+pub fn add_inode<T>(ws:&mut Workspace, db_tree:&mut Db<T>, db_revtree:&mut Db<T>, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
     let mut buf = vec![0;INODE_SIZE];
     let mut components=path.components();
     debug!("add_inode: path = {:?}", path);
@@ -193,12 +190,13 @@ pub fn move_file<T>(ws:&mut Workspace, repository:&mut Transaction<T>, path:&std
 
 
 // This function returns a boolean indicating whether the directory we are trying to delete is non-empty, and deletes it if so.
-fn rec_delete(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, db_inodes:&mut Db, key:&[u8])->Result<bool,Error> {
-    //println!("rec_delete {}",to_hex(key));
+fn rec_delete<T>(ws:&mut Workspace, db_tree:&mut Db<T>, db_revtree:&mut Db<T>, db_inodes:&mut Db<T>, key:&[u8])->Result<bool,Error> {
+    debug!("rec_delete, key={:?}",key.to_hex());
     let mut children=Vec::new();
     // First, kill the inode itself, if it exists (or mark it deleted)
     //let mut db_tree = repository.db_tree();
     for (k,v) in db_tree.iter(ws, &key, None) {
+        debug!("k={:?}, v={:?}", k,v);
         if key == k {
             if v.len()>0 {
                 children.push((k.to_vec(),v.to_vec()));
@@ -212,14 +210,17 @@ fn rec_delete(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, db_inodes:
         for (a,b) in children {
             if try!(rec_delete(ws, db_tree, db_revtree, db_inodes, &b)) {
                 //println!("deleting {} {}",to_hex(&a),to_hex(&b));
+                debug!("deleting from tree");
                 try!(db_tree.del(&a,Some(&b)));
                 try!(db_revtree.del(&b,Some(&a)));
+                debug!("done deleting from tree");
             }
         }
     }
     let mut node_=[0;3+KEY_SIZE];
     // If the directory is empty, then mark the corresponding node as deleted (flag '2').
     //let mut db_inodes = repository.db_inodes();
+    debug!("b");
     let b=
         match db_inodes.get(key) {
             Some(node) => {
@@ -235,14 +236,17 @@ fn rec_delete(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, db_inodes:
             },
             None=>true,
         };
+    debug!("b={:?}", b);
     if !b {
         try!(db_inodes.put(key,&node_[..]));
         //repository.set_db_inodes(db_inodes);
     }
+    debug!("done");
     Ok(b)
 }
 
 pub fn remove_file<T>(ws:&mut Workspace, repository:&mut Transaction<T>, path:&std::path::Path) -> Result<(), Error>{
+    debug!("remove_file");
     let mut inode=Vec::new();
     inode.extend_from_slice(ROOT_INODE.as_ref());
     let mut comp=path.components();
@@ -254,8 +258,9 @@ pub fn remove_file<T>(ws:&mut Workspace, repository:&mut Transaction<T>, path:&s
                 //println!("inode {} + {:?}",to_hex(&inode),sc);
                 inode.extend(sc.as_os_str().to_str().unwrap().as_bytes());
                 match db_tree.get(&inode) {
-                    Some(x)=> { c=comp.next();
-                                    if c.is_some() {inode.clear(); inode.extend(x) }
+                    Some(x)=> {
+                        c=comp.next();
+                        if c.is_some() {inode.clear(); inode.extend(x)}
                     },
                     _ => return Err(Error::FileNotInRepo(path.to_path_buf()))
                 }
@@ -266,7 +271,9 @@ pub fn remove_file<T>(ws:&mut Workspace, repository:&mut Transaction<T>, path:&s
     let mut db_tree = repository.db_tree();
     let mut db_revtree = repository.db_revtree();
     let mut db_inodes = repository.db_inodes();
+    debug!("rec_delete");
     try!(rec_delete(ws, &mut db_tree,&mut db_revtree,&mut db_inodes, &inode));
+    debug!("/rec_delete");
     Ok(())
 }
 
@@ -279,6 +286,7 @@ pub fn list_files<T>(repository:&Transaction<T>)->Vec<PathBuf>{
             None=> true,
         };
         if add {
+            debug!("basename = {:?}", String::from_utf8_lossy(basename));
             let next_pb=pb.join(std::str::from_utf8(basename).unwrap());
             let next_pb_=next_pb.clone();
             if basename.len()>0 { files.push(next_pb) }

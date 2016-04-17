@@ -27,7 +27,7 @@ use super::Len;
 use std::collections::{HashSet, HashMap};
 use std::ptr::copy_nonoverlapping;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{stdout,BufWriter};
 use std::path::Path;
 use time;
 use std::sync::Arc;
@@ -36,9 +36,9 @@ use super::fs_representation::patches_dir;
 use rustc_serialize::hex::ToHex;
 
 /// Test whether a node has edges unknown to the patch we're applying.
-fn has_exclusive_edge(ws:&mut Workspace,
-                      branch: &Db,
-                      db_external: &Db,
+fn has_exclusive_edge<T>(ws:&mut Workspace,
+                      branch: &Branch<T>,
+                      db_external: &Db<T>,
                       internal_patch_id:&InternalKey,
                       key:&[u8],
                       flag0:u8,
@@ -67,7 +67,7 @@ fn has_exclusive_edge(ws:&mut Workspace,
 
 
 /// "intro" is the internal patch number of the patch that introduced this edge.
-fn internal_edge(internal:&Db,flag:u8,to:&[u8],intro:&InternalKey,result:&mut [u8])->Result<(),Error> {
+fn internal_edge<T>(internal:&Db<T>,flag:u8,to:&[u8],intro:&InternalKey,result:&mut [u8])->Result<(),Error> {
     debug_assert!(result.len()>=1+KEY_SIZE+HASH_SIZE);
     debug_assert!(intro.contents.len() == HASH_SIZE);
     result[0]=flag;
@@ -83,8 +83,8 @@ fn internal_edge(internal:&Db,flag:u8,to:&[u8],intro:&InternalKey,result:&mut [u
 }
 
 
-fn unsafe_apply(ws:&mut Workspace,
-                db_internal:&Db, db_external:&Db, branch:&mut Db, db_contents:&mut Db, changes:&[Change],
+fn unsafe_apply<T>(ws:&mut Workspace, ws1:&mut Workspace,
+                db_internal:&Db<T>, db_external:&Db<T>, branch:&mut Branch<T>, db_contents:&mut Db<T>, changes:&[Change],
                 internal_patch_id:& InternalKey,dependencies:&HashSet<Vec<u8>>)->Result<(),Error>{
 
     debug!("unsafe_apply");
@@ -161,7 +161,7 @@ fn unsafe_apply(ws:&mut Workspace,
 
                                 if k == &pv[1..(1+KEY_SIZE)] && neighbor[0] <= PARENT_EDGE|PSEUDO_EDGE|FOLDER_EDGE {
                                     //debug!(target:"apply","parent has_edge\n  {}",neighbor.to_hex());
-                                    if has_edge(ws, branch, &neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true) {
+                                    if has_edge(ws1, branch, &neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true) {
                                         let i=parents.len();
                                         parents.extend(neighbor);
                                         parents[i]^=PSEUDO_EDGE;
@@ -174,7 +174,7 @@ fn unsafe_apply(ws:&mut Workspace,
 
                                 if k == &pv[1..(1+KEY_SIZE)] && neighbor[0] <= PSEUDO_EDGE|FOLDER_EDGE {
                                     //debug!(target:"apply","children has_edge\n  {}",neighbor.to_hex());
-                                    if has_edge(ws, branch,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true) {
+                                    if has_edge(ws1, branch,&neighbor[1..(1+KEY_SIZE)],PARENT_EDGE,true) {
                                         let i=children.len();
                                         children.extend(neighbor);
                                         children[i]^=PSEUDO_EDGE;
@@ -304,7 +304,7 @@ fn unsafe_apply(ws:&mut Workspace,
 
 
 /// Test whether `key` has a neighbor with flag `flag0`. If `include_pseudo`, this includes pseudo-neighbors.
-pub fn has_edge(ws:&mut Workspace, branch:&Db, key:&[u8],flag0:u8,include_pseudo:bool)->bool {
+pub fn has_edge<T>(ws:&mut Workspace, branch:&Branch<T>, key:&[u8],flag0:u8,include_pseudo:bool)->bool {
 
     for (k,v) in branch.iter(ws, key, Some(&[flag0][..])) {
         return k == key && (v[0] == flag0 || (include_pseudo && v[0] <= flag0|PSEUDO_EDGE))
@@ -334,7 +334,7 @@ pub fn has_patch<T>(repository:&Transaction<T>, branch_name:&str, hash:&[u8])->R
 }
 
 // requires pu to be KEY_SIZE, pv to be 1+KEY_SIZE+HASH_SIZE
-fn connected(ws:&mut Workspace, branch:&Db, pu:&[u8],pv:&mut [u8])->bool {
+fn connected<T>(ws:&mut Workspace, branch:&Branch<T>, pu:&[u8],pv:&mut [u8])->bool {
     let pv_0=pv[0];
     pv[0]=0;
     for (k,v) in branch.iter(ws, pu, Some(pv)) {
@@ -348,12 +348,12 @@ fn connected(ws:&mut Workspace, branch:&Db, pu:&[u8],pv:&mut [u8])->bool {
     false
 }
 
-fn add_edge(branch:&mut Db, pu:&[u8],pv:&[u8]) -> Result<(),Error> {
+fn add_edge<T>(branch:&mut Branch<T>, pu:&[u8],pv:&[u8]) -> Result<(),Error> {
     try!(branch.put(&pu[1..(1+KEY_SIZE)],&pv)); // ,lmdb::MDB_NODUPDATA));
     branch.put(&pv[1..(1+KEY_SIZE)],&pu) // ,lmdb::MDB_NODUPDATA)
 }
 
-fn kill_obsolete_pseudo_edges(ws:&mut Workspace, branch:&mut Db, pv:&[u8]) ->Result<(),Error> {
+fn kill_obsolete_pseudo_edges<T>(ws:&mut Workspace, branch:&mut Branch<T>, pv:&[u8]) ->Result<(),Error> {
     debug_assert!(pv.len()==1+KEY_SIZE+HASH_SIZE);
     let mut a:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
     let mut b:[u8;1+KEY_SIZE+HASH_SIZE]=[0;1+KEY_SIZE+HASH_SIZE];
@@ -396,20 +396,21 @@ fn kill_obsolete_pseudo_edges(ws:&mut Workspace, branch:&mut Db, pv:&[u8]) ->Res
 /// Applies a patch to a repository. "new_patches" are patches that just this repository has, and the remote repository doesn't have.
 pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patch, internal: &'b InternalKey, new_patches:&HashSet<&[u8]>)->Result<(),Error> {
     let mut ws = Workspace::new();
+    let mut ws1 = Workspace::new();
     let mut db_branches = repository.db_branches();
     if db_branches.get(internal.as_slice()).is_some() {
         return Err(Error::AlreadyApplied)
     }
     let db_internal = repository.db_internal();
     let db_external = repository.db_external();
-    let mut db_nodes = repository.db_nodes(branch_name);
+    let mut db_nodes = try!(repository.db_nodes(branch_name));
     let mut db_contents = repository.db_contents();
     {
         debug!("apply: registering {:?} in branch {:?}", internal.as_slice().to_hex(), branch_name);
         try!(db_branches.put(branch_name.as_bytes(), internal.as_slice()));
         //repository.set_db_branches(db_branches);
         debug!("done");
-        try!(unsafe_apply(&mut ws,
+        try!(unsafe_apply(&mut ws, &mut ws1,
                           &db_internal, &db_external, &mut db_nodes, &mut db_contents,
                           &patch.changes, &internal, &patch.dependencies));
     }
@@ -418,7 +419,7 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patc
     {
         let mut relatives=Vec::new();
         // repair_missing_context adds all zombie edges needed.
-        let mut repair_missing_context= |ws:&mut Workspace, db_nodes:&mut Db, direction_up:bool,c:&[u8] | -> Result<(),Error> {
+        let mut repair_missing_context= |ws:&mut Workspace, db_nodes:&mut Branch<T>, direction_up:bool,c:&[u8] | -> Result<(),Error> {
             let mut context:[u8;KEY_SIZE]=[0;KEY_SIZE];
             unsafe {
                 let u : &InternalKey = if c.len()>LINE_SIZE {
@@ -532,20 +533,20 @@ pub fn apply<'b,T>(repository:&mut Transaction<T>, branch_name:&str, patch:&Patc
         let dep_internal=try!(internal_hash(&db_internal, &dep)).contents.to_vec();
         try!(db_revdep.put(&dep_internal,&internal.contents));
     }
-    //repository.set_db_revdep(db_revdep);
-    //repository.set_db_nodes(branch_name, db_nodes);
+
+    try!(db_nodes.commit_branch(branch_name));
     //let time3=time::precise_time_s();
     //info!(target:"libpijul","deps took: {}", time3-time2);
     Ok(())
 }
 
 
-fn find_alive_relatives<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Db, a:&[u8], direction:u8, patch_id:&InternalKey, new_patches:&HashSet<&[u8]>,
+fn find_alive_relatives<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Branch<T>, a:&[u8], direction:u8, patch_id:&InternalKey, new_patches:&HashSet<&[u8]>,
                         relatives:&mut Vec<u8>) {
     //let cursor= unsafe { &mut * self.txn.unsafe_cursor(self.dbi_nodes).unwrap() };
     fn connect<T>(ws:&mut Workspace,
                   repository:&Transaction<T>,
-               branch:&Db,
+               branch:&Branch<T>,
                a:&[u8],
                direction:u8,
                result:&mut Vec<u8>,
@@ -604,10 +605,10 @@ fn find_alive_relatives<T>(ws:&mut Workspace, repository:&Transaction<T>, branch
 }
 
 
-fn reconnect_zombie_folder(ws:&mut Workspace,
-                           branch:&mut Db, a:&[u8], patch_id: &InternalKey)->Result<(),Error> {
-    fn connect(ws:&mut Workspace,
-               branch:&mut Db,
+fn reconnect_zombie_folder<T>(ws:&mut Workspace,
+                           branch:&mut Branch<T>, a:&[u8], patch_id: &InternalKey)->Result<(),Error> {
+    fn connect<T>(ws:&mut Workspace,
+               branch:&mut Branch<T>,
                a:&[u8],
                patch_id:&InternalKey,
                edges:&mut Vec<u8>) {
@@ -825,12 +826,14 @@ pub fn apply_patches<T>(repository:&mut Transaction<T>,
         try!(super::output::output_repository(repository, branch_name, &r,&pending));
         debug!("done outputting_repository");
     }
+    let mut f = File::create(r.join("dump")).unwrap();
+    repository.dump(&mut f);
     Ok(())
 }
 
 /// Apply a patch from a local record: register it, give it a hash, and then apply.
 pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, location: &Path, patch: Patch, inode_updates:&HashMap<LocalKey,Inode>)
-                         -> Result<(), Error>{
+                            -> Result<(), Error>{
     info!("registering a patch with {} changes: {:?}", patch.changes.len(), patch);
     let patch = Arc::new(patch);
     let child_patch = patch.clone();
@@ -842,14 +845,15 @@ pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, lo
         info!("hashed patch in {}s", t1-t0);
         hash
     });
+    let join = hash_child.join();
 
     let t0 = time::precise_time_s();
     let internal : &InternalKey = &new_internal(repository);// InternalKey::new( &internal );
     debug!("applying patch");
     try!(apply(repository, branch_name, &patch, internal, &HashSet::new()));
-    debug!("synchronizing tree");
+    debug!("synchronizing tree: {:?}", inode_updates);
     {
-        let branch = repository.db_nodes(branch_name);
+        let branch = try!(repository.db_nodes(branch_name));
         let mut db_inodes = repository.db_inodes();
         let mut db_revinodes = repository.db_revinodes();
         {
@@ -871,16 +875,21 @@ pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, lo
                 }
             }
         }
+        debug!("committing branch");
+        try!(branch.commit_branch(branch_name));
         if cfg!(debug_assertions){
             debug!("debugging");
             let mut buffer = BufWriter::new(File::create(location.join("debug_")).unwrap());
             repository.debug(branch_name, &mut buffer);
+
+            let mut f = File::create(location.join("dump")).unwrap();
+            repository.dump(&mut f);
             debug!("/debugging");
         }
     }
     let t2 = time::precise_time_s();
     info!("applied patch in {}s", t2 - t0);
-    match hash_child.join() {
+    match join {
         Ok(Ok(hash))=> {
             try!(register_hash(repository, internal,&hash[..]));
             debug!("hash={}, local={}",hash.to_hex(),internal.to_hex());

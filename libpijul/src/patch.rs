@@ -180,6 +180,7 @@ impl Patch {
         f.set_extension("");
         f.set_extension("cbor.gz");
         try!(std::fs::rename(&tmp,&f));
+        debug!("/saving patch");
         Ok(hash)
     }
 }
@@ -298,13 +299,13 @@ use super::backend::*;
 /// Gets the external key corresponding to the given key, returning an
 /// owned vector. If the key is just a patch id, it returns the
 /// corresponding external hash.
-pub fn external_key(ext:&Db,key:&[u8])->ExternalKey {
+pub fn external_key<T>(ext:&Db<T>,key:&[u8])->ExternalKey {
     let mut result= external_hash(ext, &key[0..HASH_SIZE]).to_vec();
     if key.len()==KEY_SIZE { result.extend(&key[HASH_SIZE..KEY_SIZE]) };
     result
 }
 
-pub fn external_hash<'a,'b>(ext:&'a Db<'a,'b>,key:&[u8])->&'a [u8] {
+pub fn external_hash<'a,'b,T>(ext:&'a Db<'a,'b,T>,key:&[u8])->&'a [u8] {
     //println!("internal key:{:?}",&key[0..HASH_SIZE]);
     if key.len()>=HASH_SIZE
         && unsafe {memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t)}==0 {
@@ -325,7 +326,7 @@ pub fn external_hash<'a,'b>(ext:&'a Db<'a,'b>,key:&[u8])->&'a [u8] {
 }
 
 
-pub fn internal_hash<'a>(internal:&'a Db,key:&[u8])->Result<&'a InternalKey,Error> {
+pub fn internal_hash<'a,T>(internal:&'a Db<T>,key:&[u8])->Result<&'a InternalKey,Error> {
     debug!("internal_hash: {}, {}",key.to_hex(), key.len());
     if key.len()==HASH_SIZE
         && unsafe { memcmp(key.as_ptr() as *const c_void,ROOT_KEY.as_ptr() as *const c_void,HASH_SIZE as size_t) }==0 {

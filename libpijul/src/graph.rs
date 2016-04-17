@@ -91,9 +91,9 @@ pub struct Graph<'a> {
     pub children:Vec<(Option<&'a[u8]>,usize)>
 }
 
-pub trait LineBuffer<'a> {
+pub trait LineBuffer<'a,'env:'a,T:'a> {
 
-    fn output_line(&mut self, key:&'a [u8], contents: Contents<'a>);
+    fn output_line(&mut self, key:&'a [u8], contents: Contents<'a,'env,T>);
 
     fn begin_conflict(&mut self) {
         let l = Contents::from_slice(b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
@@ -113,13 +113,13 @@ pub trait LineBuffer<'a> {
 /// This function constructs a graph by reading the branch from the
 /// input key. It guarantees that all nodes but the first one (index
 /// 0) have a common descendant, which is index 0.
-pub fn retrieve<'a,'b>(ws:&mut Workspace, branch:&'a Db<'a,'b>, key:&'a [u8])->Result<Graph<'a>,()>{
+pub fn retrieve<'a,'b,'name,T>(ws:&mut Workspace, branch:&'a Branch<'name,'a,'b,T>, key:&'a [u8])->Result<Graph<'a>,()>{
 
     // In order to identify "merging paths" of the graph correctly, we
     // maintain a cache of visited lines (mapped to their index in the graph).
-    fn retr<'a,'b>(
+    fn retr<'a,'b,'name,T>(
         ws:&mut Workspace,
-        db_nodes: &'a Db<'a,'b>,
+        db_nodes: &'a Branch<'name,'a,'b,T>,
         cache: &mut HashMap<&'a [u8],usize>,
         lines: &mut Vec<Line<'a>>,
         children: &mut Vec<(Option<&'a[u8]>,usize)>,
@@ -264,7 +264,7 @@ fn tarjan(line:&mut Graph)->Vec<Vec<usize>> {
 
 
 
-pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'b>, db_contents:&'a Db<'a,'b>, buf:&mut B,mut graph:Graph<'a>,forward:&mut Vec<u8>) {
+pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branch:&'a Branch<'name,'a,'b,T>, db_contents:&'a Db<'a,'b,T>, buf:&mut B,mut graph:Graph<'a>,forward:&mut Vec<u8>) {
     debug!("output_file");
 
     //let t0=time::precise_time_s();
@@ -381,10 +381,10 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'
             let key=graph.lines[scc[i][0]].key;
             debug!("key = {}",key.to_hex());
 
-            fn get_conflict<'a,'b, B:LineBuffer<'a>>(
+            fn get_conflict<'name,'a,'b,T, B:LineBuffer<'a,'b,T>>(
                 ws:&mut Workspace,
-                branch:&'a Db<'a,'b>,
-                db_contents:&'a Db<'a,'b>,
+                branch:&'a Branch<'name,'a,'b,T>,
+                db_contents:&'a Db<'a,'b,T>,
                 graph:&Graph<'a>,
                 first_visit: &[usize],
                 last_visit: &[usize],
@@ -419,10 +419,10 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'
                     *next=i
                 } else {
                     // Pour chaque permutation de la SCC, ajouter tous les sommets sur la pile, et appel recursif de chaque arete non-forward.
-                    fn permutations<'a, 'b, B:LineBuffer<'a>>(
+                    fn permutations<'name,'a, 'b,T,B:LineBuffer<'a,'b,T>>(
                         ws: &mut Workspace,
-                        branch:&'a Db<'a,'b>,
-                        db_contents:&'a Db<'a,'b>,
+                        branch:&'a Branch<'name,'a,'b,T>,
+                        db_contents:&'a Db<'a,'b,T>,
                         graph:&Graph<'a>,
                         first_visit: &[usize],
                         last_visit: &[usize],
@@ -543,7 +543,7 @@ pub fn output_file<'a,'b,B:LineBuffer<'a>>(ws:&mut Workspace, branch:&'a Db<'a,'
 }
 
 
-pub fn remove_redundant_edges(ws:&mut Workspace, branch:&mut Db, forward:&mut Vec<u8>) -> Result<(),Error> {
+pub fn remove_redundant_edges<T>(ws:&mut Workspace, branch:&mut Branch<T>, forward:&mut Vec<u8>) -> Result<(),Error> {
     let mut i=0;
     while i<forward.len() {
         let mut found = false;

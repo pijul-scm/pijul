@@ -24,10 +24,12 @@ use std::path::{PathBuf};
 extern crate cbor;
 extern crate rustc_serialize;
 use self::rustc_serialize::hex::ToHex;
+use sanakirja;
 
 #[derive(Debug)]
 pub enum Error{
     IO(io::Error),
+    Sanakirja(sanakirja::Error),
     AlreadyApplied,
     AlreadyAdded,
     FileNotInRepo(PathBuf),
@@ -41,6 +43,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Error::IO(ref err) => write!(f, "IO error: {}", err),
+            Error::Sanakirja(ref err) => write!(f, "Sanakirja error: {}", err),
             Error::AlreadyApplied => write!(f, "Patch already applied"),
             Error::AlreadyAdded => write!(f, "File already here"),
             Error::Cbor(ref err) => write!(f, "Cbor error {}",err),
@@ -57,6 +60,7 @@ impl std::error::Error for Error {
     fn description(&self) -> &str {
         match *self {
             Error::IO(ref err) => err.description(),
+            Error::Sanakirja(ref err) => err.description(),
             Error::AlreadyApplied => "Patch already applied",
             Error::AlreadyAdded => "File already here",
             Error::Cbor(ref err) => err.description(),
@@ -71,6 +75,7 @@ impl std::error::Error for Error {
     fn cause(&self) -> Option<&std::error::Error> {
         match *self {
             Error::IO(ref err) => Some(err),
+            Error::Sanakirja(ref err) => Some(err),
             Error::AlreadyApplied => None,
             Error::AlreadyAdded => None,
             Error::Cbor(ref err) => Some(err),
@@ -86,6 +91,12 @@ impl std::error::Error for Error {
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Error {
         Error::IO(err)
+    }
+}
+
+impl From<sanakirja::Error> for Error {
+    fn from(err: sanakirja::Error) -> Error {
+        Error::Sanakirja(err)
     }
 }
 

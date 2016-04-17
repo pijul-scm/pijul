@@ -42,7 +42,7 @@ enum Tree {
 
 
 // Climp up the tree (using revtree).
-fn filename_of_inode(db_revtree:&Db,inode:&[u8],working_copy:&mut PathBuf)->bool {
+fn filename_of_inode<T>(db_revtree:&Db<T>,inode:&[u8],working_copy:&mut PathBuf)->bool {
     //let mut v_inode=MDB_val{mv_data:inode.as_ptr() as *const c_void, mv_size:inode.len() as size_t};
     //let mut v_next:MDB_val = unsafe {std::mem::zeroed()};
     let mut components=Vec::new();
@@ -132,22 +132,25 @@ pub fn node_of_inode<'a,'b>(db_inodes:&'a Db<'a,'b>, inode:&[u8]) -> Option<&'a 
 }
  */
 
-fn output_aux(ws0:&mut Workspace,
-              ws1:&mut Workspace,
-              ws2:&mut Workspace,
-              branch:&Db,
-              db_contents:&Db,
-              db_inodes:&mut Db,
-              db_revinodes:&mut Db,
-              db_tree:&mut Db,
-              db_revtree:&mut Db,
-              working_copy:&Path,
-              do_output:bool,
-              visited:&mut HashMap<Vec<u8>,Vec<PathBuf>>,
-              path:&mut PathBuf,
-              key:&[u8],
-              inode:&[u8],
-              moves:&mut Vec<Tree>)->Result<(),Error> {
+fn output_aux<'a,'b,'name,T>(
+    ws0:&mut Workspace,
+    ws1:&mut Workspace,
+    ws2:&mut Workspace,
+    branch:&Branch<'name,'b,'a,T>,
+    db_contents:&Db<'b,'a,T>,
+    db_inodes:&mut Db<'b,'a,T>,
+    db_revinodes:&mut Db<'b,'a,T>,
+    db_tree:&mut Db<'b,'a,T>,
+    db_revtree:&mut Db<'b,'a,T>,
+    working_copy:&Path,
+    do_output:bool,
+    visited:&mut HashMap<Vec<u8>,Vec<PathBuf>>,
+    path:&mut PathBuf,
+    key:&[u8],
+    inode:&[u8],
+    moves:&mut Vec<Tree>
+)->Result<(),Error> {
+
     debug!(target:"output_repository","visited {}",key.to_hex());
     moves.clear();
     debug_assert!(inode.len()==INODE_SIZE);
@@ -183,7 +186,10 @@ fn output_aux(ws0:&mut Workspace,
             }*/
             
             for (_,c) in branch.iter(ws1, &b[1..(1+KEY_SIZE)], Some(&[FOLDER_EDGE][..]))
-                .take_while(|&(k,c)| k==&b[1..(1+KEY_SIZE)] && c[0]<=FOLDER_EDGE|PSEUDO_EDGE) {
+                .take_while(|&(k,c)| {
+                    debug!("selecting c: {:?} {:?}", k.to_hex(), c.to_hex());
+                    k==&b[1..(1+KEY_SIZE)] && c[0]<=FOLDER_EDGE|PSEUDO_EDGE
+                }) {
 
                     debug_assert!(c.len() == 1+KEY_SIZE+HASH_SIZE);
                     let cv=&c[1..(1+KEY_SIZE)];
@@ -254,11 +260,12 @@ fn output_aux(ws0:&mut Workspace,
                             if perms&DIRECTORY_FLAG==0 {
                                 if do_output {
                                     let mut redundant_edges=vec!();
-                                    let l = retrieve(ws0, branch, &cv).unwrap();
+                                    let l = retrieve(ws2, branch, &cv).unwrap();
                                     debug!("creating file {:?}",path);
                                     let mut f=std::fs::File::create(&path).unwrap();
                                     debug!("done");
-                                    output_file(ws0, branch, db_contents, &mut f,l,&mut redundant_edges);
+                                    
+                                    output_file(ws2, branch, db_contents, &mut f,l,&mut redundant_edges);
                                 }
                             } else {
                                 recursive_calls.push((filename.to_string(),cv.to_vec(),c_inode.to_vec()));
@@ -329,9 +336,12 @@ fn output_aux(ws0:&mut Workspace,
     Ok(())
 }
 
-fn unsafe_output_repository(ws0:&mut Workspace, ws1:&mut Workspace, ws2:&mut Workspace,
-                            branch:&Db, db_contents:&Db, db_inodes:&mut Db, db_revinodes:&mut Db, db_tree:&mut Db, db_revtree:&mut Db,
-                            working_copy:&Path,do_output:bool)->Result<(),Error> {
+fn unsafe_output_repository<'name,'b,'a,T>(
+    ws0:&mut Workspace, ws1:&mut Workspace, ws2:&mut Workspace,
+    branch:&Branch<'name,'b,'a,T>,
+    db_contents:&Db<'b,'a,T>, db_inodes:&mut Db<'b,'a,T>, db_revinodes:&mut Db<'b,'a,T>,
+    db_tree:&mut Db<'b,'a,T>, db_revtree:&mut Db<'b,'a,T>,
+    working_copy:&Path,do_output:bool)->Result<(),Error> {
     let mut visited=HashMap::new();
     let mut p=PathBuf::from(working_copy);
 
@@ -351,7 +361,7 @@ fn unsafe_output_repository(ws0:&mut Workspace, ws1:&mut Workspace, ws2:&mut Wor
     {
         //let curs = try!(self.txn.cursor(self.dbi_inodes));
         for (u,v) in db_inodes.iter(ws0, b"",None) {
-            if ! has_edge(ws0, branch, &v[3..],PARENT_EDGE|FOLDER_EDGE,true) {
+            if ! has_edge(ws1, branch, &v[3..],PARENT_EDGE|FOLDER_EDGE,true) {
                 // v is dead.
                 debug!("dead:{:?} {:?}",u.to_hex(),v.to_hex());
                 dead.push((u.to_vec(),(&v[3..]).to_vec()))
@@ -424,7 +434,7 @@ pub fn output_repository<T>(repository:&mut Transaction<T>, branch_name:&str, wo
     let mut ws1 = Workspace::new();
     let mut ws2 = Workspace::new();
     {
-        let branch = repository.db_nodes(branch_name);
+        let branch = try!(repository.db_nodes(branch_name));
         let db_contents = repository.db_contents();
         let mut db_inodes = repository.db_inodes();
         let mut db_revinodes = repository.db_inodes();
@@ -434,7 +444,8 @@ pub fn output_repository<T>(repository:&mut Transaction<T>, branch_name:&str, wo
         try!(unsafe_output_repository(&mut ws0, &mut ws1, &mut ws2,
                                       &branch, &db_contents,
                                       &mut db_inodes, &mut db_revinodes, &mut db_tree, &mut db_revtree,
-                                      working_copy,false))
+                                      working_copy,false));
+        try!(branch.commit_branch(branch_name));
     };
     // Then, apply pending and output in an aborted transaction.
     let mut child_repository = repository.child();
@@ -443,7 +454,7 @@ pub fn output_repository<T>(repository:&mut Transaction<T>, branch_name:&str, wo
     try!(apply(&mut child_repository, branch_name, pending,&internal,&HashSet::new()));
     // Now output all files (do_output=true)
     {
-        let branch = child_repository.db_nodes(branch_name);
+        let branch = try!(child_repository.db_nodes(branch_name));
         let db_contents = child_repository.db_contents();
         let mut db_inodes = child_repository.db_inodes();
         let mut db_revinodes = child_repository.db_inodes();
@@ -452,7 +463,8 @@ pub fn output_repository<T>(repository:&mut Transaction<T>, branch_name:&str, wo
         try!(unsafe_output_repository(&mut ws0, &mut ws1, &mut ws2,
                                       &branch, &db_contents,
                                       &mut db_inodes, &mut db_revinodes, &mut db_tree, &mut db_revtree,
-                                      working_copy, true))
+                                      working_copy, true));
+        try!(branch.commit_branch(branch_name));
     }
     child_repository.abort();
     Ok(())

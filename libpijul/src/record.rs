@@ -57,12 +57,12 @@ macro_rules! iterate_parents {
 }
 
 
-pub fn record_all<T> (
+pub fn record_all<'a,'b,'c,T> (
     ws0:&mut Workspace,
     ws1:&mut Workspace,
-    repository:&Transaction<T>,
-    branch:&Db,
-    db_inodes:&Db,
+    repository:&Transaction<'a,T>,
+    branch:&Branch<'c,'b,'a,T>,
+    db_inodes:&Db<'b,'a,T>,
     actions:&mut Vec<Change>,
     line_num:&mut usize,
     redundant:&mut Vec<u8>,
@@ -114,12 +114,13 @@ pub fn record_all<T> (
                         name.extend(basename);
                         for parent in iterate_parents!(ws0, branch, &current_node[3..]) {
                             debug!("iterate_parents: {:?}", parent.to_hex());
-                            let mut previous_name=
+                            let mut contents_name: Contents<T> = Contents::from_slice(&name[..]);
+                            let mut previous_name: Contents<T> =
                                 match db_contents.contents(&parent[1..(1+KEY_SIZE)]) {
                                     None=>Contents::from_slice(b""),
                                     Some(n)=>n
                                 };
-                            let name_changed = !super::eq(&mut Contents::from_slice(&name[..]),
+                            let name_changed = !super::eq(&mut contents_name,
                                                           &mut previous_name);
                             for grandparent in iterate_parents!(ws1, branch, &parent[1..(1+KEY_SIZE)]) {
                                 debug!("iterate_parents: grandparent = {:?}", grandparent.to_hex());
@@ -338,7 +339,7 @@ pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&
     let mut line_num = 1;
     let mut updatables:HashMap<LocalKey,Inode> = HashMap::new();
     let mut redundant = Vec::new();
-    let mut branch = repository.db_nodes(branch_name);
+    let mut branch = try!(repository.db_nodes(branch_name));
     let db_inodes = repository.db_inodes();
     let mut ws0 = Workspace::new();
     let mut ws1 = Workspace::new();
@@ -352,6 +353,7 @@ pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&
         debug!("record done, {} changes", actions.len());
     }
     try!(super::graph::remove_redundant_edges(&mut ws0, &mut branch, &mut redundant));
+    try!(branch.commit_branch(branch_name));
     //repository.set_db_nodes(branch_name, branch);
     debug!("remove_redundant_edges done");
     Ok((actions,updatables))

@@ -30,7 +30,7 @@ pub mod diff {
     use std::io::Read;
     use rustc_serialize::hex::ToHex;
 
-    fn delete_edges<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Db, edges:&mut Vec<Edge>, key:&[u8],flag:u8) {
+    fn delete_edges<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Branch<T>, edges:&mut Vec<Edge>, key:&[u8],flag:u8) {
         debug!("deleting edges");
         if key.len() > 0 {
             let ext = repository.db_external();
@@ -70,7 +70,7 @@ pub mod diff {
     }
 
 
-    fn delete_lines<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Db, lines:&[&[u8]]) -> Change
+    fn delete_lines<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Branch<T>, lines:&[&[u8]]) -> Change
     {
         debug!("delete_lines: {:?}", lines.len());
         let mut edges=Vec::with_capacity(lines.len());
@@ -81,8 +81,8 @@ pub mod diff {
         Change::Edges{edges:edges, flag:PARENT_EDGE|DELETED_EDGE}
     }
 
-    fn local_diff<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Db, actions:&mut Vec<Change>,
-                     line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[Contents], b:&[&[u8]])
+    fn local_diff<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Branch<T>, actions:&mut Vec<Change>,
+                     line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[Contents<T>], b:&[&[u8]])
     {
         debug!("local_diff {} {}",contents_a.len(),b.len());
         let mut opt=vec![vec![0;b.len()+1];contents_a.len()+1];
@@ -105,8 +105,9 @@ pub mod diff {
                             debug!("eq: {:?}", super::super::eq(&mut contents_a_i, &mut Contents::from_slice(&b[j])))
                         }*/
                         let mut contents_a_i = contents_a[i].clone();
+                        let mut contents_b_j:Contents<T> = Contents::from_slice(&b[j]);
                         opt[i][j]=
-                            if super::super::eq(&mut contents_a_i, &mut Contents::from_slice(&b[j])) {
+                            if super::super::eq(&mut contents_a_i, &mut contents_b_j) {
                                 opt[i+1][j+1]+1
                             } else {
                                 std::cmp::max(opt[i+1][j], opt[i][j+1])
@@ -126,7 +127,8 @@ pub mod diff {
         while i<contents_a.len() && j<b.len() {
             debug!("i={}, j={}",i,j);
             let mut contents_a_i = contents_a[i].clone();
-            if super::super::eq(&mut contents_a_i, &mut Contents::from_slice(&b[j])) {
+            let mut contents_b_j:Contents<T> = Contents::from_slice(&b[j]);
+            if super::super::eq(&mut contents_a_i, &mut contents_b_j ) {
                 debug!("eq: {:?} {:?}", i, j);
                 if let Some(i0)=oi {
                     debug!("deleting from {} to {} / {}",i0,i,lines_a.len());
@@ -202,22 +204,22 @@ pub mod diff {
     }
     
 
-    struct Diff<'a> {
+    struct Diff<'a,'env:'a,T:'a> {
         lines_a:Vec<&'a[u8]>,
-        contents_a:Vec<Contents<'a>>
+        contents_a:Vec<Contents<'a,'env,T>>
     }
 
-    impl <'a> graph::LineBuffer<'a> for Diff<'a> {
-        fn output_line(&mut self,k:&'a[u8],c:Contents<'a>) {
+    impl <'a,'env:'a,T:'a> graph::LineBuffer<'a,'env,T> for Diff<'a,'env,T> {
+        fn output_line(&mut self,k:&'a[u8],c:Contents<'a,'env,T>) {
             //println!("outputting {:?} {}",k,unsafe {std::str::from_utf8_unchecked(c)});
             self.lines_a.push(k);
             self.contents_a.push(c);
         }
     }
 
-    pub fn diff<'a,T>(repository:&Transaction<T>,branch:&Db,line_num:&mut usize, actions:&mut Vec<Change>,
-                    redundant:&mut Vec<u8>,
-                    a:Graph<'a>, b:&Path)->Result<(),std::io::Error> {
+    pub fn diff<'a,'b,'name,T>(repository:&Transaction<'b,T>,branch:&Branch<'name,'a,'b,T>,line_num:&mut usize, actions:&mut Vec<Change>,
+                         redundant:&mut Vec<u8>,
+                         a:Graph<'a>, b:&Path)->Result<(),std::io::Error> {
         
         let mut buf_b=Vec::new();
         let mut lines_b=Vec::new();

@@ -26,7 +26,9 @@ extern crate time;
 #[macro_use]
 extern crate bitflags;
 
-mod lmdb;
+// mod lmdb;
+extern crate sanakirja;
+
 pub mod error;
 use self::error::*;
 
@@ -45,8 +47,8 @@ extern crate rand;
 pub mod fs_representation;
 pub mod patch;
 
-mod lmdb_backend;
-pub use lmdb_backend::backend;
+mod sanakirja_backend;
+pub use sanakirja_backend::backend;
 
 mod file_operations;
 
@@ -55,8 +57,8 @@ pub mod graph;
 mod optimal_diff;
 pub use optimal_diff::diff;
 
-impl <'a,W> graph::LineBuffer<'a> for W where W:std::io::Write {
-    fn output_line(&mut self,_:&[u8],c:backend::Contents) {
+impl <'a,'env:'a,T:'a,W> graph::LineBuffer<'a,'env,T> for W where W:std::io::Write {
+    fn output_line(&mut self,_:&[u8],c:backend::Contents<'a,'env,T>) {
         for i in c {
             self.write(i).unwrap(); // .expect("output_line: could not write");
         }
@@ -94,7 +96,7 @@ impl<'env,T> backend::Transaction<'env,T> {
         let mut workspace = backend::Workspace::new();
         file_operations::move_file(&mut workspace, self, path.as_ref(), path_.as_ref(), is_dir)
     }
-    pub fn retrieve_and_output<W:std::io::Write>(&self,branch:&backend::Db,key:&[u8],l:&mut W) {
+    pub fn retrieve_and_output<'a,'name,W:std::io::Write>(&self,branch:&backend::Branch<'name,'a,'env,T>,key:&[u8],l:&mut W) {
         let db_contents = self.db_contents();
         let mut redundant_edges = Vec::new();
         let mut workspace = backend::Workspace::new();
@@ -102,13 +104,13 @@ impl<'env,T> backend::Transaction<'env,T> {
         graph::output_file(&mut workspace, branch, &db_contents, l, graph,&mut redundant_edges);
     }
 
-    pub fn branch_patches<'a>(&'a self,db_external:&'a backend::Db<'a,'env>, branch_name:&str)->Result<HashSet<&'a[u8]>,Error> {
+    pub fn branch_patches<'a>(&'a self,db_external:&'a backend::Db<'a,'env,T>, branch_name:&str)->Result<HashSet<&'a[u8]>,Error> {
         let mut patches = HashSet::new();
         let mut ws = backend::Workspace::new();
         let db_patches = self.db_branches();
         for (br_name,patch_hash) in db_patches.iter(&mut ws, branch_name.as_bytes(), None) {
             debug!("branch_patches: {:?}, {:?}",
-                   std::str::from_utf8(br_name).unwrap(),
+                   String::from_utf8_lossy(br_name),
                    patch_hash.to_hex());
             if br_name == branch_name.as_bytes() {
                 patches.insert(patch::external_hash(&db_external, patch_hash));
@@ -162,7 +164,7 @@ impl<'env,T> backend::Transaction<'env,T> {
                         +if (i as u8)&graph::PSEUDO_EDGE!=0 { ", style=dotted"} else {""})
         }
         w.write(b"digraph{\n").unwrap();
-        let db_nodes = self.db_nodes(branch_name);
+        let db_nodes = self.db_nodes(branch_name).unwrap();
         let db_contents = self.db_contents();
         let mut cur=&[][..];
         for (k,v) in db_nodes.iter(&mut ws, b"", None) {

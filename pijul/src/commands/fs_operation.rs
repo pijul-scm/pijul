@@ -31,14 +31,14 @@ pub enum Operation { Add,
 
 pub fn run<'a>(args : &Params<'a>, op : Operation)
                -> Result<Option<()>, error::Error> {
-    debug!(target:"mv","fs_operation {:?}",op);
+    debug!("fs_operation {:?}",op);
     let files = &args.touched_files;
     let wd=try!(get_wd(args.repository));
     match find_repo_root(&wd) {
         None => return Err(error::Error::NotInARepository),
         Some(ref r) =>
         {
-            debug!(target:"mv","repo {:?}",r);
+            debug!("repo {:?}",r);
             let repo_dir=pristine_dir(r);
             let repo = try!(Repository::open(&repo_dir).map_err(error::Error::Repository));
             let mut txn = try!(repo.mut_txn_begin());
