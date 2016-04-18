@@ -95,39 +95,15 @@ pub fn closest_in_repo_ancestor<'p, T>(db_tree: &Db<T>, path: &'p std::path::Pat
 
 }
 
-pub fn add_inode<T>(ws:&mut Workspace, db_tree:&mut Db<T>, db_revtree:&mut Db<T>, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
+pub fn add_inode(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
     let parent = path.parent().unwrap();
     let (mut current_inode, unrecorded_path) = closest_in_repo_ancestor(db_tree, &parent).unwrap();
-    let mut buf = vec![];
+
     for c in unrecorded_path {
-        buf.clear();
-        buf.extend_from_slice(&current_inode.contents);
-        buf.extend(c.as_os_str().to_str().unwrap().as_bytes());
-
-        create_new_inode(ws, db_revtree, &mut current_inode.contents);
-
-        try!(db_tree.put(&buf, &current_inode.contents));
-        try!(db_revtree.put(&current_inode.contents, &buf));
-        try!(db_tree.put(&current_inode.contents, &[]));
+        try!(become_new_child(ws, db_tree, db_revtree, &mut current_inode, c.as_os_str().to_str().unwrap(), true, None))
     }
 
-    buf.clear();
-    buf.extend_from_slice(&current_inode.contents);
-    buf.extend(path.file_name().unwrap().to_str().unwrap().as_bytes());
-
-    let inode = match inode {
-        None => {
-            create_new_inode(ws, db_revtree, &mut current_inode.contents);
-            &current_inode.contents
-        },
-        Some(i) => i
-    };
-
-    try!(db_tree.put(&buf, inode));
-    try!(db_revtree.put(inode, &buf));
-    if is_dir { try!(db_tree.put(inode, &[]))};
-
-    Ok(())
+    become_new_child(ws, db_tree, db_revtree, &mut current_inode, path.file_name().unwrap().to_str().unwrap(), is_dir, inode)
 }
 
 pub fn move_file<T>(ws:&mut Workspace, repository:&mut Transaction<T>, path:&std::path::Path, path_:&std::path::Path,is_dir:bool) -> Result<(), Error>{
