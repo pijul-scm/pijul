@@ -70,7 +70,7 @@ pub fn create_new_inode<T>(ws:&mut Workspace, db_revtree:&mut Db<T>,buf: &mut [u
     }
 }
 
-pub fn add_inode<T>(ws:&mut Workspace, db_tree:&mut Db<T>, db_revtree:&mut Db<T>, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
+pub fn add_inode(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
     let mut buf = vec![0;INODE_SIZE];
     let mut components=path.components();
     debug!("add_inode: path = {:?}", path);
@@ -79,50 +79,55 @@ pub fn add_inode<T>(ws:&mut Workspace, db_tree:&mut Db<T>, db_revtree:&mut Db<T>
         cs=components.next();
         let ss=s.as_os_str().to_str().unwrap();
         buf.extend(ss.as_bytes());
-        let mut broken=false;
-        {
-            //debug!(target:"mv","mdb_get: dbi_tree, {}",buf.to_hex());
-            match db_tree.get(&buf) {
-                Some(v)=> {
-                    //debug!(target:"mv","got Some({})",v.to_hex());
-                    if cs.is_none() {
-                        return Err(Error::AlreadyAdded)
-                    } else {
-                        // replace buf with existing inode
-                        buf.clear();
-                        buf.extend(v);
-                    }
-                },
-                _ =>{
-                    broken=true
-                }
+        match db_tree.get(&buf) {
+            Some(v) =>
+            {
+                cur_inode = Inode::from_slice(v);
+                buf.clear();
+                buf.extend(v);
             }
-        }
-        debug!("broken={:?}", broken);
-        if broken {
-            let mut inode_:[u8;INODE_SIZE]=[0;INODE_SIZE];
-            let inode = if cs.is_none() && inode.is_some() {
-                inode.unwrap()
-            } else {
-                create_new_inode(ws, db_revtree, &mut inode_);
-                &inode_[..]
-            };
-            debug!("put: dbi_tree, {} {}",buf.to_hex(),inode.to_hex());
-            try!(db_tree.put(&buf,&inode));
-            try!(db_revtree.put(&inode,&buf));
-            if cs.is_some() || is_dir {
-                db_tree.put(&inode,&[]).unwrap();
-            }
-            //repository.set_db_tree(db_tree);
-            //repository.set_db_revtree(db_revtree);
-            // push next inode onto buf.
-            buf.clear();
-            buf.extend(inode)
+            None => break
         }
     }
-    Ok(())
+    println!("remaining path: {:?}\n", components.as_path());
+    return Ok((cur_inode, components))
+
 }
 
+pub fn add_inode(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
+    let parent = path.parent().unwrap();
+    let (mut current_inode, unrecorded_path) = closest_in_repo_ancestor(db_tree, &parent).unwrap();
+    let mut buf = vec![];
+    for c in unrecorded_path {
+        buf.clear();
+        buf.extend_from_slice(&current_inode.contents);
+        buf.extend(c.as_os_str().to_str().unwrap().as_bytes());
+
+        create_new_inode(ws, db_revtree, &mut current_inode.contents);
+
+        try!(db_tree.put(&buf, &current_inode.contents));
+        try!(db_revtree.put(&current_inode.contents, &buf));
+        try!(db_tree.put(&current_inode.contents, &[]));
+    }
+
+    buf.clear();
+    buf.extend_from_slice(&current_inode.contents);
+    buf.extend(path.file_name().unwrap().to_str().unwrap().as_bytes());
+
+    let inode = match inode {
+        None => {
+            create_new_inode(ws, db_revtree, &mut current_inode.contents);
+            &current_inode.contents
+        },
+        Some(i) => i
+    };
+
+    try!(db_tree.put(&buf, inode));
+    try!(db_revtree.put(inode, &buf));
+    if is_dir { try!(db_tree.put(inode, &[]))};
+
+    Ok(())
+}
 
 pub fn move_file<T>(ws:&mut Workspace, repository:&mut Transaction<T>, path:&std::path::Path, path_:&std::path::Path,is_dir:bool) -> Result<(), Error>{
     debug!(target:"mv","move_file: {:?},{:?}",path,path_);
