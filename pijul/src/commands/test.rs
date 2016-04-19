@@ -11,13 +11,19 @@ use std::io::prelude::*;
 use self::rand::distributions::{IndependentSample, Range};
 use libpijul;
 
-#[test]
-fn add_grandchild() -> ()
-{
+fn mk_tmp_repo() -> tempdir::TempDir {
     env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
-    let init_params = init::Params { location : &dir.path(), allow_nested : false};
-    init::run(&init_params).unwrap();
+    {
+        let init_params = init::Params { location : &dir.path(), allow_nested : false};
+        init::run(&init_params).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn add_grandchild() -> () {
+    let dir = mk_tmp_repo();
     let subdir = &dir.path().join("subdir");
     fs::create_dir(&subdir).unwrap();
     let fpath = &subdir.join("toto");
@@ -82,20 +88,14 @@ fn add_outside_repo() -> ()
 #[test]
 fn init_creates_repo() -> ()
 {
-    env_logger::init().unwrap_or(());
-    let dir = tempdir::TempDir::new("pijul").unwrap();
-    let init_params = init::Params { location : &dir.path(), allow_nested : false};
-    init::run(&init_params).unwrap();
+    let dir = mk_tmp_repo();
     let info_params = info::Params { repository : Some(&dir.path()) };
     info::run(&info_params).unwrap();
 }
 
 #[test]
 fn init_nested_forbidden() {
-    env_logger::init().unwrap_or(());
-    let dir = tempdir::TempDir::new("pijul").unwrap();
-    let init_params = init::Params { location : &dir.path(), allow_nested : false};
-    init::run(&init_params).unwrap();
+    let dir = mk_tmp_repo();
     let subdir = dir.path().join("subdir");
     fs::create_dir(&subdir).unwrap();
     let sub_init_params = init::Params { location : &subdir, allow_nested : false};
@@ -110,10 +110,7 @@ fn init_nested_forbidden() {
 
 #[test]
 fn init_nested_allowed() {
-    env_logger::init().unwrap_or(());
-    let dir = tempdir::TempDir::new("pijul").unwrap();
-    let init_params = init::Params { location : &dir.path(), allow_nested : false};
-    init::run(&init_params).unwrap();
+    let dir = mk_tmp_repo();
     let subdir = dir.path().join("subdir");
     fs::create_dir(&subdir).unwrap();
     let sub_init_params = init::Params { location : &subdir, allow_nested : true};
@@ -122,10 +119,7 @@ fn init_nested_allowed() {
 
 #[test]
 fn in_empty_dir_nothing_to_record() {
-    env_logger::init().unwrap_or(());
-    let dir = tempdir::TempDir::new("pijul").unwrap();
-    let init_params = init::Params { location : &dir.path(), allow_nested : false};
-    init::run(&init_params).unwrap();
+    let dir = mk_tmp_repo();
     let record_params = record::Params { repository : Some(&dir.path()),
                                          yes_to_all : true,
                                          patch_name : Some(""),
@@ -138,10 +132,7 @@ fn in_empty_dir_nothing_to_record() {
 
 #[test]
 fn with_changes_sth_to_record() {
-    env_logger::init().unwrap_or(());
-    let dir = tempdir::TempDir::new("pijul").unwrap();
-    let init_params = init::Params { location : &dir.path(), allow_nested : false};
-    init::run(&init_params).unwrap();
+    let dir = mk_tmp_repo();
     let fpath = &dir.path().join("toto");
     {
         let text0 = random_text();
@@ -170,10 +161,7 @@ fn with_changes_sth_to_record() {
 
 #[test]
 fn add_remove_nothing_to_record() {
-    env_logger::init().unwrap_or(());
-    let dir = tempdir::TempDir::new("pijul").unwrap();
-    let init_params = init::Params { location : &dir.path(), allow_nested : false};
-    init::run(&init_params).unwrap();
+    let dir = mk_tmp_repo();
     let fpath = &dir.path().join("toto");
     { fs::File::create(&fpath).unwrap(); }
     let add_params = add::Params { repository : Some(&dir.path()), touched_files : vec![&fpath] };
@@ -201,10 +189,7 @@ fn add_remove_nothing_to_record() {
 
 #[test]
 fn no_remove_without_add() {
-    env_logger::init().unwrap_or(());
-    let dir = tempdir::TempDir::new("pijul").unwrap();
-    let init_params = init::Params { location : &dir.path(), allow_nested : false};
-    init::run(&init_params).unwrap();
+    let dir = mk_tmp_repo();
     let fpath = &dir.path().join("toto");
     { fs::File::create(&fpath).unwrap(); }
     let rem_params = remove::Params { repository : Some(&dir.path()), touched_files : vec![&fpath] };
