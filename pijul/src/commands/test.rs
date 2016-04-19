@@ -12,6 +12,34 @@ use self::rand::distributions::{IndependentSample, Range};
 use libpijul;
 
 #[test]
+fn add_grandchild() -> ()
+{
+    env_logger::init().unwrap_or(());
+    let dir = tempdir::TempDir::new("pijul").unwrap();
+    let init_params = init::Params { location : &dir.path(), allow_nested : false};
+    init::run(&init_params).unwrap();
+    let subdir = &dir.path().join("subdir");
+    fs::create_dir(&subdir).unwrap();
+    let fpath = &subdir.join("toto");
+    { fs::File::create(&fpath).unwrap(); }
+    let add_params = add::Params { repository : Some(&dir.path()), touched_files : vec![&fpath] };
+    match add::run(&add_params).unwrap() {
+        Some (()) => (),
+        None => panic!("no file added")
+    };
+    let record_params = record::Params { repository : Some(&dir.path()),
+                                         yes_to_all : true,
+                                         patch_name : Some(""),
+                                         authors : Some(vec![])
+    };
+    match record::run(&record_params).unwrap() {
+        None => panic!("file add is not going to be recorded"),
+        Some(()) => ()
+    }
+}
+
+
+#[test]
 fn info_only_in_repo() -> ()
 {
     let dir = tempdir::TempDir::new("pijul").unwrap();
