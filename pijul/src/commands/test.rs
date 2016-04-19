@@ -320,6 +320,22 @@ fn add_record_pull_edit_record_pull_(empty_file:bool, really_edit:bool) {
 }
 
 
+#[test]
+fn cannot_move_unadded_file()
+{
+    let repo_dir = mk_tmp_repo();
+    let mv_params = mv::Params { repository : Some(repo_dir.path()),
+                                 movement : mv::Movement::FileToFile {from: PathBuf::from("toto"),
+                                                                      to: PathBuf::from("titi")}
+    };
+    match mv::run(&mv_params) {
+        Err(error::Error::Repository(libpijul::error::Error::FileNotInRepo(ref s)))
+            if s.as_path() == std::path::Path::new("toto") => (),
+        Err(_) => panic!("funky error"),
+        Ok(()) => panic!("Unexpectedly able to move unadded file")
+    }
+}
+
 
 fn edit(input:&[String],percent_add:usize, percent_del:usize)->Vec<String> {
     let mut text = Vec::new();
