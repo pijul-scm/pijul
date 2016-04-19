@@ -12,6 +12,18 @@ use self::rand::distributions::{IndependentSample, Range};
 use libpijul;
 
 #[test]
+fn info_only_in_repo() -> ()
+{
+    let dir = tempdir::TempDir::new("pijul").unwrap();
+    let info_params = info::Params { repository : Some(&dir.path()) };
+    match info::run(&info_params) {
+        Err(error::Error::NotInARepository) => (),
+        Ok(_) => panic!("getting info from a non-repository"),
+        Err(_) => panic!("funky failure while getting info from a non-repository")
+    }
+}
+
+#[test]
 fn init_creates_repo() -> ()
 {
     env_logger::init().unwrap_or(());
