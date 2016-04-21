@@ -24,6 +24,34 @@ fn info_only_in_repo() -> ()
 }
 
 #[test]
+fn add_only_in_repo() -> ()
+{
+    let dir = tempdir::TempDir::new("pijul").unwrap();
+    let fpath = &dir.path().join("toto");
+    let add_params = add::Params { repository : Some(&dir.path()), touched_files : vec![&fpath] };
+    match add::run(&add_params) {
+        Err(error::Error::NotInARepository) => (()),
+        Ok(_) => panic!("Wait, I can add in a non-repository???"),
+        Err(_) => panic!("funky failure while adding a file into a non-repository")
+    }
+}
+
+#[test]
+fn add_outside_repo() -> ()
+{
+    let repo_dir = mk_tmp_repo();
+    let not_repo_dir = tempdir::TempDir::new("pijul_not_repo").unwrap();
+    let fpath = &not_repo_dir.path().join("toto");
+    fs::File::create(&fpath).unwrap();
+    let add_params = add::Params { repository : Some(&repo_dir.path()), touched_files : vec![&fpath] };
+    match add::run(&add_params) {
+        Err(error::Error::InvalidPath(_)) => (()),
+        Ok(_) => panic!("Wait, I can add in a non-repository???"),
+        Err(e) => panic!("funky failure {} while adding a file into a non-repository", e)
+    }
+}
+
+#[test]
 fn init_creates_repo() -> ()
 {
     env_logger::init().unwrap_or(());
