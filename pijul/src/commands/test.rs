@@ -21,6 +21,28 @@ fn mk_tmp_repo() -> tempdir::TempDir {
     dir
 }
 
+fn mk_tmp_repo_pair() -> (tempdir::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    env_logger::init().unwrap_or(());
+    let dir = tempdir::TempDir::new("pijul").unwrap();
+    let dir_a = dir.path().join("a");
+    let dir_b = dir.path().join("b");
+    {
+        fs::create_dir(&dir_a).unwrap();
+        fs::create_dir(&dir_b).unwrap();
+        let init_params_a = init::Params {
+            location: &dir_a,
+            allow_nested: false,
+        };
+        let init_params_b = init::Params {
+            location: &dir_b,
+            allow_nested: false,
+        };
+        init::run(&init_params_a).unwrap();
+        init::run(&init_params_b).unwrap();
+    }
+    (dir, dir_a, dir_b)
+}
+
 #[test]
 fn add_grandchild() -> () {
     let dir = mk_tmp_repo();
@@ -664,4 +686,80 @@ fn move_to_dir_editing_(empty_file:bool, edit_file:bool) {
     let fpath_b = &dir_b.join("d/toto");
     let metadata = fs::metadata(fpath_b).unwrap();
     assert!(metadata.is_file());
+}
+
+#[test]
+fn add_edit_remove_pull() {
+    let (tmp_dir, dir_a, dir_b) = mk_tmp_repo_pair();
+
+    let toto_path = &dir_a.join("toto");
+
+    let text0 = random_text();
+    {
+        let mut file = fs::File::create(&toto_path).unwrap();
+        for line in text0.iter() {
+            file.write_all(line.as_bytes()).unwrap();
+        }
+    }
+
+    let add_params = add::Params {
+        repository: Some(&dir_a),
+        touched_files: vec![&toto_path],
+    };
+    match add::run(&add_params).unwrap() {
+        Some(()) => (),
+        None => panic!("no file added"),
+    };
+    let record_params = record::Params {
+        repository: Some(&dir_a),
+        yes_to_all: true,
+        authors: Some(vec![]),
+        patch_name: Some("file add"),
+    };
+    match record::run(&record_params).unwrap() {
+        None => panic!("file add is not going to be recorded"),
+        Some(()) => (),
+    };
+    println!("done recording add of toto");
+
+    let pull_params = pull::Params {
+        repository: Some(&dir_b),
+        remote_id: Some(dir_a.to_str().unwrap()),
+        set_default: true,
+        port: None,
+        yes_to_all: true,
+    };
+    pull::run(&pull_params).unwrap();
+
+    let remove_params = remove::Params {
+        repository: Some(&dir_b),
+        touched_files: vec![std::path::Path::new("toto")],
+    };
+    remove::run(&remove_params).unwrap();
+
+    let record_params = record::Params {
+        repository: Some(&dir_b),
+        yes_to_all: true,
+        authors: Some(vec![]),
+        patch_name: Some("file remove"),
+    };
+    match record::run(&record_params).unwrap() {
+        None => panic!("file remove is not going to be recorded"),
+        Some(()) => (),
+    };
+    println!("done recording add of toto");
+
+    let pull_params = pull::Params {
+        repository: Some(&dir_a),
+        remote_id: Some(dir_b.to_str().unwrap()),
+        set_default: true,
+        port: None,
+        yes_to_all: true,
+    };
+    pull::run(&pull_params).unwrap();
+
+    match fs::metadata(toto_path) {
+        Ok(_) => panic!("pulling a remove fails to delete the file"),
+        Err(_) => (),
+    }
 }
