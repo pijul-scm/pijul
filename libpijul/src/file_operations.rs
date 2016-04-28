@@ -70,14 +70,15 @@ pub fn create_new_inode<T>(ws:&mut Workspace, db_revtree:&mut Db<T>,buf: &mut [u
     }
 }
 
-pub fn add_inode(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
-    let mut buf = vec![0;INODE_SIZE];
-    let mut components=path.components();
-    debug!("add_inode: path = {:?}", path);
-    let mut cs=components.next();
-    while let Some(s)=cs { // need to peek at the next element, so no for.
-        cs=components.next();
-        let ss=s.as_os_str().to_str().unwrap();
+pub fn closest_in_repo_ancestor<'p, T>(db_tree: &Db<T>, path: &'p std::path::Path)
+                                -> Result<(Inode, std::path::Components<'p>), Error>
+{
+    let mut components = path.components();
+    let mut buf = vec![0; INODE_SIZE];
+    let mut cur_inode = ROOT_INODE;
+
+    for c in components.by_ref() {
+        let ss = c.as_os_str().to_str().unwrap();
         buf.extend(ss.as_bytes());
         match db_tree.get(&buf) {
             Some(v) =>
@@ -94,7 +95,7 @@ pub fn add_inode(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, inode:O
 
 }
 
-pub fn add_inode(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
+pub fn add_inode<T>(ws:&mut Workspace, db_tree:&mut Db<T>, db_revtree:&mut Db<T>, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
     let parent = path.parent().unwrap();
     let (mut current_inode, unrecorded_path) = closest_in_repo_ancestor(db_tree, &parent).unwrap();
     let mut buf = vec![];
