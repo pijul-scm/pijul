@@ -51,12 +51,22 @@ impl Inode {
         unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), i.contents.as_mut_ptr(), INODE_SIZE) };
         i
     }
-    pub fn as_ptr(&self) -> *const u8 {
-        self.contents.as_ptr()
+
+    pub fn child(&self, filename: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&self.contents);
+        buf.extend(filename.as_bytes());
+        buf
     }
+
 }
 
-pub fn create_new_inode(ws:&mut Workspace, db_revtree:&mut Db,buf: &mut [u8]) {
+fn mark_inode_moved<T>(db_inodes: &mut Db<T>, inode: &Inode) {
+    let vv = db_inodes.get(&inode.contents).map(|v| {let mut vv = v.to_vec(); vv[0] =1; vv});
+    for v in vv.iter() {db_inodes.put(&inode.contents, &v).unwrap()};
+}
+
+pub fn create_new_inode<T>(ws:&mut Workspace, db_revtree:&mut Db<T>,buf: &mut [u8]) {
     for i in 0..INODE_SIZE { buf[i]=rand::random() }
     let mut buf_ = [0;INODE_SIZE];
     unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), buf_.as_mut_ptr(), INODE_SIZE) }
@@ -73,14 +83,16 @@ pub fn create_new_inode(ws:&mut Workspace, db_revtree:&mut Db,buf: &mut [u8]) {
     }
 }
 
-pub fn add_inode(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
-    let mut buf = vec![0;INODE_SIZE];
-    let mut components=path.components();
-    debug!("add_inode: path = {:?}", path);
-    let mut cs=components.next();
-    while let Some(s)=cs { // need to peek at the next element, so no for.
-        cs=components.next();
-        let ss=s.as_os_str().to_str().unwrap();
+pub fn closest_in_repo_ancestor<T>(db_tree: &Db<T>, path: &std::path::Path)
+                                -> Result<(Inode, std::path::PathBuf), Error>
+{
+    let mut components = path.components();
+    let mut buf = vec![0; INODE_SIZE];
+    let mut cur_inode = ROOT_INODE;
+    let mut last_component = std::path::Path::new("");
+
+    for c in components.by_ref() {
+        let ss = c.as_os_str().to_str().unwrap();
         buf.extend(ss.as_bytes());
         match db_tree.get(&buf) {
             Some(v) =>
@@ -101,7 +113,39 @@ pub fn add_inode(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, inode:O
 
 }
 
-pub fn add_inode(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
+pub fn find_inode<T>(db_tree: &Db<T>, path: &std::path::Path)
+                  -> Result<Inode, Error>
+{
+    let (inode, should_be_empty) = try!(closest_in_repo_ancestor(db_tree, path));
+    if should_be_empty == PathBuf::from("") {Ok(inode)}
+    else {Err(Error::FileNotInRepo(path.to_path_buf()))}
+}
+
+fn become_new_child<T>(ws: &mut Workspace, db_tree: &mut Db<T>, db_revtree: &mut Db<T>,
+                       parent_inode: &mut Inode, filename: &str, is_dir: bool,
+                       reusing_inode: Option<&[u8]>) -> Result<(), Error>
+{
+    let mut fileref = vec![];
+    fileref.extend_from_slice(&parent_inode.contents);
+    fileref.extend(filename.as_bytes());
+
+    let inode = match reusing_inode {
+        None => {
+            create_new_inode(ws, db_revtree, &mut parent_inode.contents);
+            &parent_inode.contents
+        },
+        Some(i) => {
+            i
+        }
+    };
+
+    try!(db_tree.put(&fileref, inode));
+    try!(db_revtree.put(inode, &fileref));
+    if is_dir {try!(db_tree.put(inode, &[]))};
+    Ok(())
+}
+
+pub fn add_inode<T>(ws:&mut Workspace, db_tree:&mut Db<T>, db_revtree:&mut Db<T>, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
     let parent = path.parent().unwrap();
     let (mut current_inode, unrecorded_path) = closest_in_repo_ancestor(db_tree, &parent).unwrap();
 
