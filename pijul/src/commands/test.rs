@@ -178,7 +178,14 @@ fn in_empty_dir_nothing_to_record() {
 fn with_changes_sth_to_record() {
     let dir = mk_tmp_repo();
     let fpath = &dir.path().join("toto");
-    { fs::File::create(&fpath).unwrap(); }
+    {
+        let text0 = random_text();
+        let mut file = fs::File::create(&fpath).unwrap();
+        for line in text0.iter() {
+            file.write_all(line.as_bytes()).unwrap();
+        }
+    }
+
     let add_params = add::Params { repository : Some(&dir.path()), touched_files : vec![&fpath] };
     match add::run(&add_params).unwrap() {
         Some(()) => (),
@@ -217,11 +224,13 @@ fn add_remove_nothing_to_record() {
         Some(()) => (),
         None => panic!("no file removed"),
     };
-    
-    let record_params = record::Params { repository : Some(&dir.path()),
-                                         yes_to_all : true,
-                                         authors : Some(vec![]),
-                                         patch_name : Some("")
+
+    println!("removed");
+    let record_params = record::Params {
+        repository: Some(&dir.path()),
+        yes_to_all: true,
+        authors: Some(vec![]),
+        patch_name: Some(""),
     };
     match record::run(&record_params).unwrap() {
         None => (),
