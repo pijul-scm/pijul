@@ -95,7 +95,31 @@ pub fn closest_in_repo_ancestor<'p, T>(db_tree: &Db<T>, path: &'p std::path::Pat
 
 }
 
-pub fn add_inode(ws:&mut Workspace, db_tree:&mut Db, db_revtree:&mut Db, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
+fn become_new_child<T>(ws: &mut Workspace, db_tree: &mut Db<T>, db_revtree: &mut Db<T>,
+                    parent_inode: &mut Inode, filename: &str, is_dir: bool,
+                    reusing_inode: Option<&[u8]>) -> Result<(), Error>
+{
+    let mut fileref = vec![];
+    fileref.extend_from_slice(&parent_inode.contents);
+    fileref.extend(filename.as_bytes());
+
+    let inode = match reusing_inode {
+        None => {
+            create_new_inode(ws, db_revtree, &mut parent_inode.contents);
+            &parent_inode.contents
+        },
+        Some(i) => {
+            i
+        }
+    };
+
+    try!(db_tree.put(&fileref, inode));
+    try!(db_revtree.put(inode, &fileref));
+    if is_dir {try!(db_tree.put(inode, &[]))};
+    Ok(())
+}
+
+pub fn add_inode<T>(ws:&mut Workspace, db_tree:&mut Db<T>, db_revtree:&mut Db<T>, inode:Option<&[u8]>, path:&std::path::Path, is_dir:bool)->Result<(),Error> {
     let parent = path.parent().unwrap();
     let (mut current_inode, unrecorded_path) = closest_in_repo_ancestor(db_tree, &parent).unwrap();
 
