@@ -318,7 +318,7 @@ pub mod backend {
             }
         }
     }
-    pub struct Workspace { ws:Vec<(u64,u16)> }
+    pub struct Workspace { ws:Vec<u64> }
     impl Workspace {
         pub fn new() -> Workspace {
             Workspace{ ws:Vec::new() }
