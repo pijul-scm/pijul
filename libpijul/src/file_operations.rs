@@ -132,7 +132,7 @@ fn become_new_child<T>(ws: &mut Workspace, db_tree: &mut Db<T>, db_revtree: &mut
     let inode = match reusing_inode {
         None => {
             create_new_inode(ws, db_revtree, &mut parent_inode.contents);
-            &parent_inode.contents
+            &parent_inode.contents[..]
         },
         Some(i) => {
             i
