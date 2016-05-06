@@ -56,18 +56,95 @@ macro_rules! iterate_parents {
     }
 }
 
+struct record_state {
+    line_num: usize,
+    updatables: HashMap<Vec<u8>, Inode >,
+    actions: Vec<Change>,
+}
 
-pub fn record_all<'a,'b,'c,T> (
+fn record_file_addition<T>(st : &mut record_state, current_inode: Inode, parent_node: Option<&[u8]>, db_external: &Db<T>, realpath: &mut std::path::PathBuf, basename: &[u8]) -> Option< [u8; LINE_SIZE]> {
+    let mut l2=[0;LINE_SIZE];
+    // File addition, create appropriate Newnodes.
+    debug!("metadata for {:?}", realpath);
+    match metadata(&realpath) {
+        Ok(attr) => {
+            let int_attr={
+                let attr=metadata(&realpath).unwrap();
+                let p=permissions(&attr);
+                let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
+                (if p==0 { 0o755 } else { p }) | is_dir
+            };
+            let mut nodes=Vec::new();
+            unsafe {
+                *(l2.as_mut_ptr() as *mut u32) = ((st.line_num+1) as u32).to_le()
+            };
+
+            let mut name=Vec::with_capacity(basename.len()+2);
+            name.push(((int_attr >> 8) & 0xff) as u8);
+            name.push((int_attr & 0xff) as u8);
+            name.extend(basename);
+            {
+                let mut l2_=Vec::with_capacity(LINE_SIZE+2);
+                l2_.extend(&name[0..2]);
+                l2_.extend(&l2);
+                st.updatables.insert(l2_,current_inode);
+            }
+            st.actions.push(
+                Change::NewNodes { up_context: vec!(
+                    if parent_node.unwrap().len()>LINE_SIZE {
+                        external_key(&db_external, parent_node.unwrap())
+                    } else {parent_node.unwrap().to_vec()}
+                ),
+                                   line_num: st.line_num as u32,
+                                   down_context: vec!(),
+                                   nodes: vec!(name,vec!()),
+                                   flag:FOLDER_EDGE }
+            );
+            st.line_num += 2;
+            st.updatables.insert(l2.to_vec(),current_inode);
+            // Reading the file
+            if !attr.is_dir() {
+                nodes.clear();
+                let mut line=Vec::new();
+                let f = std::fs::File::open(realpath.as_path());
+                let mut f = std::io::BufReader::new(f.unwrap());
+                loop {
+                    match f.read_until('\n' as u8,&mut line) {
+                        Ok(l) => if l>0 { nodes.push(line.clone());line.clear() } else { break },
+                        Err(_) => break
+                    }
+                }
+                let len=nodes.len();
+                if !nodes.is_empty() {
+                    st.actions.push(
+                        Change::NewNodes { up_context:vec!(l2.to_vec()),
+                                           line_num: st.line_num as u32,
+                                           down_context: vec!(),
+                                           nodes: nodes,
+                                           flag:0 }
+                    );
+                }
+                st.line_num+=len;
+                None
+            } else {
+                Some(l2)
+            }
+        },
+        Err(_)=>{
+            panic!("error adding file {:?} (metadata failed)",realpath);
+        }
+    }
+}
+
+fn record_all<'a,'b,'c,T> (
     ws0:&mut Workspace,
     ws1:&mut Workspace,
     repository:&Transaction<'a,T>,
     branch:&Branch<'c,'b,'a,T>,
-    actions:&mut Vec<Change>,
-    line_num:&mut usize,
+    st: &mut record_state,
     redundant:&mut Vec<u8>,
-    updatables:&mut HashMap<Vec<u8>,Inode >,
+    parent_node: Option< &[u8] >,
     parent_inode:Option< Inode >,
-    parent_node:Option< &[u8] >,
     current_inode: Inode,
     realpath:&mut std::path::PathBuf,
     basename:&[u8])->Result<(),Error> {
@@ -136,17 +213,17 @@ pub fn record_all<'a,'b,'c,T> (
                         }
                         debug!("edges:{:?}",edges);
                         if !edges.is_empty(){
-                            actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
+                            st.actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
                             debug!("parent_node: {:?}",parent_node.unwrap());
                             debug!("ext key: {:?}",external_key(&db_external, parent_node.unwrap()));
                             debug!("ext key: {:?}",external_key(&db_external, &current_node[3..]));
-                            actions.push(
+                            st.actions.push(
                                 Change::NewNodes { up_context:{
                                     let p=parent_node.unwrap();
                                     vec!(if p.len()>LINE_SIZE { external_key(&db_external, &p) }
                                          else { p.to_vec() })
                                 },
-                                                   line_num: *line_num as u32,
+                                                   line_num: st.line_num as u32,
                                                    down_context:{
                                                        let p=&current_node[3..];
                                                        vec!(if p.len()>LINE_SIZE { external_key(&db_external, &p) }
@@ -156,7 +233,7 @@ pub fn record_all<'a,'b,'c,T> (
                                                    flag:FOLDER_EDGE }
                             );
                         }
-                        *line_num += 1;
+                        st.line_num += 1;
                         debug!("directory_flag:{}",old_attr&DIRECTORY_FLAG);
                         if old_attr & DIRECTORY_FLAG == 0 {
                             info!("retrieving");
@@ -165,7 +242,7 @@ pub fn record_all<'a,'b,'c,T> (
                             //let time1=time::precise_time_s();
                             //info!("retrieve took {}s, now calling diff", time1-time0);
                             debug!("diff");
-                            try!(diff::diff(repository, branch, line_num,actions, redundant,ret.unwrap(), realpath.as_path()));
+                            try!(diff::diff(repository, branch, &mut st.line_num,&mut st.actions, redundant,ret.unwrap(), realpath.as_path()));
                             //let time2=time::precise_time_s();
                             //info!("total diff took {}s", time2-time1);
                         }
@@ -205,9 +282,9 @@ pub fn record_all<'a,'b,'c,T> (
                             }
                         }
 
-                        actions.push(Change::Edges{edges:edges,flag:FOLDER_EDGE|PARENT_EDGE|DELETED_EDGE});
+                        st.actions.push(Change::Edges{edges:edges,flag:FOLDER_EDGE|PARENT_EDGE|DELETED_EDGE});
                         if file_edges.len()>0 {
-                            actions.push(Change::Edges{edges:file_edges,flag:PARENT_EDGE|DELETED_EDGE});
+                            st.actions.push(Change::Edges{edges:file_edges,flag:PARENT_EDGE|DELETED_EDGE});
                         }
                     } else if current_node[0]==0 {
                         if old_attr & DIRECTORY_FLAG == 0 {
@@ -215,7 +292,7 @@ pub fn record_all<'a,'b,'c,T> (
                             let ret = retrieve(ws0, branch, &current_node[3..]);
                             //let time1=time::precise_time_s();
                             info!("now calling diff");
-                            try!(diff::diff(repository, branch, line_num, actions, redundant,
+                            try!(diff::diff(repository, branch, &mut st.line_num, &mut st.actions, redundant,
                                             ret.unwrap(), realpath.as_path()));
                             //let time2=time::precise_time_s();
                             //info!(target:"record_all","total diff took {}s", time2-time1);
@@ -226,75 +303,8 @@ pub fn record_all<'a,'b,'c,T> (
                     Some(&current_node[3..])
                 },
                 None=>{
-                    // File addition, create appropriate Newnodes.
-                    debug!("metadata for {:?}", realpath);
-                    match metadata(&realpath) {
-                        Ok(attr) => {
-                            let int_attr={
-                                let attr=metadata(&realpath).unwrap();
-                                let p=permissions(&attr);
-                                let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
-                                (if p==0 { 0o755 } else { p }) | is_dir
-                            };
-                            let mut nodes=Vec::new();
-                            unsafe {
-                                *(l2.as_mut_ptr() as *mut u32) = ((*line_num+1) as u32).to_le()
-                            }
-                            let mut name=Vec::with_capacity(basename.len()+2);
-                            name.push(((int_attr >> 8) & 0xff) as u8);
-                            name.push((int_attr & 0xff) as u8);
-                            name.extend(basename);
-                            {
-                                let mut l2_=Vec::with_capacity(LINE_SIZE+2);
-                                l2_.extend(&name[0..2]);
-                                l2_.extend(&l2);
-                                updatables.insert(l2_,current_inode);
-                            }
-                            actions.push(
-                                Change::NewNodes { up_context: vec!(
-                                    if parent_node.unwrap().len()>LINE_SIZE {
-                                        external_key(&db_external, parent_node.unwrap())
-                                    } else {parent_node.unwrap().to_vec()}
-                                ),
-                                                   line_num: *line_num as u32,
-                                                   down_context: vec!(),
-                                                   nodes: vec!(name,vec!()),
-                                                   flag:FOLDER_EDGE }
-                            );
-                            *line_num += 2;
-                            updatables.insert(l2.to_vec(),current_inode);
-                            // Reading the file
-                            if !attr.is_dir() {
-                                nodes.clear();
-                                let mut line=Vec::new();
-                                let f = std::fs::File::open(realpath.as_path());
-                                let mut f = std::io::BufReader::new(f.unwrap());
-                                loop {
-                                    match f.read_until('\n' as u8,&mut line) {
-                                        Ok(l) => if l>0 { nodes.push(line.clone());line.clear() } else { break },
-                                        Err(_) => break
-                                    }
-                                }
-                                let len=nodes.len();
-                                if !nodes.is_empty() {
-                                    actions.push(
-                                        Change::NewNodes { up_context:vec!(l2.to_vec()),
-                                                           line_num: *line_num as u32,
-                                                           down_context: vec!(),
-                                                           nodes: nodes,
-                                                           flag:0 }
-                                    );
-                                }
-                                *line_num+=len;
-                                None
-                            } else {
-                                Some(&l2[..])
-                            }
-                        },
-                        Err(_)=>{
-                            panic!("error adding file {:?} (metadata failed)",realpath);
-                        }
-                    }
+                    record_file_addition(st, current_inode, parent_node, &db_external, realpath, basename)
+                        .map(|ref p| {l2 = p.clone(); &l2[..]})
                 }
             }
         } else {
@@ -317,9 +327,9 @@ pub fn record_all<'a,'b,'c,T> (
                         try!(record_all(
                             ws0, ws1,
                             repository, branch,
-                            actions, line_num,redundant,updatables,
-                            Some(current_inode), // parent_inode
+                            st,redundant,
                             Some(current_node), // parent_node
+                            Some(current_inode), // parent_inode
                             Inode::from_slice(v),// current_inode
                             realpath,
                             &k[INODE_SIZE..]));
@@ -343,11 +353,16 @@ pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&
     let db_inodes = repository.db_inodes();
     let mut ws0 = Workspace::new();
     let mut ws1 = Workspace::new();
+    let mut st = record_state {
+        line_num: 1,
+        actions: Vec::new(),
+        updatables : HashMap::new(),
+    };
     {
         let mut realpath=PathBuf::from(working_copy);
         try!(record_all(&mut ws0, &mut ws1,
-                        repository, &branch,
-                        &mut actions, &mut line_num,&mut redundant,&mut updatables,
+                        repository, &branch, &mut st,
+                        &mut redundant,
                         None,None, ROOT_INODE,&mut realpath,
                         &[]));
         debug!("record done, {} changes", actions.len());
@@ -356,5 +371,5 @@ pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&
     try!(branch.commit_branch(branch_name));
     //repository.set_db_nodes(branch_name, branch);
     debug!("remove_redundant_edges done");
-    Ok((actions,updatables))
+    Ok((st.actions,st.updatables))
 }
