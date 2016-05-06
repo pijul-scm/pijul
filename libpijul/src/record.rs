@@ -62,7 +62,6 @@ pub fn record_all<'a,'b,'c,T> (
     ws1:&mut Workspace,
     repository:&Transaction<'a,T>,
     branch:&Branch<'c,'b,'a,T>,
-    db_inodes:&Db<'b,'a,T>,
     actions:&mut Vec<Change>,
     line_num:&mut usize,
     redundant:&mut Vec<u8>,
@@ -73,6 +72,7 @@ pub fn record_all<'a,'b,'c,T> (
     realpath:&mut std::path::PathBuf,
     basename:&[u8])->Result<(),Error> {
 
+    let db_inodes = & repository.db_inodes();
     if parent_inode.is_some() { realpath.push(std::str::from_utf8(&basename).unwrap()) }
     debug!("realpath:{:?}",realpath);
     //debug!(target:"record_all","inode:{:?}",current_inode.to_hex());
@@ -316,7 +316,7 @@ pub fn record_all<'a,'b,'c,T> (
                         debug!("  child: {} + {}",&v[0..INODE_SIZE].to_hex(), std::str::from_utf8(&k[INODE_SIZE..]).unwrap());
                         try!(record_all(
                             ws0, ws1,
-                            repository, branch, db_inodes,
+                            repository, branch,
                             actions, line_num,redundant,updatables,
                             Some(current_inode), // parent_inode
                             Some(current_node), // parent_node
@@ -346,7 +346,7 @@ pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&
     {
         let mut realpath=PathBuf::from(working_copy);
         try!(record_all(&mut ws0, &mut ws1,
-                        repository, &branch, &db_inodes,
+                        repository, &branch,
                         &mut actions, &mut line_num,&mut redundant,&mut updatables,
                         None,None, ROOT_INODE,&mut realpath,
                         &[]));
