@@ -237,9 +237,9 @@ pub fn record_all<'a,'b,'c,T> (
                                 (if p==0 { 0o755 } else { p }) | is_dir
                             };
                             let mut nodes=Vec::new();
-                            let mut lnum= *line_num + 1;
-                            for i in 0..(LINE_SIZE-1) { l2[i]=(lnum & 0xff) as u8; lnum=lnum>>8 }
-
+                            unsafe {
+                                *(l2.as_mut_ptr() as *mut u32) = ((*line_num+1) as u32).to_le()
+                            }
                             let mut name=Vec::with_capacity(basename.len()+2);
                             name.push(((int_attr >> 8) & 0xff) as u8);
                             name.push((int_attr & 0xff) as u8);
