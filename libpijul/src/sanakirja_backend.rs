@@ -427,8 +427,7 @@ pub mod backend {
             if let Some((a,mut b)) = self.iter.next() {
                 let b0 = b.next();
                 assert!(b.next().is_none());
-                assert!(b0.is_some());
-                Some((a,b0.unwrap()))
+                Some((a,b0.unwrap_or(b"")))
             } else {
                 None
             }
