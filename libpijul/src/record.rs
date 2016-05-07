@@ -60,9 +60,10 @@ struct record_state {
     line_num: usize,
     updatables: HashMap<Vec<u8>, Inode >,
     actions: Vec<Change>,
+    redundant: Vec<u8>
 }
 
-fn record_file_addition<T>(st : &mut record_state, current_inode: Inode, parent_node: Option<&[u8]>, db_external: &Db<T>, realpath: &mut std::path::PathBuf, basename: &[u8]) -> Option< [u8; LINE_SIZE]> {
+fn record_file_addition<T>(st : &mut record_state, current_inode: Inode, parent_node: &[u8], db_external: &Db<T>, realpath: &mut std::path::PathBuf, basename: &[u8]) -> Option< [u8; LINE_SIZE]> {
     let mut l2=[0;LINE_SIZE];
     // File addition, create appropriate Newnodes.
     debug!("metadata for {:?}", realpath);
@@ -91,9 +92,9 @@ fn record_file_addition<T>(st : &mut record_state, current_inode: Inode, parent_
             }
             st.actions.push(
                 Change::NewNodes { up_context: vec!(
-                    if parent_node.unwrap().len()>LINE_SIZE {
-                        external_key(&db_external, parent_node.unwrap())
-                    } else {parent_node.unwrap().to_vec()}
+                    if parent_node.len()>LINE_SIZE {
+                        external_key(&db_external, parent_node)
+                    } else {parent_node.to_vec()}
                 ),
                                    line_num: st.line_num as u32,
                                    down_context: vec!(),
@@ -136,21 +137,91 @@ fn record_file_addition<T>(st : &mut record_state, current_inode: Inode, parent_
     }
 }
 
+fn record_moved_file<'c, 'b, 'a, T>(ws0: &mut Workspace, ws1: &mut Workspace, branch:&Branch<'c,'b,'a,T>,
+                                    repository: &Transaction<'a, T>, realpath: &mut std::path::PathBuf,
+                                    db_contents: &Db<T>, db_external: &Db<T>, st: &mut record_state,
+                                    parent_node: &[u8], current_node: &[u8], basename: &[u8], int_attr: usize,
+                                    old_attr: usize) -> Result <(), Error>{
+    // Delete all former names.
+    let mut edges=Vec::new();
+    // Now take all grandparents of l2, delete them.
+
+    let mut name=Vec::with_capacity(basename.len()+2);
+    name.push(((int_attr >> 8) & 0xff) as u8);
+    name.push((int_attr & 0xff) as u8);
+    name.extend(basename);
+    for parent in iterate_parents!(ws0, branch, &current_node[3..]) {
+        debug!("iterate_parents: {:?}", parent.to_hex());
+        let mut contents_name: Contents<T> = Contents::from_slice(&name[..]);
+        let mut previous_name: Contents<T> =
+            match db_contents.contents(&parent[1..(1+KEY_SIZE)]) {
+                None=>Contents::from_slice(b""),
+                Some(n)=>n
+            };
+        let name_changed = !super::eq(&mut contents_name,
+                                      &mut previous_name);
+        for grandparent in iterate_parents!(ws1, branch, &parent[1..(1+KEY_SIZE)]) {
+            debug!("iterate_parents: grandparent = {:?}", grandparent.to_hex());
+            if &grandparent[1..(1+KEY_SIZE)] != parent_node
+                || name_changed {
+                    edges.push(Edge {
+                        from:external_key(db_external, &parent[1..(1+KEY_SIZE)]),
+                        to:external_key(db_external, &grandparent[1..(1+KEY_SIZE)]),
+                        introduced_by:external_key(db_external, &grandparent[1+KEY_SIZE..])
+                    })
+                }
+        }
+    }
+    debug!("edges:{:?}",edges);
+    if !edges.is_empty(){
+        st.actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
+        debug!("parent_node: {:?}",parent_node);
+        debug!("ext key: {:?}",external_key(&db_external, parent_node));
+        debug!("ext key: {:?}",external_key(&db_external, &current_node[3..]));
+        st.actions.push(
+            Change::NewNodes { up_context:{
+                vec!(if parent_node.len()>LINE_SIZE { external_key(&db_external, parent_node) }
+                     else { parent_node.to_vec() })
+            },
+                               line_num: st.line_num as u32,
+                               down_context:{
+                                   let p = &current_node[3..];
+                                   vec!(if parent_node.len()>LINE_SIZE { external_key(&db_external, &p) }
+                                        else { parent_node.to_vec() })
+                               },
+                               nodes: vec!(name),
+                               flag:FOLDER_EDGE }
+            );
+    }
+    st.line_num += 1;
+    debug!("directory_flag:{}",old_attr&DIRECTORY_FLAG);
+    if old_attr & DIRECTORY_FLAG == 0 {
+        info!("retrieving");
+        //let time0=time::precise_time_s();
+        let ret = retrieve(ws0, branch, &current_node[3..]);
+        //let time1=time::precise_time_s();
+        //info!("retrieve took {}s, now calling diff", time1-time0);
+        debug!("diff");
+        try!(diff::diff(repository, branch, &mut st.line_num,&mut st.actions, &mut st.redundant,ret.unwrap(), realpath.as_path()));
+        //let time2=time::precise_time_s();
+        //info!("total diff took {}s", time2-time1);
+    };
+    Ok(())
+}
+
 fn record_all<'a,'b,'c,T> (
     ws0:&mut Workspace,
     ws1:&mut Workspace,
     repository:&Transaction<'a,T>,
     branch:&Branch<'c,'b,'a,T>,
     st: &mut record_state,
-    redundant:&mut Vec<u8>,
-    parent_node: Option< &[u8] >,
-    parent_inode:Option< Inode >,
+    parent: Option< (&[u8], Inode) >,
     current_inode: Inode,
     realpath:&mut std::path::PathBuf,
     basename:&[u8])->Result<(),Error> {
 
     let db_inodes = & repository.db_inodes();
-    if parent_inode.is_some() { realpath.push(std::str::from_utf8(&basename).unwrap()) }
+    if parent.is_some() { realpath.push(std::str::from_utf8(&basename).unwrap()) }
     debug!("realpath:{:?}",realpath);
     //debug!(target:"record_all","inode:{:?}",current_inode.to_hex());
 
@@ -158,7 +229,7 @@ fn record_all<'a,'b,'c,T> (
     let db_external = repository.db_external();
     let db_contents = repository.db_contents();
     let current_node=
-        if parent_inode.is_some() {
+        if let Some((parent_node, parent_inode)) = parent {
             match db_inodes.get(current_inode.as_ref()) {
                 Some(current_node)=>{
                     let old_attr=((current_node[1] as usize) << 8) | (current_node[2] as usize);
@@ -179,74 +250,9 @@ fn record_all<'a,'b,'c,T> (
                     debug!("current_node[0]={},old_attr={},int_attr={}",
                            current_node[0],old_attr,int_attr);
                     if !deleted && (current_node[0]==1 || old_attr!=int_attr) {
-                        // file moved
-
-                        // Delete all former names.
-                        let mut edges=Vec::new();
-                        // Now take all grandparents of l2, delete them.
-
-                        let mut name=Vec::with_capacity(basename.len()+2);
-                        name.push(((int_attr >> 8) & 0xff) as u8);
-                        name.push((int_attr & 0xff) as u8);
-                        name.extend(basename);
-                        for parent in iterate_parents!(ws0, branch, &current_node[3..]) {
-                            debug!("iterate_parents: {:?}", parent.to_hex());
-                            let mut contents_name: Contents<T> = Contents::from_slice(&name[..]);
-                            let mut previous_name: Contents<T> =
-                                match db_contents.contents(&parent[1..(1+KEY_SIZE)]) {
-                                    None=>Contents::from_slice(b""),
-                                    Some(n)=>n
-                                };
-                            let name_changed = !super::eq(&mut contents_name,
-                                                          &mut previous_name);
-                            for grandparent in iterate_parents!(ws1, branch, &parent[1..(1+KEY_SIZE)]) {
-                                debug!("iterate_parents: grandparent = {:?}", grandparent.to_hex());
-                                if &grandparent[1..(1+KEY_SIZE)] != parent_node.unwrap()
-                                    || name_changed {
-                                        edges.push(Edge {
-                                            from:external_key(&db_external, &parent[1..(1+KEY_SIZE)]),
-                                            to:external_key(&db_external, &grandparent[1..(1+KEY_SIZE)]),
-                                            introduced_by:external_key(&db_external, &grandparent[1+KEY_SIZE..])
-                                        })
-                                    }
-                            }
-                        }
-                        debug!("edges:{:?}",edges);
-                        if !edges.is_empty(){
-                            st.actions.push(Change::Edges{edges:edges,flag:DELETED_EDGE|FOLDER_EDGE|PARENT_EDGE});
-                            debug!("parent_node: {:?}",parent_node.unwrap());
-                            debug!("ext key: {:?}",external_key(&db_external, parent_node.unwrap()));
-                            debug!("ext key: {:?}",external_key(&db_external, &current_node[3..]));
-                            st.actions.push(
-                                Change::NewNodes { up_context:{
-                                    let p=parent_node.unwrap();
-                                    vec!(if p.len()>LINE_SIZE { external_key(&db_external, &p) }
-                                         else { p.to_vec() })
-                                },
-                                                   line_num: st.line_num as u32,
-                                                   down_context:{
-                                                       let p=&current_node[3..];
-                                                       vec!(if p.len()>LINE_SIZE { external_key(&db_external, &p) }
-                                                            else { p.to_vec() })
-                                                   },
-                                                   nodes: vec!(name),
-                                                   flag:FOLDER_EDGE }
-                            );
-                        }
-                        st.line_num += 1;
-                        debug!("directory_flag:{}",old_attr&DIRECTORY_FLAG);
-                        if old_attr & DIRECTORY_FLAG == 0 {
-                            info!("retrieving");
-                            //let time0=time::precise_time_s();
-                            let ret = retrieve(ws0, branch, &current_node[3..]);
-                            //let time1=time::precise_time_s();
-                            //info!("retrieve took {}s, now calling diff", time1-time0);
-                            debug!("diff");
-                            try!(diff::diff(repository, branch, &mut st.line_num,&mut st.actions, redundant,ret.unwrap(), realpath.as_path()));
-                            //let time2=time::precise_time_s();
-                            //info!("total diff took {}s", time2-time1);
-                        }
-
+                        try!(record_moved_file(ws0, ws1, branch, repository, realpath, &db_contents,
+                                               &db_external, st, parent_node, current_node, basename, int_attr,
+                                               old_attr));
                     } else if deleted || current_node[0]==2 {
 
                         let mut edges=Vec::new();
@@ -292,7 +298,7 @@ fn record_all<'a,'b,'c,T> (
                             let ret = retrieve(ws0, branch, &current_node[3..]);
                             //let time1=time::precise_time_s();
                             info!("now calling diff");
-                            try!(diff::diff(repository, branch, &mut st.line_num, &mut st.actions, redundant,
+                            try!(diff::diff(repository, branch, &mut st.line_num, &mut st.actions, &mut st.redundant,
                                             ret.unwrap(), realpath.as_path()));
                             //let time2=time::precise_time_s();
                             //info!(target:"record_all","total diff took {}s", time2-time1);
@@ -327,9 +333,8 @@ fn record_all<'a,'b,'c,T> (
                         try!(record_all(
                             ws0, ws1,
                             repository, branch,
-                            st,redundant,
-                            Some(current_node), // parent_node
-                            Some(current_inode), // parent_inode
+                            st,
+                            Some((current_node, current_inode)), // parent
                             Inode::from_slice(v),// current_inode
                             realpath,
                             &k[INODE_SIZE..]));
@@ -340,15 +345,11 @@ fn record_all<'a,'b,'c,T> (
             }
         }
     }
-    if parent_inode.is_some() { let _=realpath.pop(); }
+    if parent.is_some() { let _=realpath.pop(); }
     Ok(())
 }
 
 pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<LocalKey,Inode>),Error>{
-    let mut actions:Vec<Change> = Vec::new();
-    let mut line_num = 1;
-    let mut updatables:HashMap<LocalKey,Inode> = HashMap::new();
-    let mut redundant = Vec::new();
     let mut branch = try!(repository.db_nodes(branch_name));
     let db_inodes = repository.db_inodes();
     let mut ws0 = Workspace::new();
@@ -357,17 +358,17 @@ pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&
         line_num: 1,
         actions: Vec::new(),
         updatables : HashMap::new(),
+        redundant : Vec::new(),
     };
     {
         let mut realpath=PathBuf::from(working_copy);
         try!(record_all(&mut ws0, &mut ws1,
                         repository, &branch, &mut st,
-                        &mut redundant,
-                        None,None, ROOT_INODE,&mut realpath,
+                        None, ROOT_INODE,&mut realpath,
                         &[]));
-        debug!("record done, {} changes", actions.len());
+        debug!("record done, {} changes", st.actions.len());
     }
-    try!(super::graph::remove_redundant_edges(&mut ws0, &mut branch, &mut redundant));
+    try!(super::graph::remove_redundant_edges(&mut ws0, &mut branch, &mut st.redundant));
     try!(branch.commit_branch(branch_name));
     //repository.set_db_nodes(branch_name, branch);
     debug!("remove_redundant_edges done");
