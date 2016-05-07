@@ -866,3 +866,26 @@ fn add_edit_remove_pull() {
         Err(_) => (),
     }
 }
+
+#[test]
+fn pull_merge() {
+    let (tmp_dir, dir_a, dir_b) = mk_tmp_repo_pair();
+
+    let toto_path = &dir_a.join("toto");
+
+    let _ = create_file_random_content(toto_path);
+
+    let _ = add_one_file(&dir_a, toto_path).unwrap();
+
+    let _ = record_all(&dir_a, Some("add toto")).unwrap();
+
+    let titi_path = &dir_b.join("titi");
+
+    let _ = create_file_random_content(titi_path);
+
+    let _ = add_one_file(&dir_b, titi_path).unwrap();
+
+    let _ = record_all(&dir_b, Some("add titi")).unwrap();
+
+    pull_all(&dir_a, &dir_b).unwrap();
+}
