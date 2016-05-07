@@ -46,6 +46,40 @@ fn mk_tmp_repo_pair() -> (tempdir::TempDir, std::path::PathBuf, std::path::PathB
     (dir, dir_a, dir_b)
 }
 
+fn add_one_file(repo: &std::path::Path, file: &std::path::Path) -> Result< Option<()>, error::Error>
+{
+
+    let add_params = add::Params {
+        repository: Some(&repo),
+        touched_files: vec![&file],
+    };
+    add::run(&add_params)
+}
+
+fn record_all(repo: &std::path::Path, name: Option<&str>) -> Result<Option<()>, error::Error> {
+    let record_params = record::Params {
+        repository: Some(repo),
+        yes_to_all: true,
+        authors: Some(vec![]),
+        patch_name: name,
+    };
+    debug!("recording file remove!");
+    record::run(&record_params)
+}
+
+fn pull_all(from: &std::path::Path, to: &std::path::Path) -> Result<(), error::Error> {
+
+    let pull_params = pull::Params {
+        repository: Some(from),
+        remote_id: Some(to.to_str().unwrap()),
+        set_default: true,
+        port: None,
+        yes_to_all: true,
+    };
+    pull::run(&pull_params)
+
+}
+
 #[test]
 fn add_grandchild() -> () {
     let dir = mk_tmp_repo();
@@ -55,21 +89,13 @@ fn add_grandchild() -> () {
     {
         fs::File::create(&fpath).unwrap();
     }
-    let add_params = add::Params {
-        repository: Some(&dir.path()),
-        touched_files: vec![&fpath],
-    };
-    match add::run(&add_params).unwrap() {
+
+    add_one_file(&dir.path(), &fpath).unwrap() {
         Some(()) => (),
         None => panic!("no file added"),
     };
-    let record_params = record::Params {
-        repository: Some(&dir.path()),
-        yes_to_all: true,
-        patch_name: Some(""),
-        authors: Some(vec![]),
-    };
-    match record::run(&record_params).unwrap() {
+
+    match record_all(&dir.path(), Some("")).unwrap() {
         None => panic!("file add is not going to be recorded"),
         Some(()) => (),
     }
@@ -142,7 +168,7 @@ fn init_nested_forbidden() {
         Ok(_) => panic!("Creating a forbidden nested repository"),
 
         Err(error::Error::InARepository) => (),
-        Err(_) => panic!("Failed in a funky way while creating a nested repository")       
+        Err(_) => panic!("Failed in a funky way while creating a nested repository")
     }
 }
 
@@ -162,13 +188,8 @@ fn init_nested_allowed() {
 #[test]
 fn in_empty_dir_nothing_to_record() {
     let dir = mk_tmp_repo();
-    let record_params = record::Params {
-        repository: Some(&dir.path()),
-        yes_to_all: true,
-        patch_name: Some(""),
-        authors: Some(vec![]),
-    };
-    match record::run(&record_params).unwrap() {
+
+    match record_all(&dir.path(), Some("")).unwrap() {
         None => (),
         Some(()) => panic!("found something to record in an empty repository"),
     }
@@ -187,17 +208,12 @@ fn with_changes_sth_to_record() {
     }
 
     let add_params = add::Params { repository : Some(&dir.path()), touched_files : vec![&fpath] };
-    match add::run(&add_params).unwrap() {
+    match add_one_file(&dir.path(), &fpath).unwrap() {
         Some(()) => (),
         None => panic!("no file added"),
     };
-    let record_params = record::Params {
-        repository: Some(&dir.path()),
-        yes_to_all: true,
-        patch_name: Some(""),
-        authors: Some(vec![]),
-    };
-    match record::run(&record_params).unwrap() {
+
+    match record_all(&dir.path(), Some("")).unwrap() {
         None => panic!("file add is not going to be recorded"),
         Some(()) => (),
     }
@@ -211,11 +227,8 @@ fn add_remove_nothing_to_record() {
     {
         fs::File::create(&fpath).unwrap();
     }
-    let add_params = add::Params {
-        repository: Some(&dir.path()),
-        touched_files: vec![&fpath],
-    };
-    match add::run(&add_params).unwrap() {
+
+    match add_one_file(&dir.path(), &fpath()).unwrap() {
         Some(()) => (),
         None => panic!("no file added"),
     };
@@ -226,13 +239,8 @@ fn add_remove_nothing_to_record() {
     };
 
     println!("removed");
-    let record_params = record::Params {
-        repository: Some(&dir.path()),
-        yes_to_all: true,
-        authors: Some(vec![]),
-        patch_name: Some(""),
-    };
-    match record::run(&record_params).unwrap() {
+
+    match record_all(&dir.path(), Some("").unwrap()) {
         None => (),
         Some(()) => panic!("add remove left a trace"),
     }
@@ -510,6 +518,17 @@ fn random_text() -> Vec<String> {
     text
 }
 
+fn create_file_random_content(path: &std::path::Path) -> Vec<String> {
+    let text0 = random_text();
+    {
+        let mut file = fs::File::create(&path).unwrap();
+        for line in text0.iter() {
+            file.write_all(line.as_bytes()).unwrap();
+        }
+    };
+    text0
+}
+
 fn move_to_file_(edit_file: bool) {
     env_logger::init().unwrap_or(());
     let dir = tempdir::TempDir::new("pijul").unwrap();
@@ -530,13 +549,7 @@ fn move_to_file_(edit_file: bool) {
     init::run(&init_params_b).unwrap();
     let toto_path = &dir_a.join("toto");
 
-    let text0 = random_text();
-    {
-        let mut file = fs::File::create(&toto_path).unwrap();
-        for line in text0.iter() {
-            file.write_all(line.as_bytes()).unwrap();
-        }
-    }
+    let text0 = create_file_random_content(&toto_path);
     println!("Checking {:?}", toto_path);
     {
         let metadata = fs::metadata(toto_path);
@@ -790,19 +803,13 @@ fn add_edit_remove_pull() {
 
     let toto_path = &dir_a.join("toto");
 
-    let text0 = random_text();
-    {
-        let mut file = fs::File::create(&toto_path).unwrap();
-        for line in text0.iter() {
-            file.write_all(line.as_bytes()).unwrap();
-        }
-    }
+    create_file_random_content(&toto_path);
 
     let add_params = add::Params {
         repository: Some(&dir_a),
         touched_files: vec![&toto_path],
     };
-    match add::run(&add_params).unwrap() {
+    match add_one_file(&dir_a, &toto_path).unwrap() {
         Some(()) => (),
         None => panic!("no file added"),
     };
