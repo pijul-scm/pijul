@@ -18,27 +18,26 @@
 */
 extern crate libc;
 
-use libc::{c_char,c_int,c_void,malloc,size_t};
+use libc::{c_char,c_int,c_void,c_uint};
 extern crate libpijul;
 use libpijul::*;
-use libpijul::patch::{HASH_SIZE,LocalKey,Patch,Change,read_changes_from_file};
-use libpijul::fs_representation::{branch_changes_file};
-use std::ffi::CStr;
+use libpijul::backend::Branch;
+use libpijul::patch::{KEY_SIZE,LocalKey,Patch};
 use std::ffi::CString;
 use std::path::{Path};
-use std::ptr::copy_nonoverlapping;
 use std::collections::{HashMap,HashSet};
-use std::collections::hash_set::Iter;
-use std::mem::drop;
-use std::io::prelude::*;
+
+use std::os::unix::io::{FromRawFd};
+
+
 #[no_mangle]
 pub extern "C" fn pijul_open_repository(path:*const c_char,repository:*mut *mut c_void) -> c_int {
     unsafe {
         let p=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(path).to_bytes());
         let path=Path::new(p);
-        match Repository::new(&path){
+        match Repository::open(&path){
             Ok(repo)=>{
-                *repository=std::mem::transmute(Box::new(repo));
+                *repository = std::mem::transmute(Box::new(repo));
                 0
             },
             Err(_)=>{
@@ -51,250 +50,240 @@ pub extern "C" fn pijul_open_repository(path:*const c_char,repository:*mut *mut 
 #[no_mangle]
 pub extern "C" fn pijul_close_repository(repository:*const c_void) {
     unsafe {
-        let _:Box<Repository>=std::mem::transmute(repository);
-    }
-}
-
-
-#[no_mangle]
-pub extern "C" fn pijul_add_file(repository:*mut c_void,path:*const c_char,is_dir:c_int) {
-    unsafe {
-        let p=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(path).to_bytes());
-        let path=Path::new(p);
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        repository.add_file(&path,is_dir!=0);
-        std::mem::forget(repository)
+        let r:Box<Repository>=std::mem::transmute(repository);
+        std::mem::drop(*r)
     }
 }
 
 #[no_mangle]
-pub extern "C" fn pijul_move_file(repository:*mut c_void,patha:*const c_char,pathb:*const c_char,is_dir:c_int) {
+pub unsafe extern "C" fn pijul_mut_txn_begin(repository:*const c_void, transaction:*mut *mut c_void) -> c_int {
+    let r:Box<Repository>=std::mem::transmute(repository);
+    let result = match r.mut_txn_begin() {
+        Ok(t) => {
+            *transaction = std::mem::transmute(Box::new(t));
+            0
+        },
+        _ => {
+            -1
+        }
+    };
+    std::mem::forget(r);
+    result
+}
+
+
+
+#[no_mangle]
+pub unsafe extern "C" fn pijul_add_file(transaction:*mut c_void,path:*const c_char,is_dir:c_int)->c_int {
+    let p=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(path).to_bytes());
+    let path=Path::new(p);
+    let mut repository:Box<Transaction>=std::mem::transmute(transaction);
+    let result = match repository.add_file(&path,is_dir!=0) {
+        Ok(_) => 0,
+        _ => -1
+    };
+    std::mem::forget(repository);
+    result
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pijul_list_files(transaction:*mut c_void, p_c_list:*mut *mut *mut c_char, c_len:*mut c_uint)->c_int {
+    let repository:Box<Transaction>=std::mem::transmute(transaction);
+    let result = match repository.list_files() {
+        Ok(list) => {
+
+            let c_list = libc::malloc(list.len() * std::mem::size_of::<*const c_void>()) as *mut *mut c_char;
+            *p_c_list = c_list;
+
+            let mut i = 0;
+            for x in list.iter() {
+                if let Some(y) = x.to_str().and_then(|y| CString::new(y).ok()) {
+                    *(c_list.offset(i)) = y.into_raw()
+                } else {
+                    for _ in 0..i {
+                        libc::free(*(c_list.offset(i)) as *mut c_void)
+                    }
+                    libc::free(c_list as *mut c_void);
+                    *p_c_list = std::ptr::null_mut();
+                    return -1
+                }
+                i+=1
+            }
+            *c_len = list.len() as c_uint;
+            0
+        },
+        _ => -1
+    };
+    std::mem::forget(repository);
+    result
+}
+
+#[no_mangle]
+pub extern "C" fn pijul_move_file(repository:*mut c_void,patha:*const c_char,pathb:*const c_char,is_dir:c_int)->c_int {
     unsafe {
         let pa=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(patha).to_bytes());
         let patha=Path::new(pa);
         let pb=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(pathb).to_bytes());
         let pathb=Path::new(pb);
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        repository.move_file(&patha,&pathb,is_dir!=0);
-        std::mem::forget(repository)
+        let mut repository:Box<Transaction>=std::mem::transmute(repository);
+        let result = match repository.move_file(&patha,&pathb,is_dir!=0) {
+            Ok(_) => 0,
+            _ => -1
+        };
+        std::mem::forget(repository);
+        result
     }
 }
 
-
 #[no_mangle]
-pub extern "C" fn pijul_remove_file(repository:*mut c_void,path:*const c_char) {
+pub extern "C" fn pijul_remove_file(repository:*mut c_void,path:*const c_char)->c_int {
     unsafe {
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
         let p=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(path).to_bytes());
         let path=Path::new(p);
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        repository.remove_file(&path);
-        std::mem::forget(repository)
-    }
-}
-
-
-#[no_mangle]
-pub extern "C" fn pijul_get_current_branch(repository:*mut c_void)->*mut c_char {
-    unsafe {
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        let p={
-            let cur=repository.get_current_branch();
-            let p:*mut c_char=malloc(cur.len()+1) as *mut c_char;
-            *(p.offset(cur.len() as isize))=0;
-            copy_nonoverlapping(cur.as_ptr() as *const c_void,p as *mut c_void,cur.len() as size_t);
-            p
+        let mut repository:Box<Transaction>=std::mem::transmute(repository);
+        let result = match repository.remove_file(&path) {
+            Ok(_) => 0,
+            _ => -1
         };
         std::mem::forget(repository);
-        p
+        result
     }
 }
 
 #[no_mangle]
-pub extern "C" fn pijul_new_internal(repository:*mut c_void,result:*mut c_char) {
-    unsafe {
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        repository.new_internal(std::slice::from_raw_parts_mut(result as *mut u8,HASH_SIZE));
-        std::mem::forget(repository);
-    }
+pub unsafe extern "C" fn pijul_get_branch(repository:*mut c_void, c_branch:*const c_char, r:*mut *mut c_void) -> c_int {
+    
+    let repository:Box<Transaction>=std::mem::transmute(repository);
+    let branch=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_branch).to_bytes());
+    let result = if let Ok(branch) = repository.db_nodes(branch) {
+        *r = std::mem::transmute(Box::new(branch));
+        0
+    } else {
+        -1
+    };
+    std::mem::forget(repository);
+    result
 }
 
 
 #[no_mangle]
-pub extern "C" fn pijul_register_hash(repository:*mut c_void,internal:*mut c_char,external:*mut c_char,external_len:size_t) {
-    unsafe {
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        repository.register_hash(std::slice::from_raw_parts_mut(internal as *mut u8,HASH_SIZE),
-                                 std::slice::from_raw_parts_mut(external as *mut u8,external_len));
-        std::mem::forget(repository);
-    }
+pub unsafe extern "C" fn pijul_retrieve_and_output(repository:*mut c_void, c_branch:*const c_void, c_key:*const c_char, output:c_int) -> c_int {
+    
+    let repository:Box<Transaction>=std::mem::transmute(repository);
+    let branch:Box<Branch<_>>=std::mem::transmute(c_branch);
+    // let branch=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_branch).to_bytes());
+    let key=std::slice::from_raw_parts(c_key as *const u8, KEY_SIZE);
+    let mut file = std::fs::File::from_raw_fd(output);
+    let result = if let Ok(_) = repository.retrieve_and_output(&branch, key, &mut file) {
+        0
+    } else {
+        -1
+    };
+    std::mem::forget(repository);
+    std::mem::forget(branch);
+    result
 }
 
-
 #[no_mangle]
-pub extern "C" fn pijul_record(repository:*mut c_void,working_copy:*const c_char,changes:*mut *mut c_void, updates:*mut*mut c_void)->c_int {
-    unsafe {
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        let p=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(working_copy).to_bytes());
-        let path=Path::new(p);
-        match repository.record(&path) {
-            Ok((a,b))=>{
-                *changes=std::mem::transmute(Box::new(a));
-                *updates=std::mem::transmute(Box::new(b));
-                std::mem::forget(repository);
-                0
-            },
-            Err(_)=> {
-                std::mem::forget(repository);
-                -1
-            }
-        }
-    }
-}
-
-
-#[no_mangle]
-pub extern "C" fn pijul_has_patch(repository:*mut c_void,branch:*const c_char, external_hash:*const c_char, external_hash_len:size_t)->c_int {
-    unsafe {
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        let branch=std::ffi::CStr::from_ptr(branch).to_bytes();
-        let hash=std::slice::from_raw_parts(external_hash as *const u8,external_hash_len as usize);
-        let ret=match repository.has_patch(branch,hash) {
-            Ok(true)=>1,
-            Ok(false)=>0,
-            _=> (-1)
+pub unsafe extern "C" fn pijul_apply_patches(repository:*mut c_void,
+                                             c_branch:*const c_char,
+                                             c_path:*const c_char,
+                                             c_remote_patches:*const c_void,
+                                             c_local_patches:*const c_void) -> c_int {
+    
+    let mut repository:Box<Transaction>=std::mem::transmute(repository);
+    let branch=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_branch).to_bytes());
+    let path=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_path).to_bytes());
+    let remote_patches:Box<HashSet<Vec<u8>>> =
+        if c_remote_patches.is_null() {
+            Box::new(HashSet::new())
+        } else {
+            std::mem::transmute(c_remote_patches)
         };
-        std::mem::forget(repository);
-        ret
-    }
-}
-
-
-
-#[no_mangle]
-pub extern "C" fn pijul_new_patch(changes:*const c_void)->*const c_void {
-    unsafe {
-        let changes:Box<Vec<Change>>=std::mem::transmute(changes);
-        let mut patch=Patch::empty();
-        patch.changes= *changes;
-        std::mem::transmute(Box::new(patch))
-    }
-}
-
-
-#[no_mangle]
-pub extern "C" fn pijul_apply(repository:*mut c_void,patch:*const c_void,internal:*const c_char)->c_int {
-    unsafe {
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        let patch:&Patch=std::mem::transmute(patch);
-        let internal:&[u8]=std::slice::from_raw_parts(internal as *const u8, HASH_SIZE as usize);
-        let local_only=HashSet::new(); // Incorrect
-        let ret=match repository.apply(patch,internal,&local_only) {
-            Ok(_)=>0,
-            Err(_)=>(-1)
+    let local_patches:Box<HashSet<Vec<u8>>> =
+        if c_remote_patches.is_null() {
+            Box::new(HashSet::new())
+        } else {
+            std::mem::transmute(c_local_patches)
         };
-        std::mem::forget(repository);
-        ret
+    let result = if let Ok(()) = repository.apply_patches(branch, path, &remote_patches, &local_patches) {
+        0
+    } else {
+        -1
+    };
+    std::mem::forget(repository);
+    if !c_remote_patches.is_null() {
+        std::mem::forget(remote_patches);
     }
+    if !c_local_patches.is_null() {
+        std::mem::forget(local_patches);
+    }
+    result
 }
 
 #[no_mangle]
-pub extern "C" fn pijul_write_changes_file(repository:*mut c_void,path:*const c_char)->c_int {
-    unsafe {
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        let p=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(path).to_bytes());
-        let path=Path::new(p);
-        let ret=match repository.write_changes_file(path) {
-            Ok(_)=>0,
-            Err(_)=>(-1)
-        };
-        std::mem::forget(repository);
-        ret
-    }
-}
+pub unsafe extern "C" fn pijul_apply_local_patch(repository:*mut c_void,
+                                                 c_branch:*const c_char,
+                                                 c_path:*const c_char,
+                                                 c_patch:*const c_void,
+                                                 c_inode_updates:*const c_void) -> c_int {
+    
+    let mut repository:Box<Transaction>=std::mem::transmute(repository);
+    let branch=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_branch).to_bytes());
+    let path=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_path).to_bytes());
+    let patch:Box<Patch> = std::mem::transmute(c_patch);
+    let inode_updates:Box<HashMap<LocalKey, Inode>> = std::mem::transmute(c_inode_updates);
 
-
-#[no_mangle]
-pub extern "C" fn pijul_sync_file_additions(repository:*mut c_void,changes:*const c_void,updates:*const c_void,internal:*const c_char) {
-    unsafe {
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        let changes:&Vec<Change>=std::mem::transmute(changes);
-        let updates:&HashMap<LocalKey,Inode>=std::mem::transmute(updates);
-        let internal=std::slice::from_raw_parts(internal as *const u8,HASH_SIZE as usize);
-        repository.sync_file_additions(changes,updates,internal);
-        std::mem::forget(repository);
-    }
-}
-
-
-#[no_mangle]
-pub extern "C" fn pijul_output_repository(repository:*mut c_void,working_copy:*const c_char,pending:*const c_void)->c_int {
-    unsafe {
-        let mut repository:Box<Repository>=std::mem::transmute(repository);
-        let p=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(working_copy).to_bytes());
-        let path=Path::new(p);
-        let pending:&Patch=std::mem::transmute(pending);
-
-        let ret=match repository.output_repository(path,pending) {
-            Ok(_)=>0,
-            Err(_)=>(-1)
-        };
-        std::mem::forget(repository);
-        ret
-   }
-}
-
-#[no_mangle]
-pub extern "C" fn pijul_load_patches(path:*const c_char,branch:*const c_char,
-                                     p_hash:*mut *mut c_void,
-                                     p_iter:*mut *mut c_void) {
-    unsafe {
-        //let path=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(path).to_bytes());
-        let branch_file=std::ffi::CStr::from_ptr(branch).to_bytes();
-        //let changes_file=branch_changes_file(Path::new(path),branch);
-        let changes:Box<HashSet<Vec<u8>>>=Box::new(read_changes_from_file(&changes_file).unwrap_or(HashSet::new()));
-        {
-            let iter:Box<Iter<Vec<u8>>>=Box::new(changes.iter());
-            *p_iter = std::mem::transmute(iter);
-        }
-        *p_hash = std::mem::transmute(changes);
-    }
-}
-#[no_mangle]
-pub extern "C" fn  pijul_next_patch(p_iter:*mut c_void, next:*mut *mut c_char, len:*mut c_int)->c_int {
-    unsafe {
-        let mut iter:Box<Iter<Vec<u8>>>= std::mem::transmute(p_iter);
-        match iter.next() {
-            Some(p)=>{
-                *next = p.as_ptr() as *mut c_char;
-                *len = p.len() as c_int;
-                std::mem::forget(iter);
-                0
-            },
-            None=> {
-                std::mem::forget(iter);
-                1
-            }
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn pijul_unload_patches(p_hash:*mut c_void,
-                                       p_iter:*mut c_void) {
-    unsafe {
-        let _:Box<HashSet<Vec<u8>>> = std::mem::transmute(p_hash);
-        let _:Box<Iter<Vec<u8>>>= std::mem::transmute(p_iter);
-    }
+    let result = if let Ok(()) = repository.apply_local_patch(branch, path, *patch, &inode_updates) {
+        0
+    } else {
+        -1
+    };
+    std::mem::forget(repository);
+    std::mem::forget(inode_updates);
+    result
 }
 
 
 #[no_mangle]
-pub extern "C" fn pijul_create_repository(p: *const c_char) -> () {
-    unsafe {
-        println!("10:26");
-        let p = std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(p).to_bytes());
-        let path = Path::new(p);
-        fs_representation::create(&path).unwrap();
-    }
+pub unsafe extern "C" fn pijul_record(repository:*mut c_void,
+                                      c_branch:*const c_char,
+                                      c_path:*const c_char,
+                                      c_patch:*mut *mut c_void,
+                                      c_inode_updates: *mut *mut c_void) -> c_int {
+    
+    let mut repository:Box<Transaction>=std::mem::transmute(repository);
+    let branch=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_branch).to_bytes());
+    let path=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_path).to_bytes());
+    let result = if let Ok((patch, inode_updates)) = repository.record(path, branch) {
+        *c_patch = std::mem::transmute(Box::new(patch));
+        *c_inode_updates = std::mem::transmute(Box::new(inode_updates));
+        0
+    } else {
+        -1
+    };
+    std::mem::forget(repository);
+    result
 }
+
+
+#[no_mangle]
+pub unsafe extern "C" fn pijul_output_repository(repository:*mut c_void,
+                                                 c_branch:*const c_char,
+                                                 c_working_copy:*const c_char,
+                                                 c_pending:*const c_void) -> c_int {
+    
+    let mut repository:Box<Transaction>=std::mem::transmute(repository);
+    let pending:Box<Patch> = std::mem::transmute(c_pending);
+    let branch=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_branch).to_bytes());
+    let working_copy=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_working_copy).to_bytes());
+    let result = if let Ok(()) = repository.output_repository(branch, working_copy, &pending) {
+        0
+    } else {
+        -1
+    };
+    std::mem::forget(repository);
+    std::mem::forget(pending);
+    result
+}
+
