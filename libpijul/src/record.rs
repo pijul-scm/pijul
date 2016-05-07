@@ -57,6 +57,8 @@ macro_rules! iterate_parents {
 }
 
 struct record_state {
+    ws0: Workspace,
+    ws1: Workspace,
     line_num: usize,
     updatables: HashMap<Vec<u8>, Inode >,
     actions: Vec<Change>,
@@ -137,9 +139,9 @@ fn record_file_addition<T>(st : &mut record_state, current_inode: Inode, parent_
     }
 }
 
-fn record_moved_file<'c, 'b, 'a, T>(ws0: &mut Workspace, ws1: &mut Workspace, branch:&Branch<'c,'b,'a,T>,
-                                    repository: &Transaction<'a, T>, realpath: &mut std::path::PathBuf,
-                                    db_contents: &Db<T>, db_external: &Db<T>, st: &mut record_state,
+fn record_moved_file<'c, 'b, 'a, T>(branch:&Branch<'c,'b,'a,T>, repository: &Transaction<'a, T>,
+                                    realpath: &mut std::path::PathBuf, db_contents: &Db<T>,
+                                    db_external: &Db<T>, st: &mut record_state,
                                     parent_node: &[u8], current_node: &[u8], basename: &[u8], int_attr: usize,
                                     old_attr: usize) -> Result <(), Error>{
     // Delete all former names.
@@ -150,7 +152,7 @@ fn record_moved_file<'c, 'b, 'a, T>(ws0: &mut Workspace, ws1: &mut Workspace, br
     name.push(((int_attr >> 8) & 0xff) as u8);
     name.push((int_attr & 0xff) as u8);
     name.extend(basename);
-    for parent in iterate_parents!(ws0, branch, &current_node[3..]) {
+    for parent in iterate_parents!(&mut st.ws0, branch, &current_node[3..]) {
         debug!("iterate_parents: {:?}", parent.to_hex());
         let mut contents_name: Contents<T> = Contents::from_slice(&name[..]);
         let mut previous_name: Contents<T> =
@@ -160,7 +162,7 @@ fn record_moved_file<'c, 'b, 'a, T>(ws0: &mut Workspace, ws1: &mut Workspace, br
             };
         let name_changed = !super::eq(&mut contents_name,
                                       &mut previous_name);
-        for grandparent in iterate_parents!(ws1, branch, &parent[1..(1+KEY_SIZE)]) {
+        for grandparent in iterate_parents!(&mut st.ws1, branch, &parent[1..(1+KEY_SIZE)]) {
             debug!("iterate_parents: grandparent = {:?}", grandparent.to_hex());
             if &grandparent[1..(1+KEY_SIZE)] != parent_node
                 || name_changed {
@@ -198,7 +200,7 @@ fn record_moved_file<'c, 'b, 'a, T>(ws0: &mut Workspace, ws1: &mut Workspace, br
     if old_attr & DIRECTORY_FLAG == 0 {
         info!("retrieving");
         //let time0=time::precise_time_s();
-        let ret = retrieve(ws0, branch, &current_node[3..]);
+        let ret = retrieve(&mut st.ws0, branch, &current_node[3..]);
         //let time1=time::precise_time_s();
         //info!("retrieve took {}s, now calling diff", time1-time0);
         debug!("diff");
@@ -210,8 +212,6 @@ fn record_moved_file<'c, 'b, 'a, T>(ws0: &mut Workspace, ws1: &mut Workspace, br
 }
 
 fn record_all<'a,'b,'c,T> (
-    ws0:&mut Workspace,
-    ws1:&mut Workspace,
     repository:&Transaction<'a,T>,
     branch:&Branch<'c,'b,'a,T>,
     st: &mut record_state,
@@ -250,15 +250,15 @@ fn record_all<'a,'b,'c,T> (
                     debug!("current_node[0]={},old_attr={},int_attr={}",
                            current_node[0],old_attr,int_attr);
                     if !deleted && (current_node[0]==1 || old_attr!=int_attr) {
-                        try!(record_moved_file(ws0, ws1, branch, repository, realpath, &db_contents,
+                        try!(record_moved_file(branch, repository, realpath, &db_contents,
                                                &db_external, st, parent_node, current_node, basename, int_attr,
                                                old_attr));
                     } else if deleted || current_node[0]==2 {
 
                         let mut edges=Vec::new();
                         // Now take all grandparents of l2, delete them.
-                        for parent in iterate_parents!(ws0, branch, &current_node[3..]) {
-                            for grandparent in iterate_parents!(ws1, branch, &parent[1..(1+KEY_SIZE)]) {
+                        for parent in iterate_parents!(&mut st.ws0, branch, &current_node[3..]) {
+                            for grandparent in iterate_parents!(&mut st.ws1, branch, &parent[1..(1+KEY_SIZE)]) {
                                 edges.push(Edge {
                                     from: external_key(&db_external, &parent[1..(1+KEY_SIZE)]),
                                     to: external_key(&db_external, &grandparent[1..(1+KEY_SIZE)]),
@@ -271,12 +271,12 @@ fn record_all<'a,'b,'c,T> (
                         let mut file_edges=vec!();
                         {
                             debug!("del={}",current_node.to_hex());
-                            let ret = retrieve(ws0, branch, &current_node[3..]).unwrap();
+                            let ret = retrieve(&mut st.ws0, branch, &current_node[3..]).unwrap();
                             for l in ret.lines {
                                 if l.key.len()>0 {
                                     let ext_key = external_key(&db_external, l.key);
                                     debug!("ext_key={}",ext_key.to_hex());
-                                    for v in iterate_parents!(ws0, branch, l.key) {
+                                    for v in iterate_parents!(&mut st.ws0, branch, l.key) {
                                         
                                         debug!("v={}",v.to_hex());
                                         if v[0] & FOLDER_EDGE != 0 { &mut edges } else { &mut file_edges }
@@ -295,7 +295,7 @@ fn record_all<'a,'b,'c,T> (
                     } else if current_node[0]==0 {
                         if old_attr & DIRECTORY_FLAG == 0 {
                             //let time0=time::precise_time_s();
-                            let ret = retrieve(ws0, branch, &current_node[3..]);
+                            let ret = retrieve(&mut st.ws0, branch, &current_node[3..]);
                             //let time1=time::precise_time_s();
                             info!("now calling diff");
                             try!(diff::diff(repository, branch, &mut st.line_num, &mut st.actions, &mut st.redundant,
@@ -331,7 +331,6 @@ fn record_all<'a,'b,'c,T> (
                     if v.len()>0 {
                         debug!("  child: {} + {}",&v[0..INODE_SIZE].to_hex(), std::str::from_utf8(&k[INODE_SIZE..]).unwrap());
                         try!(record_all(
-                            ws0, ws1,
                             repository, branch,
                             st,
                             Some((current_node, current_inode)), // parent
@@ -352,23 +351,22 @@ fn record_all<'a,'b,'c,T> (
 pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<LocalKey,Inode>),Error>{
     let mut branch = try!(repository.db_nodes(branch_name));
     let db_inodes = repository.db_inodes();
-    let mut ws0 = Workspace::new();
-    let mut ws1 = Workspace::new();
     let mut st = record_state {
         line_num: 1,
         actions: Vec::new(),
         updatables : HashMap::new(),
         redundant : Vec::new(),
+        ws0: Workspace::new(),
+        ws1: Workspace::new()
     };
     {
         let mut realpath=PathBuf::from(working_copy);
-        try!(record_all(&mut ws0, &mut ws1,
-                        repository, &branch, &mut st,
+        try!(record_all(repository, &branch, &mut st,
                         None, ROOT_INODE,&mut realpath,
                         &[]));
         debug!("record done, {} changes", st.actions.len());
     }
-    try!(super::graph::remove_redundant_edges(&mut ws0, &mut branch, &mut st.redundant));
+    try!(super::graph::remove_redundant_edges(&mut st.ws0, &mut branch, &mut st.redundant));
     try!(branch.commit_branch(branch_name));
     //repository.set_db_nodes(branch_name, branch);
     debug!("remove_redundant_edges done");
