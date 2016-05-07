@@ -90,7 +90,7 @@ fn add_grandchild() -> () {
         fs::File::create(&fpath).unwrap();
     }
 
-    add_one_file(&dir.path(), &fpath).unwrap() {
+    match add_one_file(&dir.path(), &fpath).unwrap() {
         Some(()) => (),
         None => panic!("no file added"),
     };
@@ -228,7 +228,11 @@ fn add_remove_nothing_to_record() {
         fs::File::create(&fpath).unwrap();
     }
 
-    match add_one_file(&dir.path(), &fpath()).unwrap() {
+    let add_params = add::Params {
+        repository: Some(&dir.path()),
+        touched_files: vec![&fpath],
+    };
+    match add::run(&add_params).unwrap() {
         Some(()) => (),
         None => panic!("no file added"),
     };
@@ -240,7 +244,7 @@ fn add_remove_nothing_to_record() {
 
     println!("removed");
 
-    match record_all(&dir.path(), Some("").unwrap()) {
+    match record_all(&dir.path(), Some("")).unwrap() {
         None => (),
         Some(()) => panic!("add remove left a trace"),
     }
