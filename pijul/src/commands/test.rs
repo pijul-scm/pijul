@@ -613,7 +613,7 @@ fn move_to_file_(edit_file: bool) {
     };
 
     match record::run(&record_params).unwrap() {
-        None if text0 != text1 => panic!("file move is not going to be recorded"),
+        None if text0 != text1 => panic!("file edition is not going to be recorded"),
         _ => (),
     };
     println!("record command finished");
@@ -892,4 +892,62 @@ fn pull_merge() {
     let _ = record_all(&dir_b, Some("add titi")).unwrap();
 
     pull_all(&dir_a, &dir_b).unwrap();
+}
+
+#[test]
+fn add_record_edit_record() {
+    let dir = mk_tmp_repo();
+    let fpath = &dir.path().join("toto");
+    {
+        fs::File::create(&fpath).unwrap();
+    }
+
+    let add_params = add::Params {
+        repository: Some(&dir.path()),
+        touched_files: vec![&fpath],
+    };
+    match add::run(&add_params).unwrap() {
+        Some(()) => (),
+        None => panic!("no file added"),
+    };
+    println!("added");
+
+    let text0 = random_text();
+    {
+        let mut file = fs::File::create(&fpath).unwrap();
+        for line in text0.iter() {
+            file.write_all(line.as_bytes()).unwrap();
+        }
+    };
+
+    match record_all(&dir.path(), Some("")).unwrap() {
+        None => panic!("file filling will not be recorded"),
+        Some(()) => ()
+    }
+
+
+    let text0 = random_text();
+    {
+        let mut file = fs::File::create(&fpath).unwrap();
+        for line in text0.iter() {
+            file.write_all(line.as_bytes()).unwrap();
+        }
+    };
+
+    match record_all(&dir.path(), Some("")).unwrap() {
+        None => panic!("file editing will not be recorded"),
+        Some(()) => ()
+    }
+
+
+    {
+        let mut file = fs::File::create(&fpath).unwrap();
+    }
+
+
+    match record_all(&dir.path(), Some("")).unwrap() {
+        None => panic!("file emptying will not be recorded"),
+        Some(()) => ()
+    }
+
 }
