@@ -36,12 +36,12 @@ use std::os::unix::fs::PermissionsExt;
 
 
 #[cfg(not(windows))]
-fn permissions(attr:&std::fs::Metadata)->usize{
-    attr.permissions().mode() as usize
+fn permissions(attr:&std::fs::Metadata)->Option<usize> {
+    Some(attr.permissions().mode() as usize)
 }
 #[cfg(windows)]
-fn permissions(attr:&std::fs::Metadata)->usize{
-    0
+fn permissions(attr:&std::fs::Metadata)->Option<usize> {
+    None
 }
 
 
@@ -56,7 +56,7 @@ macro_rules! iterate_parents {
     }
 }
 
-struct record_state {
+struct RecordState {
     ws0: Workspace,
     ws1: Workspace,
     line_num: usize,
@@ -65,17 +65,16 @@ struct record_state {
     redundant: Vec<u8>
 }
 
-fn record_file_addition<T>(st : &mut record_state, current_inode: Inode, parent_node: &[u8], db_external: &Db<T>, realpath: &mut std::path::PathBuf, basename: &[u8]) -> Option< [u8; LINE_SIZE]> {
+fn record_file_addition<T>(st : &mut RecordState, current_inode: Inode, parent_node: &[u8], db_external: &Db<T>, realpath: &mut std::path::PathBuf, basename: &[u8]) -> Option< [u8; LINE_SIZE]> {
     let mut l2=[0;LINE_SIZE];
     // File addition, create appropriate Newnodes.
     debug!("metadata for {:?}", realpath);
     match metadata(&realpath) {
         Ok(attr) => {
             let int_attr={
-                let attr=metadata(&realpath).unwrap();
-                let p=permissions(&attr);
+                let p=permissions(&attr).unwrap_or(0o755);
                 let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
-                (if p==0 { 0o755 } else { p }) | is_dir
+                p | is_dir
             };
             let mut nodes=Vec::new();
             unsafe {
@@ -141,7 +140,7 @@ fn record_file_addition<T>(st : &mut record_state, current_inode: Inode, parent_
 
 fn record_moved_file<'c, 'b, 'a, T>(branch:&Branch<'c,'b,'a,T>, repository: &Transaction<'a, T>,
                                     realpath: &mut std::path::PathBuf, db_contents: &Db<T>,
-                                    db_external: &Db<T>, st: &mut record_state,
+                                    db_external: &Db<T>, st: &mut RecordState,
                                     parent_node: &[u8], current_node: &[u8], basename: &[u8], int_attr: usize,
                                     old_attr: usize) -> Result <(), Error>{
     // Delete all former names.
@@ -211,15 +210,58 @@ fn record_moved_file<'c, 'b, 'a, T>(branch:&Branch<'c,'b,'a,T>, repository: &Tra
     Ok(())
 }
 
+fn record_deleted_file<T>(st: &mut RecordState, branch: &Branch<T>, current_node: &[u8], db_external: &Db<T>)
+                          -> Result<(), Error> {
+    debug!("record_deleted_file");
+    let mut edges=Vec::new();
+    // Now take all grandparents of l2, delete them.
+    for parent in iterate_parents!(&mut st.ws0, branch, &current_node[3..]) {
+        for grandparent in iterate_parents!(&mut st.ws1, branch, &parent[1..(1+KEY_SIZE)]) {
+            edges.push(Edge {
+                from: external_key(&db_external, &parent[1..(1+KEY_SIZE)]),
+                to: external_key(&db_external, &grandparent[1..(1+KEY_SIZE)]),
+                introduced_by: external_key(&db_external, &grandparent[1+KEY_SIZE..])
+            })
+        }
+    }
+
+    // Delete the file recursively
+    let mut file_edges=vec!();
+    {
+        debug!("del={}",current_node.to_hex());
+        let ret = retrieve(&mut st.ws0, branch, &current_node[3..]).unwrap();
+        for l in ret.lines {
+            if l.key.len()>0 {
+                let ext_key = external_key(&db_external, l.key);
+                debug!("ext_key={}",ext_key.to_hex());
+                for v in iterate_parents!(&mut st.ws0, branch, l.key) {
+                    
+                    debug!("v={}",v.to_hex());
+                    if v[0] & FOLDER_EDGE != 0 { &mut edges } else { &mut file_edges }
+                    .push(Edge { from: ext_key.clone(),
+                                 to: external_key(&db_external, &v[1..(1+KEY_SIZE)]),
+                                 introduced_by: external_key(&db_external, &v[(1+KEY_SIZE)..]) });
+                }
+            }
+        }
+    }
+
+    st.actions.push(Change::Edges{edges:edges,flag:FOLDER_EDGE|PARENT_EDGE|DELETED_EDGE});
+    if file_edges.len()>0 {
+        st.actions.push(Change::Edges{edges:file_edges,flag:PARENT_EDGE|DELETED_EDGE});
+    };
+    Ok(())
+}
+
 fn record_all<'a,'b,'c,T> (
     repository:&Transaction<'a,T>,
     branch:&Branch<'c,'b,'a,T>,
-    st: &mut record_state,
+    st: &mut RecordState,
     parent: Option< (&[u8], Inode) >,
     current_inode: Inode,
     realpath:&mut std::path::PathBuf,
-    basename:&[u8])->Result<(),Error> {
-
+    basename:&[u8]
+        )->Result<(),Error> {
     let db_inodes = & repository.db_inodes();
     if parent.is_some() { realpath.push(std::str::from_utf8(&basename).unwrap()) }
     debug!("realpath:{:?}",realpath);
@@ -237,9 +279,9 @@ fn record_all<'a,'b,'c,T> (
                     let (int_attr,deleted)={
                         match metadata(&realpath) {
                             Ok(attr)=>{
-                                let p=(permissions(&attr)) & 0o777;
+                                let p=(permissions(&attr).unwrap_or(old_attr)) & 0o777;
                                 let is_dir= if attr.is_dir() { DIRECTORY_FLAG } else { 0 };
-                                ((if p==0 { old_attr } else { p }) | is_dir,false)
+                                ((p | is_dir),false)
                             },
                             Err(_)=>{
                                 (old_attr,true)
@@ -254,44 +296,7 @@ fn record_all<'a,'b,'c,T> (
                                                &db_external, st, parent_node, current_node, basename, int_attr,
                                                old_attr));
                     } else if deleted || current_node[0]==2 {
-
-                        let mut edges=Vec::new();
-                        // Now take all grandparents of l2, delete them.
-                        for parent in iterate_parents!(&mut st.ws0, branch, &current_node[3..]) {
-                            for grandparent in iterate_parents!(&mut st.ws1, branch, &parent[1..(1+KEY_SIZE)]) {
-                                edges.push(Edge {
-                                    from: external_key(&db_external, &parent[1..(1+KEY_SIZE)]),
-                                    to: external_key(&db_external, &grandparent[1..(1+KEY_SIZE)]),
-                                    introduced_by: external_key(&db_external, &grandparent[1+KEY_SIZE..])
-                                })
-                            }
-                        }
-
-                        // Delete the file recursively
-                        let mut file_edges=vec!();
-                        {
-                            debug!("del={}",current_node.to_hex());
-                            let ret = retrieve(&mut st.ws0, branch, &current_node[3..]).unwrap();
-                            for l in ret.lines {
-                                if l.key.len()>0 {
-                                    let ext_key = external_key(&db_external, l.key);
-                                    debug!("ext_key={}",ext_key.to_hex());
-                                    for v in iterate_parents!(&mut st.ws0, branch, l.key) {
-                                        
-                                        debug!("v={}",v.to_hex());
-                                        if v[0] & FOLDER_EDGE != 0 { &mut edges } else { &mut file_edges }
-                                        .push(Edge { from: ext_key.clone(),
-                                                     to: external_key(&db_external, &v[1..(1+KEY_SIZE)]),
-                                                     introduced_by: external_key(&db_external, &v[(1+KEY_SIZE)..]) });
-                                    }
-                                }
-                            }
-                        }
-
-                        st.actions.push(Change::Edges{edges:edges,flag:FOLDER_EDGE|PARENT_EDGE|DELETED_EDGE});
-                        if file_edges.len()>0 {
-                            st.actions.push(Change::Edges{edges:file_edges,flag:PARENT_EDGE|DELETED_EDGE});
-                        }
+                        try!(record_deleted_file(st, branch, current_node, &db_external));
                     } else if current_node[0]==0 {
                         if old_attr & DIRECTORY_FLAG == 0 {
                             //let time0=time::precise_time_s();
@@ -350,8 +355,7 @@ fn record_all<'a,'b,'c,T> (
 
 pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<LocalKey,Inode>),Error>{
     let mut branch = try!(repository.db_nodes(branch_name));
-    let db_inodes = repository.db_inodes();
-    let mut st = record_state {
+    let mut st = RecordState {
         line_num: 1,
         actions: Vec::new(),
         updatables : HashMap::new(),
