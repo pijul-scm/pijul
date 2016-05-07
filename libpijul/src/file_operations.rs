@@ -63,7 +63,7 @@ impl Inode {
 
 fn mark_inode_moved<T>(db_inodes: &mut Db<T>, inode: &Inode) {
     let vv = db_inodes.get(&inode.contents).map(|v| {let mut vv = v.to_vec(); vv[0] =1; vv});
-    for v in vv.iter() {db_inodes.put(&inode.contents, &v).unwrap()};
+    for v in vv.iter() {db_inodes.replace(&inode.contents, &v).unwrap()};
 }
 
 pub fn create_new_inode<T>(ws:&mut Workspace, db_revtree:&mut Db<T>,buf: &mut [u8]) {
@@ -227,7 +227,8 @@ fn rec_delete<T>(ws:&mut Workspace, db_tree:&mut Db<T>, db_revtree:&mut Db<T>, d
         };
     debug!("b={:?}", b);
     if !b {
-        try!(db_inodes.put(key,&node_[..]));
+        debug!("rec_delete, writing at key {:?} => {:?}", &key, &node_);
+        try!(db_inodes.replace(key,&node_[..]));
         //repository.set_db_inodes(db_inodes);
     }
     debug!("done");

@@ -339,6 +339,17 @@ pub mod backend {
             }
             Ok(())
         }
+
+        pub fn replace(&mut self, key:&[u8], value:&[u8]) -> Result<(),Error> {
+            debug!("replace {:?} {:?}", key.to_hex(), value.to_hex());
+            let mut rng = rand::thread_rng();
+            unsafe {
+                let mut txn = &mut *self.txn;
+                try!(txn.replace(&mut rng, &mut *self.db, key, value));
+            }
+            Ok(())
+        }
+        
         pub fn del(&mut self, key:&[u8], value:Option<&[u8]>) -> Result<(),Error> {
             debug!("del {:?} {:?}", key.to_hex(), value);
             let mut rng = rand::thread_rng();
