@@ -93,19 +93,19 @@ pub struct Graph<'a> {
 
 pub trait LineBuffer<'a,'env:'a,T:'a> {
 
-    fn output_line(&mut self, key:&'a [u8], contents: Contents<'a,'env,T>);
+    fn output_line(&mut self, key:&'a [u8], contents: Contents<'a,'env,T>) -> Result<(),Error>;
 
-    fn begin_conflict(&mut self) {
+    fn begin_conflict(&mut self) -> Result<(),Error> {
         let l = Contents::from_slice(b">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
-        self.output_line(&[], l);
+        self.output_line(&[], l)
     }
-    fn conflict_next(&mut self) {
+    fn conflict_next(&mut self) -> Result<(),Error> {
         let l = Contents::from_slice(b"================================\n");
-        self.output_line(&[], l);
+        self.output_line(&[], l)
     }
-    fn end_conflict(&mut self) {
+    fn end_conflict(&mut self) -> Result<(),Error> {
         let l = Contents::from_slice(b"<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n");
-        self.output_line(&[], l);
+        self.output_line(&[], l)
     }
 }
 
@@ -113,7 +113,7 @@ pub trait LineBuffer<'a,'env:'a,T:'a> {
 /// This function constructs a graph by reading the branch from the
 /// input key. It guarantees that all nodes but the first one (index
 /// 0) have a common descendant, which is index 0.
-pub fn retrieve<'a,'b,'name,T>(ws:&mut Workspace, branch:&'a Branch<'name,'a,'b,T>, key:&'a [u8])->Result<Graph<'a>,()>{
+pub fn retrieve<'a,'b,'name,T>(ws:&mut Workspace, branch:&'a Branch<'name,'a,'b,T>, key:&'a [u8])->Graph<'a>{
 
     // In order to identify "merging paths" of the graph correctly, we
     // maintain a cache of visited lines (mapped to their index in the graph).
@@ -195,7 +195,7 @@ pub fn retrieve<'a,'b,'name,T>(ws:&mut Workspace, branch:&'a Branch<'name,'a,'b,
     cache.insert(&b""[..],0);
     let mut children=Vec::new();
     retr(ws, &branch, &mut cache, &mut lines, &mut children, key);
-    Ok(Graph { lines:lines, children:children })
+    Graph { lines:lines, children:children }
 }
 
 fn tarjan(line:&mut Graph)->Vec<Vec<usize>> {
@@ -284,7 +284,7 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branc
         zero:&[u8],
         step:&mut usize,
         scc:&[Vec<usize>],
-        mut n_scc:usize) {
+        mut n_scc:usize)->Result<(),Error> {
 
         let mut child_components=BTreeSet::new();
         let mut skipped=vec!(n_scc);
@@ -318,7 +318,7 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branc
                 forward_scc.insert(*component);
             } else {
                 debug!("visiting scc {} {}",*component,graph.lines[scc[*component][0]].key.to_hex());
-                dfs(graph,first_visit,last_visit,forward,zero,step,scc,*component)
+                try!(dfs(graph,first_visit,last_visit,forward,zero,step,scc,*component))
             }
         }
         for cousin in scc[n_scc].iter() {
@@ -347,6 +347,7 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branc
             last_visit[*i] = *step;
             *step+=1;
         }
+        Ok(())
     }
     let zero=[0;HASH_SIZE];
     dfs(&mut graph,&mut first_visit,&mut last_visit,forward,&zero[..],&mut step,&scc,scc.len()-1);
@@ -371,7 +372,7 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branc
             debug!("key = {}",key.to_hex());
             if key.len()>0 {
                 if let Some(cont) = db_contents.contents(key) {
-                    buf.output_line(key, cont)
+                    try!(buf.output_line(key, cont))
                 }
             }
             if i==0 { break } else { i-=1 }
@@ -394,7 +395,7 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branc
                 is_first:&mut bool,
                 selected_zombies:&mut HashMap<&'a [u8],bool>,
                 next:&mut usize,
-                i:usize) {
+                i:usize) -> Result<(),Error> {
                 // x.scc[i] has at least one element (from tarjan).
 
                 if scc[i].len() == 1 && first_visit[i] <= first_visit[0] && last_visit[i] >= last_visit[0] && ! graph.lines[scc[i][0]].flags.contains(LINE_HALF_DELETED) {
@@ -413,10 +414,10 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branc
                                     *is_first=false
                                 }
                             }
-                            b.output_line(key,cont)
+                            try!(b.output_line(key,cont))
                         }
                     }
-                    *next=i
+                    *next=i;
                 } else {
                     // Pour chaque permutation de la SCC, ajouter tous les sommets sur la pile, et appel recursif de chaque arete non-forward.
                     fn permutations<'name,'a, 'b,T,B:LineBuffer<'a,'b,T>>(
@@ -523,6 +524,7 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branc
                     debug!("permutations");
                     permutations(ws, branch,db_contents, graph,first_visit,last_visit,scc,nodes,b,is_first,selected_zombies,next,i,0,&mut next_vertices);
                 }
+                Ok(())
             }
             nodes.clear();
             let (next,is_first)={
@@ -535,7 +537,7 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branc
                              &mut next, i);
                 (next,is_first)
             };
-            if !is_first { buf.end_conflict() }
+            if !is_first { try!(buf.end_conflict()) }
             if i==0 { break } else { i=std::cmp::min(i-1,next) }
         }
     }

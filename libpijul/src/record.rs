@@ -203,7 +203,7 @@ fn record_moved_file<'c, 'b, 'a, T>(branch:&Branch<'c,'b,'a,T>, repository: &Tra
         //let time1=time::precise_time_s();
         //info!("retrieve took {}s, now calling diff", time1-time0);
         debug!("diff");
-        try!(diff::diff(repository, branch, &mut st.line_num,&mut st.actions, &mut st.redundant,ret.unwrap(), realpath.as_path()));
+        try!(diff::diff(repository, branch, &mut st.line_num,&mut st.actions, &mut st.redundant,ret, realpath.as_path()));
         //let time2=time::precise_time_s();
         //info!("total diff took {}s", time2-time1);
     };
@@ -229,7 +229,7 @@ fn record_deleted_file<T>(st: &mut RecordState, branch: &Branch<T>, current_node
     let mut file_edges=vec!();
     {
         debug!("del={}",current_node.to_hex());
-        let ret = retrieve(&mut st.ws0, branch, &current_node[3..]).unwrap();
+        let ret = retrieve(&mut st.ws0, branch, &current_node[3..]);
         for l in ret.lines {
             if l.key.len()>0 {
                 let ext_key = external_key(&db_external, l.key);
@@ -304,7 +304,7 @@ fn record_all<'a,'b,'c,T> (
                             //let time1=time::precise_time_s();
                             info!("now calling diff");
                             try!(diff::diff(repository, branch, &mut st.line_num, &mut st.actions, &mut st.redundant,
-                                            ret.unwrap(), realpath.as_path()));
+                                            ret, realpath.as_path()));
                             //let time2=time::precise_time_s();
                             //info!(target:"record_all","total diff took {}s", time2-time1);
                         }

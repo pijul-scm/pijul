@@ -260,9 +260,9 @@ fn output_aux<'a,'b,'name,T>(
                             if perms&DIRECTORY_FLAG==0 {
                                 if do_output {
                                     let mut redundant_edges=vec!();
-                                    let l = retrieve(ws2, branch, &cv).unwrap();
+                                    let l = retrieve(ws2, branch, &cv);
                                     debug!("creating file {:?}",path);
-                                    let mut f=std::fs::File::create(&path).unwrap();
+                                    let mut f=try!(std::fs::File::create(&path));
                                     debug!("done");
                                     
                                     output_file(ws2, branch, db_contents, &mut f,l,&mut redundant_edges);

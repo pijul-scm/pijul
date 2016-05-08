@@ -210,56 +210,49 @@ pub mod diff {
     }
 
     impl <'a,'env:'a,T:'a> graph::LineBuffer<'a,'env,T> for Diff<'a,'env,T> {
-        fn output_line(&mut self,k:&'a[u8],c:Contents<'a,'env,T>) {
+        fn output_line(&mut self,k:&'a[u8],c:Contents<'a,'env,T>)->Result<(),super::super::error::Error> {
             //println!("outputting {:?} {}",k,unsafe {std::str::from_utf8_unchecked(c)});
             self.lines_a.push(k);
             self.contents_a.push(c);
+            Ok(())
         }
     }
 
     pub fn diff<'a,'b,'name,T>(repository:&Transaction<'b,T>,branch:&Branch<'name,'a,'b,T>,line_num:&mut usize, actions:&mut Vec<Change>,
                          redundant:&mut Vec<u8>,
-                         a:Graph<'a>, b:&Path)->Result<(),std::io::Error> {
+                         a:Graph<'a>, b:&Path)->Result<(),super::super::error::Error> {
         
         let mut buf_b=Vec::new();
         let mut lines_b=Vec::new();
-        let err={
-            let err={
-                let f = std::fs::File::open(b);
-                let mut f = std::io::BufReader::new(f.unwrap());
-                f.read_to_end(&mut buf_b)
-            };
-            let mut i=0;
-            let mut j=0;
+        let f = std::fs::File::open(b);
+        let mut f = std::io::BufReader::new(f.unwrap());
+        try!(f.read_to_end(&mut buf_b));
+        let mut i=0;
+        let mut j=0;
 
-            while j<buf_b.len() {
-                if buf_b[j]==0xa {
-                    lines_b.push(&buf_b[i..j+1]);
-                    i=j+1
-                }
-                j+=1;
+        while j<buf_b.len() {
+            if buf_b[j]==0xa {
+                lines_b.push(&buf_b[i..j+1]);
+                i=j+1
             }
-            if i<j { lines_b.push(&buf_b[i..j]) }
-            err
-        };
-        match err {
-            Ok(_)=>{
-                //let t0=time::precise_time_s();
-                let db_contents = repository.db_contents();
-                let mut d = Diff { lines_a:Vec::new(), contents_a:Vec::new() };
-                let mut ws = Workspace::new();
-                graph::output_file(&mut ws, branch, &db_contents, &mut d,a,redundant);
-                //let t1=time::precise_time_s();
-                //info!("output_file took {}s",t1-t0);
-                local_diff(&mut ws, repository, branch, actions, line_num,
-                           &d.lines_a,
-                           &d.contents_a[..],
-                           &lines_b);
-                //let t2=time::precise_time_s();
-                //info!("diff took {}s",t2-t1);
-                Ok(())
-            },
-            Err(e)=>Err(e)
+            j+=1;
         }
+        if i<j { lines_b.push(&buf_b[i..j]) }
+
+
+        //let t0=time::precise_time_s();
+        let db_contents = repository.db_contents();
+        let mut d = Diff { lines_a:Vec::new(), contents_a:Vec::new() };
+        let mut ws = Workspace::new();
+        graph::output_file(&mut ws, branch, &db_contents, &mut d,a,redundant);
+        //let t1=time::precise_time_s();
+        //info!("output_file took {}s",t1-t0);
+        local_diff(&mut ws, repository, branch, actions, line_num,
+                   &d.lines_a,
+                   &d.contents_a[..],
+                   &lines_b);
+        //let t2=time::precise_time_s();
+        //info!("diff took {}s",t2-t1);
+        Ok(())
     }
 }

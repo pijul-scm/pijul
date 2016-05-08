@@ -59,10 +59,11 @@ mod optimal_diff;
 pub use optimal_diff::diff;
 
 impl <'a,'env:'a,T:'a,W> graph::LineBuffer<'a,'env,T> for W where W:std::io::Write {
-    fn output_line(&mut self,_:&[u8],c:backend::Contents<'a,'env,T>) {
+    fn output_line(&mut self,_:&[u8],c:backend::Contents<'a,'env,T>) -> Result<(),Error> {
         for i in c {
-            self.write(i).unwrap(); // .expect("output_line: could not write");
+            try!(self.write(i)); // .expect("output_line: could not write");
         }
+        Ok(())
     }
 }
 
@@ -101,7 +102,7 @@ impl<'env,T> backend::Transaction<'env,T> {
         let db_contents = self.db_contents();
         let mut redundant_edges = Vec::new();
         let mut workspace = backend::Workspace::new();
-        let graph = graph::retrieve(&mut workspace, branch,key).unwrap();
+        let graph = graph::retrieve(&mut workspace, branch,key);
         graph::output_file(&mut workspace, branch, &db_contents, l, graph,&mut redundant_edges)
     }
 
