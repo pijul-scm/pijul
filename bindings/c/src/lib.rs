@@ -60,7 +60,9 @@ pub unsafe extern "C" fn pijul_mut_txn_begin(repository:*const c_void, transacti
     let r:Box<Repository>=std::mem::transmute(repository);
     let result = match r.mut_txn_begin() {
         Ok(t) => {
-            *transaction = std::mem::transmute(Box::new(t));
+            let m = libc::malloc(std::mem::size_of::<usize>()) as *mut *mut c_void;
+            *m = std::mem::transmute(Box::new(t));
+            *transaction = std::mem::transmute(m);
             0
         },
         _ => {
@@ -70,6 +72,51 @@ pub unsafe extern "C" fn pijul_mut_txn_begin(repository:*const c_void, transacti
     std::mem::forget(r);
     result
 }
+
+
+#[no_mangle]
+pub unsafe extern "C" fn pijul_mut_txn_destroy(transaction:*mut c_void) {
+    let r:*mut *mut c_void = std::mem::transmute(transaction);
+    let t:*mut c_void = *r;
+    if !t.is_null() {
+        let r:Box<Transaction> = std::mem::transmute(*r);
+        println!("free: abort/destroy");
+        std::mem::drop(r)
+    }
+    println!("free: destroy");
+    libc::free(transaction)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pijul_mut_txn_commit(transaction:*mut c_void) -> c_int {
+    let r:*mut *mut c_void = std::mem::transmute(transaction);
+    if (*r).is_null() {
+        -1
+    } else {
+        let t:Box<Transaction>=std::mem::transmute(*r);
+        let result = if let Ok(()) = t.commit() {
+            0
+        } else {
+            -1
+        };
+        println!("free: commit");
+        *r = std::ptr::null_mut();
+        result
+    }
+}
+
+
+
+#[no_mangle]
+pub unsafe extern "C" fn pijul_empty_patch()->*mut c_void {
+    std::mem::transmute(Box::new(Patch::empty()))
+}
+#[no_mangle]
+pub unsafe extern "C" fn pijul_destroy_patch(patch:*mut c_void) {
+    let r:Box<Patch> = std::mem::transmute(patch);
+    std::mem::drop(r)
+}
+
 
 
 
@@ -222,24 +269,24 @@ pub unsafe extern "C" fn pijul_apply_patches(repository:*mut c_void,
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn pijul_apply_local_patch(repository:*mut c_void,
+pub unsafe extern "C" fn pijul_apply_local_patch(transaction:*mut c_void,
                                                  c_branch:*const c_char,
                                                  c_path:*const c_char,
                                                  c_patch:*const c_void,
                                                  c_inode_updates:*const c_void) -> c_int {
     
-    let mut repository:Box<Transaction>=std::mem::transmute(repository);
+    let mut transaction:Box<Transaction>=std::mem::transmute(transaction);
     let branch=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_branch).to_bytes());
     let path=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(c_path).to_bytes());
     let patch:Box<Patch> = std::mem::transmute(c_patch);
     let inode_updates:Box<HashMap<LocalKey, Inode>> = std::mem::transmute(c_inode_updates);
 
-    let result = if let Ok(()) = repository.apply_local_patch(branch, path, *patch, &inode_updates) {
+    let result = if let Ok(()) = transaction.apply_local_patch(branch, path, *patch, &inode_updates) {
         0
     } else {
         -1
     };
-    std::mem::forget(repository);
+    std::mem::forget(transaction);
     std::mem::forget(inode_updates);
     result
 }
