@@ -264,7 +264,7 @@ fn tarjan(line:&mut Graph)->Vec<Vec<usize>> {
 
 
 
-pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branch:&'a Branch<'name,'a,'b,T>, db_contents:&'a Db<'a,'b,T>, buf:&mut B,mut graph:Graph<'a>,forward:&mut Vec<u8>) {
+pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branch:&'a Branch<'name,'a,'b,T>, db_contents:&'a Db<'a,'b,T>, buf:&mut B,mut graph:Graph<'a>,forward:&mut Vec<u8>) -> Result<(),Error> {
     debug!("output_file");
 
     //let t0=time::precise_time_s();
@@ -540,6 +540,7 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(ws:&mut Workspace, branc
         }
     }
     debug!("/output_file");
+    Ok(())
 }
 
 

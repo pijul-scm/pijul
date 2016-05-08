@@ -267,8 +267,8 @@ pub fn remove_file<T>(ws:&mut Workspace, repository:&mut Transaction<T>, path:&s
     Ok(())
 }
 
-pub fn list_files<T>(repository:&Transaction<T>)->Vec<PathBuf>{
-    fn collect<T>(repo:&Transaction<T>,key:&[u8],pb:&Path, basename:&[u8],files:&mut Vec<PathBuf>) {
+pub fn list_files<T>(repository:&Transaction<T>)->Result<Vec<PathBuf>, Error> {
+    fn collect<T>(repo:&Transaction<T>,key:&[u8],pb:&Path, basename:&[u8],files:&mut Vec<PathBuf>)->Result<(),Error> {
         //println!("collecting {:?},{:?}",to_hex(key),std::str::from_utf8_unchecked(basename));
         let db_inodes = repo.db_inodes();
         let add= match db_inodes.get(key) {
@@ -277,7 +277,7 @@ pub fn list_files<T>(repository:&Transaction<T>)->Vec<PathBuf>{
         };
         if add {
             debug!("basename = {:?}", String::from_utf8_lossy(basename));
-            let next_pb=pb.join(std::str::from_utf8(basename).unwrap());
+            let next_pb=pb.join(try!(std::str::from_utf8(basename)));
             let next_pb_=next_pb.clone();
             if basename.len()>0 { files.push(next_pb) }
             let db_tree = repo.db_tree();
@@ -290,9 +290,10 @@ pub fn list_files<T>(repository:&Transaction<T>)->Vec<PathBuf>{
                 }
             }
         }
+        Ok(())
     }
     let mut files=Vec::new();
     let mut pathbuf=PathBuf::new();
-    collect(repository,ROOT_INODE.as_ref(), &mut pathbuf, &[], &mut files);
-    files
+    try!(collect(repository,ROOT_INODE.as_ref(), &mut pathbuf, &[], &mut files));
+    Ok(files)
 }

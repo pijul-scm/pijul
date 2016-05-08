@@ -37,7 +37,8 @@ pub enum Error{
     NothingToDecode(Option<PathBuf>),
     InternalHashNotFound(Vec<u8>),
     PatchNotFound(PathBuf,String),
-    GPG(i32,String)
+    GPG(i32,String),
+    Utf8(std::str::Utf8Error)
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -51,7 +52,8 @@ impl fmt::Display for Error {
             Error::FileNotInRepo(ref path) => write!(f, "File {} not tracked", path.display()),
             Error::InternalHashNotFound(ref hash) => write!(f, "Internal hash {} not found", hash.to_hex()),
             Error::PatchNotFound(ref path,ref hash) => write!(f, "Patch {} not found in {}", hash, path.display()),
-            Error::GPG(ref code,ref s) => write!(f, "GPG returned code {:?}, {:?}", code, s)
+            Error::GPG(ref code,ref s) => write!(f, "GPG returned code {:?}, {:?}", code, s),
+            Error::Utf8(ref e) => write!(f, "Utf8 Error {:?}", e)
         }
     }
 }
@@ -68,7 +70,8 @@ impl std::error::Error for Error {
             Error::FileNotInRepo(_) => "Operation on untracked file",
             Error::InternalHashNotFound(_) => "Internal hash not found",
             Error::PatchNotFound(_,_) => "Patch not found",
-            Error::GPG(_,_) => "GPG was unsuccessful"
+            Error::GPG(_,_) => "GPG was unsuccessful",
+            Error::Utf8(ref e) => e.description()
         }
     }
 
@@ -83,7 +86,8 @@ impl std::error::Error for Error {
             Error::FileNotInRepo(_) => None,
             Error::InternalHashNotFound(_) => None,
             Error::PatchNotFound(_,_) => None,
-            Error::GPG(_,_) => None
+            Error::GPG(_,_) => None,
+            Error::Utf8(ref e) => Some(e)
         }
     }
 }
@@ -103,6 +107,11 @@ impl From<sanakirja::Error> for Error {
 impl From<cbor::CborError> for Error {
     fn from(err: cbor::CborError) -> Error {
         Error::Cbor(err)
+    }
+}
+impl From<std::str::Utf8Error> for Error {
+    fn from(err: std::str::Utf8Error) -> Error {
+        Error::Utf8(err)
     }
 }
 

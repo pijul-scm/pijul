@@ -51,6 +51,7 @@ mod sanakirja_backend;
 pub use sanakirja_backend::backend;
 
 mod file_operations;
+pub use file_operations::Inode;
 
 pub mod graph;
 
@@ -84,7 +85,7 @@ impl<'env,T> backend::Transaction<'env,T> {
         let mut workspace = backend::Workspace::new();
         file_operations::add_inode(&mut workspace, &mut db_tree, &mut db_revtree, None, path.as_ref(), is_dir)
     }
-    pub fn list_files(&self) -> Vec<PathBuf> {
+    pub fn list_files(&self) -> Result<Vec<PathBuf>, Error> {
         file_operations::list_files(self)
     }
 
@@ -96,12 +97,12 @@ impl<'env,T> backend::Transaction<'env,T> {
         let mut workspace = backend::Workspace::new();
         file_operations::move_file(&mut workspace, self, path.as_ref(), path_.as_ref(), is_dir)
     }
-    pub fn retrieve_and_output<'a,'name,W:std::io::Write>(&self,branch:&backend::Branch<'name,'a,'env,T>,key:&[u8],l:&mut W) {
+    pub fn retrieve_and_output<'a,'name,W:std::io::Write>(&self,branch:&backend::Branch<'name,'a,'env,T>,key:&[u8],l:&mut W) -> Result<(),Error> {
         let db_contents = self.db_contents();
         let mut redundant_edges = Vec::new();
         let mut workspace = backend::Workspace::new();
         let graph = graph::retrieve(&mut workspace, branch,key).unwrap();
-        graph::output_file(&mut workspace, branch, &db_contents, l, graph,&mut redundant_edges);
+        graph::output_file(&mut workspace, branch, &db_contents, l, graph,&mut redundant_edges)
     }
 
     pub fn branch_patches<'a>(&'a self,db_external:&'a backend::Db<'a,'env,T>, branch_name:&str)->Result<HashSet<&'a[u8]>,Error> {
@@ -121,7 +122,7 @@ impl<'env,T> backend::Transaction<'env,T> {
         }
         Ok(patches)
     }
-    pub fn write_changes_file<P:AsRef<Path>>(&self, branch_name:&str, path:P)->Result<(),Error> {
+    fn write_changes_file<P:AsRef<Path>>(&self, branch_name:&str, path:P)->Result<(),Error> {
         let db_external = self.db_external();
         let patches = try!(self.branch_patches(&db_external, branch_name));
         debug!("write_changes_file, patches = {:?}", patches);
@@ -129,27 +130,28 @@ impl<'env,T> backend::Transaction<'env,T> {
         try!(patch::write_changes(&patches,&changes_file));
         Ok(())
     }
-    pub fn apply_patches(&mut self, branch_name:&str, r:&Path, remote_patches:&HashSet<Vec<u8>>, local_patches:&HashSet<Vec<u8>>) -> Result<(),Error> {
+    pub fn apply_patches<P:AsRef<Path>>(&mut self, branch_name:&str, r:P, remote_patches:&HashSet<Vec<u8>>, local_patches:&HashSet<Vec<u8>>) -> Result<(),Error> {
 
         debug!("apply_patches");
-        let result = apply::apply_patches(self, branch_name, r, remote_patches, local_patches);
+        let result = try!(apply::apply_patches(self, branch_name, r.as_ref(), remote_patches, local_patches));
         debug!("/apply_patches");
-        result
+        try!(self.write_changes_file(branch_name, r));
+        Ok(result)
     }
-    pub fn apply_local_patch(&mut self, branch_name:&str, location: &Path, patch: patch::Patch, inode_updates:&HashMap<patch::LocalKey,file_operations::Inode>) -> Result<(), Error>{
+    pub fn apply_local_patch<P:AsRef<Path>>(&mut self, branch_name:&str, location:P, patch: patch::Patch, inode_updates:&HashMap<patch::LocalKey,file_operations::Inode>) -> Result<(), Error>{
 
         debug!("apply_local_patch");
-        let result = apply::apply_local_patch(self,branch_name,location,patch,inode_updates);
+        let result = try!(apply::apply_local_patch(self,branch_name,location.as_ref(),patch,inode_updates));
         debug!("/apply_local_patch");
         try!(self.write_changes_file(branch_name, location));
-        result
+        Ok(result)
     }
-    pub fn record(&mut self,branch_name:&str, working_copy:&std::path::Path)->Result<(Vec<patch::Change>,HashMap<patch::LocalKey,file_operations::Inode>),Error>{
-        record::record(self,branch_name,working_copy)
+    pub fn record<P:AsRef<Path>>(&mut self,branch_name:&str, working_copy:P)->Result<(Vec<patch::Change>,HashMap<patch::LocalKey,file_operations::Inode>),Error>{
+        record::record(self,branch_name,working_copy.as_ref())
     }
-    pub fn output_repository(&mut self, branch_name:&str, working_copy:&Path, pending:&patch::Patch) -> Result<(),Error>{
+    pub fn output_repository<P:AsRef<Path>>(&mut self, branch_name:&str, working_copy:P, pending:&patch::Patch) -> Result<(),Error>{
         debug!("outputting repository");
-        let result = output::output_repository(self,branch_name,working_copy,pending);
+        let result = output::output_repository(self,branch_name,working_copy.as_ref(),pending);
         debug!("/outputting repository");
         result
     }
