@@ -1,4 +1,4 @@
-module Pijul( createRepository, withRepository ) where
+-- module Pijul( withRepository ) where
 
 import Foreign.C.Types
 import Foreign.C.String
@@ -9,12 +9,13 @@ import Foreign.Storable
 import Data.Typeable
 import qualified Data.ByteString as B
 
-#include <pijul.h>
 
 data CRepository
 
 foreign import ccall pijul_open_repository :: CString -> Ptr (Ptr CRepository) -> IO CInt
 foreign import ccall pijul_close_repository :: Ptr CRepository -> IO ()
+
+
 
 type Repository = Ptr CRepository
 
@@ -33,6 +34,7 @@ withRepository path f =
         (\p -> do { pijul_close_repository p })
         f
 
+
 foreign import ccall pijul_add_file :: Ptr CRepository -> CString->CInt-> IO ()
 
 addFile::Repository->String->Bool->IO ()
@@ -45,6 +47,12 @@ foreign import ccall pijul_load_patches :: CString -> CString-> Ptr (Ptr HashSet
 foreign import ccall pijul_unload_patches :: Ptr HashSet -> Ptr Iter -> IO ()
 foreign import ccall pijul_next_patch :: Ptr Iter -> Ptr CString -> Ptr CInt-> IO CInt
 
+
+main = do
+  withRepository "/tmp/test" $ \repo -> do
+    putStrLn "Hello"
+
+{-
 
 -- path is the path of the changes file. Changes files are in .pijul/changes.hex(branch).
 -- for instance, for the default branch "main", .pijul/changes.6d61696e
@@ -75,3 +83,4 @@ foreign import ccall pijul_create_repository :: CString -> IO ()
 createRepository :: String -> IO ()
 createRepository path =
   withCString path $ \cpath -> pijul_create_repository cpath
+-}

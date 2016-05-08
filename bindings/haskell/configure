@@ -1,1 +1,5 @@
-echo "  extra-lib-dirs: $(dirname $PWD)/c/target/debug/" >> pijul.cabal
+#!/run/current-system/sw/bin/bash
+
+grep -v "extra-lib-dirs" pijul.cabal > tmp
+cat tmp > pijul.cabal
+echo "  extra-lib-dirs:$(dirname $PWD)" >> pijul.cabal
