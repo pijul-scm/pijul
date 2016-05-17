@@ -83,7 +83,7 @@ pub mod backend {
         NODES
     }
     fn open_db<T>(txn:&mut sanakirja::MutTxn<T>, num:Root) -> Result<sanakirja::Db, sanakirja::Error> {
-        if let Some(db) = txn.root(num as isize) {
+        if let Some(db) = txn.root(num as usize) {
             Ok(db)
         } else {
             txn.create_db()
@@ -94,7 +94,7 @@ pub mod backend {
             Ok(Repository { env: try!(sanakirja::Env::new(path, 1<<30)) })
         }
         pub fn mut_txn_begin<'env>(&'env self) -> Result<Transaction<'env,()>,Error> {
-            let mut txn = self.env.mut_txn_begin();
+            let mut txn = try!(self.env.mut_txn_begin());
             let db_tree = try!(open_db(&mut txn, Root::TREE));
             let db_revtree = try!(open_db(&mut txn, Root::REVTREE));
             let db_inodes = try!(open_db(&mut txn, Root::INODES));
@@ -241,17 +241,15 @@ pub mod backend {
                              (Root::REVDEP, &self.db_revdep),
                              (Root::NODES, &self.db_nodes)];
             let txn = unsafe {&mut *self.txn.get() };
-            let mut ws=Vec::new();
-            let mut ws0=Vec::new();
             let mut v_=Vec::new();
             for &(ref name,ref i) in databases.iter() {
                 write!(w,"\n--------\ndatabase {:?}\n\n", name);
                 if *name == Root::NODES {
-                    for (k,mut v) in txn.iter(unsafe {&*i.get()}, b"", None, &mut ws) {
+                    for (k,mut v) in txn.iter(unsafe {&*i.get()}, b"", None) {
                         write!(w, "{:?} {:?}\n", k.to_hex(), v_.to_hex());
                         let db = unsafe { sanakirja::Db::from_value(v.next().unwrap()) };
 
-                        for (k,v) in txn.iter(&db, b"", None, &mut ws0) {
+                        for (k,v) in txn.iter(&db, b"", None) {
                             v_.clear();
                             for vv in v {
                                 v_.extend(vv)
@@ -260,7 +258,7 @@ pub mod backend {
                         }
                     }
                 } else {
-                    for (k,v) in txn.iter(unsafe {&*i.get()}, b"", None, &mut ws) {
+                    for (k,v) in txn.iter(unsafe {&*i.get()}, b"", None) {
                         v_.clear();
                         for vv in v {
                             v_.extend(vv)
@@ -273,12 +271,12 @@ pub mod backend {
         pub fn abort(self) {
             // self.txn.abort();
         }
-        pub fn child(&mut self) -> Transaction<'env, &mut sanakirja::transaction::MutTxn<'env,T>> {
+        pub fn child(&mut self) -> Result<Transaction<'env, &mut sanakirja::transaction::MutTxn<'env,T>>,Error> {
             unsafe {
                 // The clones here are fine, since we cannot perform
                 // any operation on the parent while the child is in
                 // scope.
-                let txn = (&mut *self.txn.get()).mut_txn_begin();
+                let txn = try!((&mut *self.txn.get()).mut_txn_begin());
                 let repo = Transaction {
                     txn: UnsafeCell::new(txn),
                     db_tree: UnsafeCell::new((&*self.db_tree.get()).clone()),
@@ -292,7 +290,7 @@ pub mod backend {
                     db_revdep: UnsafeCell::new((&*self.db_revdep.get()).clone()),
                     db_nodes: UnsafeCell::new((&* self.db_nodes.get()).clone())
                 };
-                repo
+                Ok(repo)
             }
         }
     }
@@ -302,28 +300,23 @@ pub mod backend {
             unsafe {
                 let mut txn = self.txn.into_inner();
 
-                txn.set_root(Root::TREE as isize, self.db_tree.into_inner());
-                txn.set_root(Root::REVTREE as isize, self.db_revtree.into_inner());
-                txn.set_root(Root::INODES as isize, self.db_inodes.into_inner());
-                txn.set_root(Root::REVINODES as isize, self.db_revinodes.into_inner());
-                txn.set_root(Root::CONTENTS as isize, self.db_contents.into_inner());
-                txn.set_root(Root::INTERNAL as isize, self.db_internal.into_inner());
-                txn.set_root(Root::EXTERNAL as isize, self.db_external.into_inner());
-                txn.set_root(Root::BRANCHES as isize, self.db_branches.into_inner());
-                txn.set_root(Root::REVDEP as isize, self.db_revdep.into_inner());
-                txn.set_root(Root::NODES as isize, self.db_nodes.into_inner());
+                txn.set_root(Root::TREE as usize, self.db_tree.into_inner());
+                txn.set_root(Root::REVTREE as usize, self.db_revtree.into_inner());
+                txn.set_root(Root::INODES as usize, self.db_inodes.into_inner());
+                txn.set_root(Root::REVINODES as usize, self.db_revinodes.into_inner());
+                txn.set_root(Root::CONTENTS as usize, self.db_contents.into_inner());
+                txn.set_root(Root::INTERNAL as usize, self.db_internal.into_inner());
+                txn.set_root(Root::EXTERNAL as usize, self.db_external.into_inner());
+                txn.set_root(Root::BRANCHES as usize, self.db_branches.into_inner());
+                txn.set_root(Root::REVDEP as usize, self.db_revdep.into_inner());
+                txn.set_root(Root::NODES as usize, self.db_nodes.into_inner());
 
                 try!(txn.commit());
                 Ok(())
             }
         }
     }
-    pub struct Workspace { ws:Vec<u64> }
-    impl Workspace {
-        pub fn new() -> Workspace {
-            Workspace{ ws:Vec::new() }
-        }
-    }
+
     use rustc_serialize::hex::ToHex;
 
 
@@ -365,10 +358,10 @@ pub mod backend {
                 txn.get(&*self.db, key, None).and_then(|mut x| x.next())
             }
         }
-        pub fn iter<'a,'b>(&'a self, ws:&'b mut Workspace, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a,'b,sanakirja::MutTxn<'env,T>> {
+        pub fn iter<'a>(&'a self, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a,sanakirja::MutTxn<'env,T>> {
             unsafe {
                 let txn = &*self.txn;
-                Iter { iter: txn.iter(&*self.db, starting_key, starting_value, &mut ws.ws) }
+                Iter { iter: txn.iter(&*self.db, starting_key, starting_value) }
             }
         }
         pub fn contents<'a>(&'a self, key:&[u8]) -> Option<Contents<'a,'env,T>> {
@@ -407,10 +400,10 @@ pub mod backend {
                 txn.get(&self.db, key, None).and_then(|mut x| x.next())
             }
         }
-        pub fn iter<'a,'b>(&'a self, ws:&'b mut Workspace, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a,'b,sanakirja::MutTxn<'env,T>> {
+        pub fn iter<'a>(&'a self, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a,sanakirja::MutTxn<'env,T>> {
             unsafe {
                 let txn = &*self.txn;
-                Iter { iter: txn.iter(&self.db, starting_key, starting_value, &mut ws.ws) }
+                Iter { iter: txn.iter(&self.db, starting_key, starting_value) }
             }
         }
         pub fn contents<'a>(&'a self, key:&[u8]) -> Option<Contents<'a,'env,T>> {
@@ -431,8 +424,8 @@ pub mod backend {
 
 
 
-    pub struct Iter<'a,'b,T:'a> {iter:sanakirja::Iter<'a,'b,T>}
-    impl<'a,'b,'env,T> Iterator for Iter<'a,'b,sanakirja::MutTxn<'env,T>> {
+    pub struct Iter<'a,T:'a> {iter:sanakirja::Iter<'a,T>}
+    impl<'a,'env,T> Iterator for Iter<'a,sanakirja::MutTxn<'env,T>> {
         type Item=(&'a[u8],&'a[u8]);
         fn next(&mut self)->Option<Self::Item> {
             if let Some((a,mut b)) = self.iter.next() {

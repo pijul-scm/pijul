@@ -30,12 +30,12 @@ pub mod diff {
     use std::io::Read;
     use rustc_serialize::hex::ToHex;
 
-    fn delete_edges<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Branch<T>, edges:&mut Vec<Edge>, key:&[u8],flag:u8) {
+    fn delete_edges<T>(repository:&Transaction<T>, branch:&Branch<T>, edges:&mut Vec<Edge>, key:&[u8],flag:u8) {
         debug!("deleting edges");
         if key.len() > 0 {
             let ext = repository.db_external();
             let ext_key=external_key(&ext,key);
-            for (k,v) in branch.iter(ws, key, Some(&[flag])) {
+            for (k,v) in branch.iter(key, Some(&[flag])) {
                 debug!("delete: {:?} {:?}", k.to_hex(), v.to_hex());
                 if k==key && v[0] >= flag && v[0] <= flag | (PSEUDO_EDGE|FOLDER_EDGE) {
                     if v[0]&PSEUDO_EDGE == 0 {
@@ -70,18 +70,18 @@ pub mod diff {
     }
 
 
-    fn delete_lines<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Branch<T>, lines:&[&[u8]]) -> Change
+    fn delete_lines<T>(repository:&Transaction<T>, branch:&Branch<T>, lines:&[&[u8]]) -> Change
     {
         debug!("delete_lines: {:?}", lines.len());
         let mut edges=Vec::with_capacity(lines.len());
         for l in lines.iter() {
             debug!("deleting line {}",l.to_hex());
-            delete_edges(ws, repository, branch, &mut edges, l, PARENT_EDGE)
+            delete_edges(repository, branch, &mut edges, l, PARENT_EDGE)
         }
         Change::Edges{edges:edges, flag:PARENT_EDGE|DELETED_EDGE}
     }
 
-    fn local_diff<T>(ws:&mut Workspace, repository:&Transaction<T>, branch:&Branch<T>, actions:&mut Vec<Change>,
+    fn local_diff<T>(repository:&Transaction<T>, branch:&Branch<T>, actions:&mut Vec<Change>,
                      line_num:&mut usize, lines_a:&[&[u8]], contents_a:&[Contents<T>], b:&[&[u8]])
     {
         debug!("local_diff {} {}",contents_a.len(),b.len());
@@ -132,7 +132,7 @@ pub mod diff {
                 debug!("eq: {:?} {:?}", i, j);
                 if let Some(i0)=oi {
                     debug!("deleting from {} to {} / {}",i0,i,lines_a.len());
-                    let dels = delete_lines(ws, repository, branch, &lines_a[i0..i]);
+                    let dels = delete_lines(repository, branch, &lines_a[i0..i]);
                     actions.push(dels);
                     oi=None
                 } else if let Some(j0)=oj {
@@ -166,7 +166,7 @@ pub mod diff {
                 } else {
                     // We will add things starting from j.
                     if let Some(i0)=oi {
-                        let dels = delete_lines(ws, repository, branch, &lines_a[i0..i]);
+                        let dels = delete_lines(repository, branch, &lines_a[i0..i]);
                         actions.push(dels);
                         last_alive_context=i0-1;
                         oi=None
@@ -187,11 +187,11 @@ pub mod diff {
                 actions.push(adds)
                     
             }
-            let dels = delete_lines(ws, repository, branch, &lines_a[i..lines_a.len()]);
+            let dels = delete_lines(repository, branch, &lines_a[i..lines_a.len()]);
             actions.push(dels)
         } else if j < b.len() {
             if let Some(i0)=oi {
-                let dels = delete_lines(ws, repository, branch, &lines_a[i0..i]);
+                let dels = delete_lines(repository, branch, &lines_a[i0..i]);
                 actions.push(dels);
                 let adds =
                     add_lines(repository, line_num, lines_a[i0-1], &[], &b[j..b.len()]);
@@ -243,11 +243,10 @@ pub mod diff {
         //let t0=time::precise_time_s();
         let db_contents = repository.db_contents();
         let mut d = Diff { lines_a:Vec::new(), contents_a:Vec::new() };
-        let mut ws = Workspace::new();
-        graph::output_file(&mut ws, branch, &db_contents, &mut d,a,redundant);
+        graph::output_file(branch, &db_contents, &mut d,a,redundant);
         //let t1=time::precise_time_s();
         //info!("output_file took {}s",t1-t0);
-        local_diff(&mut ws, repository, branch, actions, line_num,
+        local_diff(repository, branch, actions, line_num,
                    &d.lines_a,
                    &d.contents_a[..],
                    &lines_b);

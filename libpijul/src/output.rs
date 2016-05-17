@@ -133,9 +133,6 @@ pub fn node_of_inode<'a,'b>(db_inodes:&'a Db<'a,'b>, inode:&[u8]) -> Option<&'a 
  */
 
 fn output_aux<'a,'b,'name,T>(
-    ws0:&mut Workspace,
-    ws1:&mut Workspace,
-    ws2:&mut Workspace,
     branch:&Branch<'name,'b,'a,T>,
     db_contents:&Db<'b,'a,T>,
     db_inodes:&mut Db<'b,'a,T>,
@@ -164,7 +161,7 @@ fn output_aux<'a,'b,'name,T>(
     //
     // This is because the database cannot be updated while being iterated over.
     let mut filename_buffer = Vec::new();
-    for (_,b) in branch.iter(ws0, key,Some(&[FOLDER_EDGE][..]))
+    for (_,b) in branch.iter(key,Some(&[FOLDER_EDGE][..]))
         .take_while(|&(k,b)| k==key && b[0]<=FOLDER_EDGE|PSEUDO_EDGE) {
 
             debug_assert!(b.len() == 1+KEY_SIZE+HASH_SIZE);
@@ -185,7 +182,7 @@ fn output_aux<'a,'b,'name,T>(
                 debug!("{:?}", k==&b[1..(1+KEY_SIZE)] && c[0]<=FOLDER_EDGE|PSEUDO_EDGE)
             }*/
             
-            for (_,c) in branch.iter(ws1, &b[1..(1+KEY_SIZE)], Some(&[FOLDER_EDGE][..]))
+            for (_,c) in branch.iter(&b[1..(1+KEY_SIZE)], Some(&[FOLDER_EDGE][..]))
                 .take_while(|&(k,c)| {
                     debug!("selecting c: {:?} {:?}", k.to_hex(), c.to_hex());
                     k==&b[1..(1+KEY_SIZE)] && c[0]<=FOLDER_EDGE|PSEUDO_EDGE
@@ -200,7 +197,7 @@ fn output_aux<'a,'b,'name,T>(
                             None => {
                                 let mut v=vec![0;INODE_SIZE];
                                 loop {
-                                    create_new_inode(ws2, db_revtree, &mut v);
+                                    create_new_inode(db_revtree, &mut v);
                                     if new_inodes.get(&v).is_none() { break }
                                 }
                                 new_inodes.insert(v.clone(),(perms,cv));
@@ -260,12 +257,12 @@ fn output_aux<'a,'b,'name,T>(
                             if perms&DIRECTORY_FLAG==0 {
                                 if do_output {
                                     let mut redundant_edges=vec!();
-                                    let l = retrieve(ws2, branch, &cv);
+                                    let l = retrieve(branch, &cv);
                                     debug!("creating file {:?}",path);
                                     let mut f=try!(std::fs::File::create(&path));
                                     debug!("done");
                                     
-                                    output_file(ws2, branch, db_contents, &mut f,l,&mut redundant_edges);
+                                    output_file(branch, db_contents, &mut f,l,&mut redundant_edges);
                                 }
                             } else {
                                 recursive_calls.push((filename.to_string(),cv.to_vec(),c_inode.to_vec()));
@@ -326,8 +323,7 @@ fn output_aux<'a,'b,'name,T>(
     for (filename,cv,c_inode) in recursive_calls {
         path.push(filename);
         debug!("> {:?}",path);
-        try!(output_aux(ws0,ws1,ws2,
-                        branch,db_contents,db_inodes, db_revinodes, db_tree, db_revtree,
+        try!(output_aux(branch,db_contents,db_inodes, db_revinodes, db_tree, db_revtree,
                         working_copy,do_output,visited,path,&cv,&c_inode,moves));
         debug!("< {:?}",path);
         path.pop();
@@ -337,7 +333,6 @@ fn output_aux<'a,'b,'name,T>(
 }
 
 fn unsafe_output_repository<'name,'b,'a,T>(
-    ws0:&mut Workspace, ws1:&mut Workspace, ws2:&mut Workspace,
     branch:&Branch<'name,'b,'a,T>,
     db_contents:&Db<'b,'a,T>, db_inodes:&mut Db<'b,'a,T>, db_revinodes:&mut Db<'b,'a,T>,
     db_tree:&mut Db<'b,'a,T>, db_revtree:&mut Db<'b,'a,T>,
@@ -352,16 +347,15 @@ fn unsafe_output_repository<'name,'b,'a,T>(
     let mut db_revinodes = repository.db_inodes();
     let mut db_tree = repository.db_tree();
     let mut db_revtree = repository.db_revtree();*/
-    try!(output_aux(ws0,ws1,ws2,
-                    branch, db_contents, db_inodes, db_revinodes, db_tree, db_revtree,
+    try!(output_aux(branch, db_contents, db_inodes, db_revinodes, db_tree, db_revtree,
                     working_copy,do_output,&mut visited,&mut p,ROOT_KEY,ROOT_INODE.as_ref(),&mut moves));
 
     // Now, garbage collect dead inodes.
     let mut dead=Vec::new();
     {
         //let curs = try!(self.txn.cursor(self.dbi_inodes));
-        for (u,v) in db_inodes.iter(ws0, b"",None) {
-            if ! has_edge(ws1, branch, &v[3..],PARENT_EDGE|FOLDER_EDGE,true) {
+        for (u,v) in db_inodes.iter(b"",None) {
+            if ! has_edge(branch, &v[3..],PARENT_EDGE|FOLDER_EDGE,true) {
                 // v is dead.
                 debug!("dead:{:?} {:?}",u.to_hex(),v.to_hex());
                 dead.push((u.to_vec(),(&v[3..]).to_vec()))
@@ -383,7 +377,7 @@ fn unsafe_output_repository<'name,'b,'a,T>(
             try!(db_revinodes.del(key,None));
             let mut kills = Vec::new();
             // iterate through inode's relatives.
-            for (k,v) in db_revtree.iter(ws0, &inode, None).take_while(|&(k,_)| k==&inode[..]) {
+            for (k,v) in db_revtree.iter(&inode, None).take_while(|&(k,_)| k==&inode[..]) {
                 kills.push((k.to_vec(), v.to_vec()));
             }
             for &(ref k,ref v) in kills.iter() {
@@ -394,7 +388,7 @@ fn unsafe_output_repository<'name,'b,'a,T>(
             debug!("loop");
             loop {
                 let mut found = false;
-                for (u,v) in db_tree.iter(ws0, inode, None) {
+                for (u,v) in db_tree.iter(inode, None) {
                     found = true;
                     uu.clear();
                     uu.extend(u);
@@ -430,9 +424,6 @@ pub fn output_repository<T>(repository:&mut Transaction<T>, branch_name:&str, wo
     debug!("begin output repository");
     // First output the repository to change the trees/inodes tables (and their revs).
     // Do not output the files (do_output = false).
-    let mut ws0 = Workspace::new();
-    let mut ws1 = Workspace::new();
-    let mut ws2 = Workspace::new();
     {
         let branch = try!(repository.db_nodes(branch_name));
         let db_contents = repository.db_contents();
@@ -441,14 +432,13 @@ pub fn output_repository<T>(repository:&mut Transaction<T>, branch_name:&str, wo
         let mut db_tree = repository.db_tree();
         let mut db_revtree = repository.db_revtree();
 
-        try!(unsafe_output_repository(&mut ws0, &mut ws1, &mut ws2,
-                                      &branch, &db_contents,
+        try!(unsafe_output_repository(&branch, &db_contents,
                                       &mut db_inodes, &mut db_revinodes, &mut db_tree, &mut db_revtree,
                                       working_copy,false));
         try!(branch.commit_branch(branch_name));
     };
     // Then, apply pending and output in an aborted transaction.
-    let mut child_repository = repository.child();
+    let mut child_repository = try!(repository.child());
     let internal = new_internal(&mut child_repository);
     debug!("pending patch: {}",internal.to_hex());
     try!(apply(&mut child_repository, branch_name, pending,&internal,&HashSet::new()));
@@ -460,8 +450,7 @@ pub fn output_repository<T>(repository:&mut Transaction<T>, branch_name:&str, wo
         let mut db_revinodes = child_repository.db_inodes();
         let mut db_tree = child_repository.db_tree();
         let mut db_revtree = child_repository.db_revtree();
-        try!(unsafe_output_repository(&mut ws0, &mut ws1, &mut ws2,
-                                      &branch, &db_contents,
+        try!(unsafe_output_repository(&branch, &db_contents,
                                       &mut db_inodes, &mut db_revinodes, &mut db_tree, &mut db_revtree,
                                       working_copy, true));
         try!(branch.commit_branch(branch_name));
