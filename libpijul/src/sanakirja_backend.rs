@@ -221,7 +221,8 @@ pub mod backend {
                  marker:PhantomData,
             }
         }
-        pub fn dump<W:std::io::Write>(&self, mut w:W) {
+
+        pub fn dump<W:std::io::Write>(&self, mut w:W) -> Result<(), Error> {
             let databases = [(Root::TREE, &self.db_tree),
                              (Root::REVTREE, &self.db_revtree),
                              (Root::INODES, &self.db_inodes),
@@ -235,10 +236,10 @@ pub mod backend {
             let txn = unsafe {&mut *self.txn.get() };
             let mut v_=Vec::new();
             for &(ref name,ref i) in databases.iter() {
-                write!(w,"\n--------\ndatabase {:?}\n\n", name);
+                try!(write!(w,"\n--------\ndatabase {:?}\n\n", name));
                 if *name == Root::NODES {
                     for (k,mut v) in txn.iter(unsafe {&*i.get()}, b"", None) {
-                        write!(w, "{:?} {:?}\n", k.to_hex(), v_.to_hex());
+                        try!(write!(w, "{:?} {:?}\n", k.to_hex(), v_.to_hex()));
                         let db = unsafe { sanakirja::Db::from_value(v.next().unwrap()) };
 
                         for (k,v) in txn.iter(&db, b"", None) {
@@ -246,7 +247,7 @@ pub mod backend {
                             for vv in v {
                                 v_.extend(vv)
                             }
-                            write!(w, " > {:?}\n   {:?}\n", k.to_hex(), v_.to_hex());
+                            try!(write!(w, " > {:?}\n   {:?}\n", k.to_hex(), v_.to_hex()));
                         }
                     }
                 } else {
@@ -255,10 +256,11 @@ pub mod backend {
                         for vv in v {
                             v_.extend(vv)
                         }
-                        write!(w, "{:?} {:?}\n", k.to_hex(), v_.to_hex());
+                        try!(write!(w, "{:?} {:?}\n", k.to_hex(), v_.to_hex()));
                     }
                 }
             }
+            Ok(())
         }
 
         pub fn abort(self) {
