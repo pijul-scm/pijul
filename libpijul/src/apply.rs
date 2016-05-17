@@ -27,7 +27,7 @@ use super::Len;
 use std::collections::{HashSet, HashMap};
 use std::ptr::copy_nonoverlapping;
 use std::fs::File;
-use std::io::{stdout,BufWriter};
+use std::io::{BufWriter};
 use std::path::Path;
 use time;
 use std::sync::Arc;
@@ -816,7 +816,7 @@ pub fn apply_patches<T>(repository:&mut Transaction<T>,
         debug!("done outputting_repository");
     }
     let mut f = File::create(r.join("dump")).unwrap();
-    repository.dump(&mut f);
+    try!(repository.dump(&mut f));
     Ok(())
 }
 
@@ -872,7 +872,7 @@ pub fn apply_local_patch<T>(repository:&mut Transaction<T>, branch_name:&str, lo
             repository.debug(branch_name, &mut buffer);
 
             let mut f = File::create(location.join("dump")).unwrap();
-            repository.dump(&mut f);
+            try!(repository.dump(&mut f));
             debug!("/debugging");
         }
     }

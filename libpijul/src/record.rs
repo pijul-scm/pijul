@@ -269,7 +269,7 @@ fn record_all<'a,'b,'c,T> (
     let db_external = repository.db_external();
     let db_contents = repository.db_contents();
     let current_node=
-        if let Some((parent_node, parent_inode)) = parent {
+        if let Some((parent_node, _parent_inode)) = parent {
             match db_inodes.get(current_inode.as_ref()) {
                 Some(current_node)=>{
                     let old_attr=((current_node[1] as usize) << 8) | (current_node[2] as usize);

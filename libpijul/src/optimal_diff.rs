@@ -243,7 +243,7 @@ pub mod diff {
         //let t0=time::precise_time_s();
         let db_contents = repository.db_contents();
         let mut d = Diff { lines_a:Vec::new(), contents_a:Vec::new() };
-        graph::output_file(branch, &db_contents, &mut d,a,redundant);
+        try!(graph::output_file(branch, &db_contents, &mut d,a,redundant));
         //let t1=time::precise_time_s();
         //info!("output_file took {}s",t1-t0);
         local_diff(repository, branch, actions, line_num,

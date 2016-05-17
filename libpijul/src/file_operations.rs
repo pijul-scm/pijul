@@ -283,7 +283,7 @@ pub fn list_files<T>(repository:&Transaction<T>)->Result<Vec<PathBuf>, Error> {
             let db_tree = repo.db_tree();
             for (k,v) in db_tree.iter(key, None) {
                 if v.len()>0 && k == key {
-                    collect(repo,v,next_pb_.as_path(),&k[INODE_SIZE..],files);
+                    try!(collect(repo,v,next_pb_.as_path(),&k[INODE_SIZE..],files));
                 } else {
                     break
                 }

@@ -262,7 +262,7 @@ fn output_aux<'a,'b,'name,T>(
                                     let mut f=try!(std::fs::File::create(&path));
                                     debug!("done");
                                     
-                                    output_file(branch, db_contents, &mut f,l,&mut redundant_edges);
+                                    try!(output_file(branch, db_contents, &mut f,l,&mut redundant_edges));
                                 }
                             } else {
                                 recursive_calls.push((filename.to_string(),cv.to_vec(),c_inode.to_vec()));

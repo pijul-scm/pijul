@@ -349,7 +349,7 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(branch:&'a Branch<'name,
         Ok(())
     }
     let zero=[0;HASH_SIZE];
-    dfs(&mut graph,&mut first_visit,&mut last_visit,forward,&zero[..],&mut step,&scc,scc.len()-1);
+    try!(dfs(&mut graph,&mut first_visit,&mut last_visit,forward,&zero[..],&mut step,&scc,scc.len()-1));
     debug!("dfs done");
     // assumes no conflict for now.
     let mut i=scc.len()-1;
@@ -405,10 +405,10 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(branch:&'a Branch<'name,
                             if cont.len() > 0 && !first { // If this is the first non-empty line of this side of the conflict
                                 first=true;
                                 // Either we've had another side of the conflict before
-                                if ! *is_first {b.conflict_next();}
+                                if ! *is_first { try!(b.conflict_next());}
                                 // Or not
                                 else {
-                                    b.begin_conflict();
+                                    try!(b.begin_conflict());
                                     *is_first=false
                                 }
                             }
@@ -433,7 +433,7 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(branch:&'a Branch<'name,
                         
                         i:usize,
                         j:usize,
-                        next_vertices:&mut HashSet<usize>) {
+                        next_vertices:&mut HashSet<usize>) -> Result<(), Error> {
                         
                         debug!("permutations:j={}, nodes={:?}",j, {let v:Vec<_>= nodes.iter().map(|x| x.to_hex()).collect(); v});
                         if j<scc[i].len() {
@@ -456,7 +456,6 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(branch:&'a Branch<'name,
                                 if graph.lines[scc[i][j]].is_zombie() {
                                     let mut is_forced:bool = false;
                                     let mut is_defined:bool = false;
-
 
                                     for (k,v) in branch.iter(key, Some(&[PARENT_EDGE][..])) {
                                         if v[0] <= PARENT_EDGE|PSEUDO_EDGE|FOLDER_EDGE && k == key {
@@ -485,9 +484,9 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(branch:&'a Branch<'name,
                                         key_is_present = is_forced
                                     }
                                     if !is_forced {
-                                        permutations(branch,db_contents, graph,first_visit,last_visit,
-                                                     scc,nodes,b,is_first,selected_zombies,next,
-                                                     i,j+1,next_vertices)
+                                        try!(permutations(branch,db_contents, graph,first_visit,last_visit,
+                                                          scc,nodes,b,is_first,selected_zombies,next,
+                                                          i,j+1,next_vertices))
                                     }
                                     if key_is_present {
                                         for f in newly_forced.iter() {
@@ -497,9 +496,9 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(branch:&'a Branch<'name,
                                 }
                                 if key_is_present {
                                     nodes.push(key);
-                                    permutations(branch,db_contents, graph,first_visit,last_visit,
-                                                 scc,nodes,b,is_first,selected_zombies,next,
-                                                 i,j+1,next_vertices);
+                                    try!(permutations(branch,db_contents, graph,first_visit,last_visit,
+                                                      scc,nodes,b,is_first,selected_zombies,next,
+                                                      i,j+1,next_vertices));
                                     nodes.pop();
                                 }
                                 if newly_forced.len()>0 {
@@ -508,18 +507,20 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(branch:&'a Branch<'name,
                                         selected_zombies.remove(f);
                                     }
                                 }
-                            }
+                            };
+                            Ok(())
                         } else {
                             debug!("next? {}",next_vertices.len());
                             for chi in next_vertices.iter() {
                                 debug!("rec: get_conflict {}",*chi);
-                                get_conflict(branch,db_contents,graph,first_visit,last_visit,scc,nodes,b,is_first,selected_zombies,next,*chi);
-                            }
+                                try!(get_conflict(branch,db_contents,graph,first_visit,last_visit,scc,nodes,b,is_first,selected_zombies,next,*chi));
+                            };
+                            Ok(())
                         }
                     }
                     let mut next_vertices=HashSet::new();
                     debug!("permutations");
-                    permutations(branch,db_contents, graph,first_visit,last_visit,scc,nodes,b,is_first,selected_zombies,next,i,0,&mut next_vertices);
+                    try!(permutations(branch,db_contents, graph,first_visit,last_visit,scc,nodes,b,is_first,selected_zombies,next,i,0,&mut next_vertices));
                 }
                 Ok(())
             }
@@ -527,11 +528,11 @@ pub fn output_file<'a,'b,'name,T,B:LineBuffer<'a,'b,T>>(branch:&'a Branch<'name,
             let (next,is_first)={
                 let mut is_first = true;
                 let mut next = 0;
-                get_conflict(branch,db_contents,&graph,&first_visit[..],&last_visit[..],&mut scc, &mut nodes,
-                             buf,
-                             &mut is_first,
-                             &mut selected_zombies,
-                             &mut next, i);
+                try!(get_conflict(branch,db_contents,&graph,&first_visit[..],&last_visit[..],&mut scc, &mut nodes,
+                                  buf,
+                                  &mut is_first,
+                                  &mut selected_zombies,
+                                  &mut next, i));
                 (next,is_first)
             };
             if !is_first { try!(buf.end_conflict()) }
