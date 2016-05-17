@@ -68,6 +68,7 @@ pub mod backend {
             Contents { value:self.value.clone() }
         }
     }
+
     pub struct Repository { env:sanakirja::Env }
     #[derive(Debug,PartialEq)]
     enum Root {
@@ -82,6 +83,7 @@ pub mod backend {
         REVDEP,
         NODES
     }
+
     fn open_db<T>(txn:&mut sanakirja::MutTxn<T>, num:Root) -> Result<sanakirja::Db, sanakirja::Error> {
         if let Some(db) = txn.root(num as usize) {
             Ok(db)
@@ -93,6 +95,7 @@ pub mod backend {
         pub fn open<P:AsRef<Path>>(path:P) -> Result<Self,Error> {
             Ok(Repository { env: try!(sanakirja::Env::new(path, 1<<30)) })
         }
+
         pub fn mut_txn_begin<'env>(&'env self) -> Result<Transaction<'env,()>,Error> {
             let mut txn = try!(self.env.mut_txn_begin());
             let db_tree = try!(open_db(&mut txn, Root::TREE));
@@ -128,6 +131,7 @@ pub mod backend {
         txn:*mut sanakirja::MutTxn<'env,T>,
         marker:PhantomData<&'txn()>,
     }
+
     pub struct Branch<'name,'txn,'env,T> {
         db: sanakirja::Db,
         name: &'name str,
@@ -139,57 +143,50 @@ pub mod backend {
     impl<'env,T> Transaction<'env,T>{
         
         pub fn db_tree<'txn>(&'txn self) -> Db<'txn,'env,T> {
-            unsafe {
                 Db { db:self.db_tree.get(),
                      txn:self.txn.get(),
                      marker:PhantomData,
                 }
-            }
         }
+
         pub fn db_revtree<'txn>(&'txn self) -> Db<'txn,'env,T> {
-            unsafe {
                 Db { db:self.db_revtree.get(),
                      txn:self.txn.get(),
                      marker:PhantomData,
                                     }
-            }
         }
+
         pub fn db_inodes<'txn>(&'txn self) -> Db<'txn,'env,T> {
-            unsafe {
                 Db { db: self.db_inodes.get(),
                      txn: self.txn.get(),
                      marker:PhantomData,
                 }
-            }
         }
+
         pub fn db_revinodes<'txn>(&'txn self) -> Db<'txn,'env,T> {
-            unsafe {
                 Db { db:self.db_revinodes.get(),
                      txn: self.txn.get(),
                      marker:PhantomData,
                 }
-            }
         }
+
         pub fn db_contents<'txn>(&'txn self) -> Db<'txn,'env,T> {
-            unsafe {
                 Db { db: self.db_contents.get(),
                      txn: self.txn.get(),
                      marker:PhantomData,
                 }
-            }
         }
+
         pub fn db_revdep<'txn>(&'txn self) -> Db<'txn,'env,T> {
-            unsafe {
                 Db { db: self.db_revdep.get(),
                      txn: self.txn.get(),
                      marker:PhantomData,
                 }
-            }
         }
+
         pub fn db_nodes<'name,'txn,'a>(&'txn self, name:&'name str) -> Result<Branch<'name,'txn,'env,T>, Error> {
-            unsafe {
-                let txn = &mut *self.txn.get();
-                let db_nodes = &mut *self.db_nodes.get();
+                let txn = unsafe { &mut *self.txn.get() };
+                let db_nodes = unsafe { &mut *self.db_nodes.get() };
                 let branch =
                     if let Some(branch) = txn.open_db(&db_nodes, name.as_bytes()) {
                         branch
@@ -202,32 +199,27 @@ pub mod backend {
                             marker: PhantomData,
                             parent: db_nodes
                 })
-            }
         }
+
         pub fn db_branches<'txn>(&'txn self) -> Db<'txn,'env,T> {
-            unsafe {
                 Db { db: self.db_branches.get(),
                      txn: self.txn.get(),
                      marker:PhantomData,
                 }
-            }
         }
 
         pub fn db_internal<'txn>(&'txn self) -> Db<'txn,'env,T> {
-            unsafe {
                 Db { db: self.db_internal.get(),
                      txn: self.txn.get(),
                      marker:PhantomData,
                 }
-            }
         }
+
         pub fn db_external<'txn>(&'txn self) -> Db<'txn,'env,T> {
-            unsafe {
                 Db { db: self.db_external.get(),
                      txn: self.txn.get(),
                      marker:PhantomData,
                 }
-            }
         }
         pub fn dump<W:std::io::Write>(&self, mut w:W) {
             let databases = [(Root::TREE, &self.db_tree),
