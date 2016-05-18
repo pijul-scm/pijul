@@ -17,6 +17,7 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 extern crate libc;
+extern crate env_logger;
 
 use libc::{c_char,c_int,c_void,c_uint};
 extern crate libpijul;
@@ -33,6 +34,7 @@ use std::os::unix::io::{FromRawFd};
 #[no_mangle]
 pub extern "C" fn pijul_open_repository(path:*const c_char,repository:*mut *mut c_void) -> c_int {
     unsafe {
+        env_logger::init();
         let p=std::str::from_utf8_unchecked(std::ffi::CStr::from_ptr(path).to_bytes());
         let path=Path::new(p);
         match Repository::open(&path){

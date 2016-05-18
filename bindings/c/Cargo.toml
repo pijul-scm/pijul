@@ -7,6 +7,7 @@ license = "AGPL-3.0"
 [dependencies]
 libpijul = { version = "*", path = "../libpijul" }
 libc="*"
+env_logger = "*"
 
 [lib]
 name="cpijul"
