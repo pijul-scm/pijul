@@ -5,6 +5,5 @@ stdenv.mkDerivation rec {
   version = "0.0";
   src = ./.;
 
-  buildInputs = [ rustPlatform.rustc rustPlatform.cargo lmdb openssl libssh zlib pkgconfig rustfmt ];
-  
+  buildInputs = [ rustPlatform.rustc rustPlatform.cargo openssl libssh zlib pkgconfig rustfmt ];
 }
