@@ -367,6 +367,7 @@ impl<'a> Session<'a> {
         let repo_dir=pristine_dir(target);
         let repo = try!(Repository::open(&repo_dir).map_err(Error::Repository));
         let mut txn = try!(repo.mut_txn_begin());
+        info!("Calling apply_patches");
         try!(txn.apply_patches(DEFAULT_BRANCH, target,&pullable.remote,&pullable.local));
         debug!("pull: committing");
         let mut f = File::create("/tmp/debug").unwrap();
@@ -480,7 +481,7 @@ pub fn parse_remote<'a>(remote_id:&'a str,port:Option<u64>,base_path:Option<&'a 
 }
 
 // Reimplementation of hash_set::Difference (because of unstable features used there)
-
+#[derive(Debug)]
 pub struct Pullable {
     pub local:HashSet<Vec<u8>>,
     pub remote:HashSet<Vec<u8>>

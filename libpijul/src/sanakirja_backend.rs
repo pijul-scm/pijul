@@ -130,6 +130,7 @@ pub mod backend {
         db: *mut sanakirja::Db,
         txn:*mut sanakirja::MutTxn<'env,T>,
         marker:PhantomData<&'txn()>,
+        name: Option<&'static str>
     }
 
     pub struct Branch<'name,'txn,'env,T> {
@@ -146,6 +147,7 @@ pub mod backend {
             Db { db:self.db_tree.get(),
                  txn:self.txn.get(),
                  marker:PhantomData,
+                 name: Some("db_tree")
             }
         }
 
@@ -153,6 +155,7 @@ pub mod backend {
             Db { db:self.db_revtree.get(),
                  txn:self.txn.get(),
                  marker:PhantomData,
+                 name: Some("db_revtree")
             }
         }
 
@@ -160,6 +163,7 @@ pub mod backend {
             Db { db: self.db_inodes.get(),
                  txn: self.txn.get(),
                  marker:PhantomData,
+                 name: Some("db_inodes")
             }
         }
 
@@ -167,6 +171,7 @@ pub mod backend {
             Db { db:self.db_revinodes.get(),
                  txn: self.txn.get(),
                  marker:PhantomData,
+                 name: Some("db_revinodes")
             }
         }
 
@@ -174,6 +179,7 @@ pub mod backend {
             Db { db: self.db_contents.get(),
                  txn: self.txn.get(),
                  marker:PhantomData,
+                 name: Some("db_contents")
             }
         }
 
@@ -181,6 +187,7 @@ pub mod backend {
             Db { db: self.db_revdep.get(),
                  txn: self.txn.get(),
                  marker:PhantomData,
+                 name: Some("db_revdep")
             }
         }
 
@@ -205,6 +212,7 @@ pub mod backend {
             Db { db: self.db_branches.get(),
                  txn: self.txn.get(),
                  marker:PhantomData,
+                 name: Some("db_branches")
             }
         }
 
@@ -212,6 +220,7 @@ pub mod backend {
             Db { db: self.db_internal.get(),
                  txn: self.txn.get(),
                  marker:PhantomData,
+                 name: Some("db_internal")
             }
         }
 
@@ -219,10 +228,12 @@ pub mod backend {
             Db { db: self.db_external.get(),
                  txn: self.txn.get(),
                  marker:PhantomData,
+                 name: Some("db_external")
             }
         }
 
         pub fn dump<W:std::io::Write>(&self, mut w:W) -> Result<(), Error> {
+            debug!("dumping repository");
             let databases = [(Root::TREE, &self.db_tree),
                              (Root::REVTREE, &self.db_revtree),
                              (Root::INODES, &self.db_inodes),
@@ -236,12 +247,15 @@ pub mod backend {
             let txn = unsafe {&mut *self.txn.get() };
             let mut v_=Vec::new();
             for &(ref name,ref i) in databases.iter() {
+                debug!("Dumping {:?}", name);
                 try!(write!(w,"\n--------\ndatabase {:?}\n\n", name));
                 if *name == Root::NODES {
+                    let db0 = unsafe { &*i.get() };
+                    txn.debug(&[&db0], "/tmp/dump_debugging", false, true);
                     for (k,mut v) in txn.iter(unsafe {&*i.get()}, b"", None) {
                         try!(write!(w, "{:?} {:?}\n", k.to_hex(), v_.to_hex()));
                         let db = unsafe { sanakirja::Db::from_value(v.next().unwrap()) };
-
+                        debug!("db: {:?} {:?}", std::str::from_utf8(k), db);
                         for (k,v) in txn.iter(&db, b"", None) {
                             v_.clear();
                             for vv in v {
@@ -260,6 +274,7 @@ pub mod backend {
                     }
                 }
             }
+            debug!("done dumping repository");
             Ok(())
         }
 
@@ -319,7 +334,7 @@ pub mod backend {
     impl<'txn,'env,T> Db<'txn,'env,T> {
         
         pub fn put(&mut self, key:&[u8], value:&[u8]) -> Result<(),Error> {
-            debug!("put {:?} {:?}", key.to_hex(), value.to_hex());
+            debug!("put {:?}, {:?} {:?}", self.name, key.to_hex(), value.to_hex());
             let mut rng = rand::thread_rng();
             unsafe {
                 let mut txn = &mut *self.txn;
@@ -329,7 +344,7 @@ pub mod backend {
         }
 
         pub fn replace(&mut self, key:&[u8], value:&[u8]) -> Result<(),Error> {
-            debug!("replace {:?} {:?}", key.to_hex(), value.to_hex());
+            debug!("replace {:?} {:?} {:?}", self.name, key.to_hex(), value.to_hex());
             let mut rng = rand::thread_rng();
             unsafe {
                 let mut txn = &mut *self.txn;
@@ -350,7 +365,7 @@ pub mod backend {
         pub fn get<'a>(&'a self, key:&[u8]) -> Option<&'a[u8]> {
             unsafe {
                 let txn = &*self.txn;
-                txn.get(&*self.db, key, None).and_then(|mut x| x.next())
+                txn.get(&*self.db, key, None).and_then(|mut x| Some(x.next().unwrap_or(b"")))
             }
         }
         pub fn iter<'a>(&'a self, starting_key:&[u8], starting_value:Option<&[u8]>) -> Iter<'a,sanakirja::MutTxn<'env,T>> {
@@ -370,9 +385,11 @@ pub mod backend {
 
 
     impl<'name,'txn,'env,T> Branch<'name,'txn,'env,T> {
-        
+        pub fn name(&self) -> &'name str {
+            self.name
+        }
         pub fn put(&mut self, key:&[u8], value:&[u8]) -> Result<(),Error> {
-            debug!("put {:?} {:?}", key.to_hex(), value.to_hex());
+            debug!("put branch {:?} {:?} {:?}", self.name, key.to_hex(), value.to_hex());
             let mut rng = rand::thread_rng();
             unsafe {
                 let mut txn = &mut *self.txn;
@@ -411,6 +428,7 @@ pub mod backend {
             unsafe {
                 let mut rng = rand::thread_rng();
                 let txn = &mut *self.txn;
+                debug!("committing branch {:?} {:?}", name, self.db);
                 try!(txn.put_db(&mut rng, &mut *self.parent, name.as_bytes(), self.db));
                 Ok(())
             }

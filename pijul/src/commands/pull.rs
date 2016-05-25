@@ -126,7 +126,9 @@ pub fn run<'a>(args : &Params<'a>) -> Result<(), Error> {
                 pullable.remote=selected;
             }
             // Pulling and applying
+            info!("Pulling patch {:?}", pullable);
             try!(session.pull(r,&pullable));
+            info!("Saving meta");
             if args.set_default && savable {
                 let mut meta = match Meta::load(r) { Ok(m)=>m, Err(_)=> { Meta::new() } };
                 if let Some(remote_id)=args.remote_id {
