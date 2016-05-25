@@ -877,6 +877,7 @@ pub fn apply_patches<T>(repository: &mut Transaction<T>,
     }
     let mut f = File::create(r.join("dump")).unwrap();
     try!(repository.dump(&mut f));
+    debug!("finished apply_patches");
     Ok(())
 }
 

@@ -67,23 +67,25 @@ fn filename_of_inode<T>(db_revtree:&Db<T>,inode:&[u8],working_copy:&mut PathBuf)
     }
     true
 }
-/*
-pub fn retrieve_paths<'a,'b>(ws0:&mut Workspace,
-                             ws1:&mut Workspace,
-                             branch:&'a Db<'a,'b>, db_contents:&'a Db<'a,'b>,
-                             key:&[u8], flag:u8) -> Vec<(Contents<'a>,&'a[u8])> {
+
+pub fn retrieve_paths<'name,'a,'b,T>(branch:&'a Branch<'name,'a,'b,T>, db_contents:&'a Db<'a,'b,T>,
+                                     key:&[u8], flag:u8) -> Vec<(Vec<u8>,Vec<u8>)> {
     let mut result=Vec::new();
-    for (k,b) in branch.iter(ws0, key,Some(&[flag][..])) {
+    for (k,b) in branch.iter(key,Some(&[flag][..])) {
         if k==key && b[0] <= flag|PSEUDO_EDGE {
 
             if let Some(cont_b) = db_contents.contents(&b[1..(1+KEY_SIZE)]) {
 
+                let mut contents = Vec::new();
+                for c in cont_b {
+                    contents.extend(c)
+                }
                 //let filename=&cont_b[2..];
                 //let perms= ((cont_b[0] as usize) << 8) | (cont_b[1] as usize);
-                for (k,c) in branch.iter(ws1, &b[1..(1+KEY_SIZE)], Some(&[flag][..])) {
+                for (k,c) in branch.iter(&b[1..(1+KEY_SIZE)], Some(&[flag][..])) {
                     if k==&b[1..(1+KEY_SIZE)] && c[0] <= flag|PSEUDO_EDGE {
                         let cv=&c[1..(1+KEY_SIZE)];
-                        result.push((cont_b.clone(),cv))
+                        result.push((contents.clone(),cv.to_vec()))
                     } else {
                         break
                     }
@@ -99,7 +101,7 @@ pub fn retrieve_paths<'a,'b>(ws0:&mut Workspace,
 }
 
 /// Returns the path's inode
-pub fn follow_path(db_tree:&Db, path:&[&[u8]])->Result<Option<Vec<u8>>,Error> {
+pub fn follow_path<T>(db_tree:&Db<T>, path:&[&[u8]])->Result<Option<Vec<u8>>,Error> {
     // follow in tree, return inode
     let mut buf=vec![0;INODE_SIZE];
     for p in path {
@@ -121,16 +123,16 @@ pub fn follow_path(db_tree:&Db, path:&[&[u8]])->Result<Option<Vec<u8>>,Error> {
 }
 
 /// Returns the node's properties
-pub fn node_of_inode<'a,'b>(db_inodes:&'a Db<'a,'b>, inode:&[u8]) -> Option<&'a [u8]> {
+pub fn node_of_inode<'a,'b,T>(db_inodes:&'a Db<'a,'b,T>, inode:&[u8]) -> Option<Vec<u8>> {
     // follow in tree, return inode
     if inode == ROOT_INODE.as_ref() {
-        Some(ROOT_KEY)
+        Some(ROOT_KEY.to_vec())
     } else {
         let node=db_inodes.get(&inode);
-        node
+        node.map(|x| x.to_vec())
     }
 }
- */
+
 
 fn output_aux<'a,'b,'name,T>(
     branch:&Branch<'name,'b,'a,T>,

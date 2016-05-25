@@ -85,38 +85,11 @@ impl<'env,T> backend::Transaction<'env,T> {
         let mut db_revtree = self.db_revtree();
         file_operations::add_inode(&mut db_tree, &mut db_revtree, None, path.as_ref(), is_dir)
     }
-    pub fn list_files(&self) -> Result<Vec<PathBuf>, Error> {
-        file_operations::list_files(self)
-    }
-
     pub fn remove_file<P:AsRef<Path>>(&mut self, path:P) -> Result<(),Error> {
         file_operations::remove_file(self, path.as_ref())
     }
     pub fn move_file<P:AsRef<Path>, Q:AsRef<Path>>(&mut self, path:P, path_:Q,is_dir:bool) -> Result<(), Error>{
         file_operations::move_file(self, path.as_ref(), path_.as_ref(), is_dir)
-    }
-    pub fn retrieve_and_output<'a,'name,W:std::io::Write>(&self,branch:&backend::Branch<'name,'a,'env,T>,key:&[u8],l:&mut W) -> Result<(),Error> {
-        let db_contents = self.db_contents();
-        let mut redundant_edges = Vec::new();
-        let graph = graph::retrieve(branch,key);
-        graph::output_file(branch, &db_contents, l, graph,&mut redundant_edges)
-    }
-
-    pub fn branch_patches<'a>(&'a self,db_external:&'a backend::Db<'a,'env,T>, branch_name:&str)->Result<HashSet<&'a[u8]>,Error> {
-        let mut patches = HashSet::new();
-        let db_patches = self.db_branches();
-        for (br_name,patch_hash) in db_patches.iter(branch_name.as_bytes(), None) {
-            debug!("branch_patches: {:?}, {:?}",
-                   String::from_utf8_lossy(br_name),
-                   patch_hash.to_hex());
-            if br_name == branch_name.as_bytes() {
-                patches.insert(patch::external_hash(&db_external, patch_hash));
-            } else {
-                debug!("not the right branch name");
-                break
-            }
-        }
-        Ok(patches)
     }
     fn write_changes_file<P:AsRef<Path>>(&self, branch_name:&str, path:P)->Result<(),Error> {
         let db_external = self.db_external();
@@ -142,14 +115,63 @@ impl<'env,T> backend::Transaction<'env,T> {
         try!(self.write_changes_file(branch_name, location));
         Ok(result)
     }
-    pub fn record<P:AsRef<Path>>(&mut self,branch_name:&str, working_copy:P)->Result<(Vec<patch::Change>,HashMap<patch::LocalKey,file_operations::Inode>),Error>{
-        record::record(self,branch_name,working_copy.as_ref())
-    }
     pub fn output_repository<P:AsRef<Path>>(&mut self, branch_name:&str, working_copy:P, pending:&patch::Patch) -> Result<(),Error>{
         debug!("outputting repository");
         let result = output::output_repository(self,branch_name,working_copy.as_ref(),pending);
         debug!("/outputting repository");
         result
+    }
+
+
+
+    // immutable part, should be separated into a trait at some point
+    // (would need mutable + immutable transactions from the backend
+    // module).
+
+    pub fn follow_path(&self, path:&[&[u8]])->Result<Option<Vec<u8>>,Error> {
+        let db_tree = self.db_tree();
+        output::follow_path(&db_tree, path)
+    }
+    pub fn node_of_inode<'a>(&'a self, inode:&[u8])->Option<Vec<u8>> {
+        let db_inodes = self.db_inodes();
+        output::node_of_inode(&db_inodes, inode)
+    }
+    pub fn list_files(&self) -> Result<Vec<PathBuf>, Error> {
+        file_operations::list_files(self)
+    }
+
+    pub fn retrieve_paths(&self,branch_name:&str,key:&[u8], forward:bool) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let db_nodes = self.db_nodes(branch_name).unwrap();
+        let db_contents = self.db_contents();
+        output::retrieve_paths(&db_nodes, &db_contents, key, if forward { graph::FOLDER_EDGE }
+                               else { graph::FOLDER_EDGE|graph::PARENT_EDGE })
+    }
+    
+    pub fn retrieve_and_output<'a,'name,W:std::io::Write>(&self,branch:&backend::Branch<'name,'a,'env,T>,key:&[u8],l:&mut W) -> Result<(),Error> {
+        let db_contents = self.db_contents();
+        let mut redundant_edges = Vec::new();
+        let graph = graph::retrieve(branch,key);
+        graph::output_file(branch, &db_contents, l, graph,&mut redundant_edges)
+    }
+
+    pub fn branch_patches<'a>(&'a self,db_external:&'a backend::Db<'a,'env,T>, branch_name:&str)->Result<HashSet<&'a[u8]>,Error> {
+        let mut patches = HashSet::new();
+        let db_patches = self.db_branches();
+        for (br_name,patch_hash) in db_patches.iter(branch_name.as_bytes(), None) {
+            debug!("branch_patches: {:?}, {:?}",
+                   String::from_utf8_lossy(br_name),
+                   patch_hash.to_hex());
+            if br_name == branch_name.as_bytes() {
+                patches.insert(patch::external_hash(&db_external, patch_hash));
+            } else {
+                debug!("not the right branch name");
+                break
+            }
+        }
+        Ok(patches)
+    }
+    pub fn record<P:AsRef<Path>>(&self,branch_name:&str, working_copy:P)->Result<(Vec<patch::Change>,HashMap<patch::LocalKey,file_operations::Inode>),Error>{
+        record::record(self,branch_name,working_copy.as_ref())
     }
     pub fn debug<W>(&self,branch_name:&str, w:&mut W) where W:std::io::Write {
         debug!("debugging branch {:?}", branch_name);
