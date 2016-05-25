@@ -91,7 +91,7 @@ pub fn run(args : &Params) -> Result<Option<()>, Error> {
             let t0=time::precise_time_s();
             let (changes,syncs)= {
                 let repo = try!(Repository::open(&repo_dir).map_err(Error::Repository));
-                let mut txn = try!(repo.mut_txn_begin());
+                let txn = try!(repo.mut_txn_begin());
                 let (changes,syncs)=try!(txn.record(DEFAULT_BRANCH, &r).map_err(Error::Repository));
                 if !args.yes_to_all {
                     let c=try!(super::ask::ask_record(&txn,&changes));

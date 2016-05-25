@@ -350,7 +350,7 @@ fn record_all<'a,'b,'c,T> (
     Ok(())
 }
 
-pub fn record<T>(repository:&mut Transaction<T>,branch_name:&str, working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<LocalKey,Inode>),Error>{
+pub fn record<T>(repository:&Transaction<T>,branch_name:&str, working_copy:&std::path::Path)->Result<(Vec<Change>,HashMap<LocalKey,Inode>),Error>{
     let mut branch = try!(repository.db_nodes(branch_name));
     let mut st = RecordState {
         line_num: 1,
