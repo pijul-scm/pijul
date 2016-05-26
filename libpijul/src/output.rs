@@ -20,7 +20,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 use super::backend::*;
 use super::patch::{Patch,KEY_SIZE,ROOT_KEY,HASH_SIZE, new_internal};
 use super::graph::{PSEUDO_EDGE,FOLDER_EDGE,PARENT_EDGE, DIRECTORY_FLAG, retrieve, output_file};
-use super::file_operations::{INODE_SIZE,ROOT_INODE, create_new_inode};
+use super::file_operations::{Inode, INODE_SIZE,ROOT_INODE, create_new_inode};
+
 use super::error::Error;
 use super::apply::{apply,has_edge};
 use super::Len;
@@ -42,11 +43,11 @@ enum Tree {
 
 
 // Climp up the tree (using revtree).
-fn filename_of_inode<T>(db_revtree:&Db<T>,inode:&[u8],working_copy:&mut PathBuf)->bool {
+fn filename_of_inode<T>(db_revtree:&Db<T>, inode:&Inode, working_copy:&mut PathBuf)->bool {
     //let mut v_inode=MDB_val{mv_data:inode.as_ptr() as *const c_void, mv_size:inode.len() as size_t};
     //let mut v_next:MDB_val = unsafe {std::mem::zeroed()};
     let mut components=Vec::new();
-    let mut current=inode;
+    let mut current=inode.as_ref();
     loop {
         match db_revtree.get(current) {
             Some(v) => {
@@ -135,26 +136,23 @@ pub fn node_of_inode<'a,'b,T>(db_inodes:&'a Db<'a,'b,T>, inode:&[u8]) -> Option<
 
 
 fn output_aux<'a,'b,'name,T>(
+    ws0:&mut Workspace,
+    ws1:&mut Workspace,
+    ws2:&mut Workspace,
     branch:&Branch<'name,'b,'a,T>,
     db_contents:&Db<'b,'a,T>,
-    db_inodes:&mut Db<'b,'a,T>,
-    db_revinodes:&mut Db<'b,'a,T>,
-    db_tree:&mut Db<'b,'a,T>,
-    db_revtree:&mut Db<'b,'a,T>,
     working_copy:&Path,
     do_output:bool,
-    visited:&mut HashMap<Vec<u8>,Vec<PathBuf>>,
-    path:&mut PathBuf,
+    path: &Path, // &mut PathBuf,
     key:&[u8],
-    inode:&[u8],
-    moves:&mut Vec<Tree>
-)->Result<(),Error> {
+    parent_inode:&Inode,
+    )->Result<(),Error> {
+
 
     debug!(target:"output_repository","visited {}",key.to_hex());
-    moves.clear();
-    debug_assert!(inode.len()==INODE_SIZE);
+    st.moves.clear();
     debug_assert!(key.len()==KEY_SIZE);
-    let mut recursive_calls=Vec::new();
+    let mut recursive_calls : Vec<(String, Vec<u8>, Inode)> = Vec::new();
     let mut new_inodes:HashMap<Vec<u8>,(usize,&[u8])>=HashMap::new();
     // This function is globally a DFS, but has two phases,
     // one for collecting actions (and moving files around on
@@ -183,13 +181,12 @@ fn output_aux<'a,'b,'name,T>(
                 debug!("iter: {:?}, {:?}", k.to_hex(), c.to_hex());
                 debug!("{:?}", k==&b[1..(1+KEY_SIZE)] && c[0]<=FOLDER_EDGE|PSEUDO_EDGE)
             }*/
-            
+
             for (_,c) in branch.iter(&b[1..(1+KEY_SIZE)], Some(&[FOLDER_EDGE][..]))
                 .take_while(|&(k,c)| {
                     debug!("selecting c: {:?} {:?}", k.to_hex(), c.to_hex());
                     k==&b[1..(1+KEY_SIZE)] && c[0]<=FOLDER_EDGE|PSEUDO_EDGE
                 }) {
-
                     debug_assert!(c.len() == 1+KEY_SIZE+HASH_SIZE);
                     let cv=&c[1..(1+KEY_SIZE)];
                     debug!("cv={}",cv.to_hex());
@@ -199,7 +196,7 @@ fn output_aux<'a,'b,'name,T>(
                             None => {
                                 let mut v=vec![0;INODE_SIZE];
                                 loop {
-                                    create_new_inode(db_revtree, &mut v);
+                                    create_new_inode(ws2, db_revtree, &mut v);
                                     if new_inodes.get(&v).is_none() { break }
                                 }
                                 new_inodes.insert(v.clone(),(perms,cv));
@@ -259,12 +256,12 @@ fn output_aux<'a,'b,'name,T>(
                             if perms&DIRECTORY_FLAG==0 {
                                 if do_output {
                                     let mut redundant_edges=vec!();
-                                    let l = retrieve(branch, &cv);
+                                    let l = retrieve(ws2, branch, &cv).unwrap();
                                     debug!("creating file {:?}",path);
-                                    let mut f=try!(std::fs::File::create(&path));
+                                    let mut f=std::fs::File::create(&path).unwrap();
                                     debug!("done");
                                     
-                                    try!(output_file(branch, db_contents, &mut f,l,&mut redundant_edges));
+                                    output_file(ws2, branch, db_contents, &mut f,l,&mut redundant_edges);
                                 }
                             } else {
                                 recursive_calls.push((filename.to_string(),cv.to_vec(),c_inode.to_vec()));
@@ -273,8 +270,8 @@ fn output_aux<'a,'b,'name,T>(
                     }
                     path.pop();
                 }
-                debug!("/b");
-    }
+            debug!("/b");
+        }
 
     // Update inodes: add files that were not on the filesystem before this output.
     let mut key=[0;3+KEY_SIZE];
@@ -286,49 +283,49 @@ fn output_aux<'a,'b,'name,T>(
         key[1]=((perm>>8) & 0xff) as u8;
         key[2]=(perm & 0xff) as u8;
         debug!(target:"output_repository","updating dbi_(rev)inodes: {} {}",inode.to_hex(),k.to_hex());
-        try!(db_inodes.put(&inode,&key));
-        try!(db_revinodes.put(&key[3..],&inode));
+        try!(st.db_inodes.put(&inode,&key));
+        try!(st.db_revinodes.put(&key[3..],&inode));
     }
     // Update the tree: add the last file moves.
-    for update in &moves[..] {
+    for update in &st.moves[..] {
         match update {
             &Tree::Move { ref tree_key,ref tree_value } => { // tree_key = inode_v
                 debug!(target:"output_repository","updating move {}{} {}{}",
                        &tree_key[0..INODE_SIZE].to_hex(),std::str::from_utf8(&tree_key[INODE_SIZE..]).unwrap(),
                        &tree_value[0..INODE_SIZE].to_hex(),std::str::from_utf8(&tree_value[INODE_SIZE..]).unwrap());
 
-                let current_parent_inode = db_revtree.get(&tree_value).unwrap().to_vec();
+                let current_parent_inode = st.db_revtree.get(&tree_value).unwrap().to_vec();
                 debug!(target:"output_repository","current parent {}{}",
                        &current_parent_inode[0..INODE_SIZE].to_hex(),
                        std::str::from_utf8(&current_parent_inode[INODE_SIZE..]).unwrap());
-                try!(db_tree.del(&current_parent_inode,Some(&tree_value)));
-                try!(db_revtree.del(&tree_value,Some(&current_parent_inode)));
-                try!(db_tree.put(&tree_key,&tree_value));
-                try!(db_revtree.put(&tree_value,&tree_key));
+                try!(st.db_tree.del(&current_parent_inode,Some(&tree_value)));
+                try!(st.db_revtree.del(&tree_value,Some(&current_parent_inode)));
+                try!(st.db_tree.put(&tree_key,&tree_value));
+                try!(st.db_revtree.put(&tree_value,&tree_key));
             }
             &Tree::Addition { ref tree_key,ref tree_value } =>{
-                try!(db_tree.put(&tree_key,&tree_value));
-                try!(db_revtree.put(&tree_value,&tree_key));
+                try!(st.db_tree.put(&tree_key,&tree_value));
+                try!(st.db_revtree.put(&tree_value,&tree_key));
             }
             &Tree::NameConflict { ref inode } => {
                 // Mark the file as moved.
                 let mut current_key={
-                    db_inodes.get(&inode).unwrap().to_vec()
+                    st.db_inodes.get(&inode).unwrap().to_vec()
                 };
                 current_key[0]=1;
-                try!(db_inodes.put(&current_key,&inode));
+                try!(st.db_inodes.put(&current_key,&inode));
             }
         }
     }
 
     // Now do all the recursive calls
     for (filename,cv,c_inode) in recursive_calls {
-        path.push(filename);
+        let filepath = path.join(filename);
         debug!("> {:?}",path);
-        try!(output_aux(branch,db_contents,db_inodes, db_revinodes, db_tree, db_revtree,
+        try!(output_aux(ws0,ws1,ws2,
+                        branch,db_contents,db_inodes, db_revinodes, db_tree, db_revtree,
                         working_copy,do_output,visited,path,&cv,&c_inode,moves));
         debug!("< {:?}",path);
-        path.pop();
     }
     debug!("/output_aux");
     Ok(())
@@ -349,7 +346,8 @@ fn unsafe_output_repository<'name,'b,'a,T>(
     let mut db_revinodes = repository.db_inodes();
     let mut db_tree = repository.db_tree();
     let mut db_revtree = repository.db_revtree();*/
-    try!(output_aux(branch, db_contents, db_inodes, db_revinodes, db_tree, db_revtree,
+    try!(output_aux(ws0,ws1,ws2,
+                    branch, db_contents, db_inodes, db_revinodes, db_tree, db_revtree,
                     working_copy,do_output,&mut visited,&mut p,ROOT_KEY,ROOT_INODE.as_ref(),&mut moves));
 
     // Now, garbage collect dead inodes.
