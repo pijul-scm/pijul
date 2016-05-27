@@ -821,6 +821,97 @@ fn pull_merge_symmetric() {
     assert!(files_eq(&titi_path, &dir_a.join("titi")));
 }
 
+
+#[test]
+fn pull_conflict_symmetric() {
+    let (tmp_dir, dir_a, dir_b) = mk_tmp_repo_pair();
+    let tmp_dir = tmp_dir.into_path();
+    println!("working in {:?}", tmp_dir);
+    
+    let toto_path = &dir_a.join("toto");
+
+    let _ = create_file_random_content(toto_path, "A toto >");
+
+    let _ = add_one_file(&dir_a, toto_path).unwrap();
+
+    let _ = record_all(&dir_a, Some("add toto")).unwrap();
+
+    let toto_b_path = &dir_b.join("toto");
+
+    let _ = create_file_random_content(toto_b_path, "B toto >");
+
+    let _ = add_one_file(&dir_b, toto_b_path).unwrap();
+
+    let _ = record_all(&dir_b, Some("add toto again")).unwrap();
+
+    pull_all(&dir_a, &dir_b).unwrap();
+    pull_all(&dir_b, &dir_a).unwrap();
+
+    assert!(files_eq(&toto_path, &toto_b_path));
+}
+
+
+#[test]
+fn pull_zombie_lines() {
+    let (tmp_dir, dir_a, dir_b) = mk_tmp_repo_pair();
+
+    let toto_path = &dir_a.join("toto");
+
+    let _ = create_file_random_content(toto_path, "A toto > ");
+
+    let _ = add_one_file(&dir_a, toto_path).unwrap();
+
+    let _ = record_all(&dir_a, Some("add toto")).unwrap();
+
+    pull_all(&dir_a, &dir_b).unwrap();
+
+    // In a, empty toto
+
+    {
+        fs::File::create(&toto_path).unwrap();
+    }
+
+    let _ = record_all(&dir_a, Some("empty toto")).unwrap();
+
+    // In b, add lines to the end of toto
+
+    let toto_b_path = dir_b.join("toto");
+
+    {
+        let mut toto_b = fs::OpenOptions::new().append(true).open(&toto_b_path).unwrap();
+        toto_b.write(b"coucou");
+    }
+
+    record_all(&dir_b, Some("adding soon-to-be zombie lines"));
+
+    pull_all(&dir_a, &dir_b).unwrap();
+    pull_all(&dir_b, &dir_a).unwrap();
+
+    assert!(files_eq(&toto_path, &toto_b_path));
+}
+
+#[test]
+fn pull_30_patches() {
+    let (_, dir_a, dir_b) = mk_tmp_repo_pair();
+    
+    let toto_path = &dir_a.join("toto");
+    {
+        fs::File::create(&toto_path).unwrap();
+    }
+    let _ = add_one_file(&dir_a, &toto_path).unwrap();
+    let _ = record_all(&dir_a, Some("")).unwrap();
+    
+    for i in 0..30 {
+        let _ = create_file_random_content(&toto_path, &format!("toto v{} > ", &i));
+        let _ = record_all(&dir_a, Some(&format!("edit #{}", &i))).unwrap();
+    }
+
+    pull_all(&dir_a, &dir_b).unwrap();
+    println!("checking a vs b");
+    assert!(files_eq(&toto_path, &dir_b.join("toto")));
+}
+
+
 #[test]
 fn add_record_edit_record() {
     let dir = mk_tmp_repo();
