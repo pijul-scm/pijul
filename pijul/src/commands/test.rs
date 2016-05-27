@@ -10,6 +10,7 @@ use std;
 use std::io::prelude::*;
 use self::rand::distributions::{IndependentSample, Range};
 use libpijul;
+use std::mem;
 
 fn mk_tmp_repo() -> tempdir::TempDir {
     env_logger::init().unwrap_or(());
@@ -892,7 +893,7 @@ fn pull_zombie_lines() {
 
 #[test]
 fn pull_30_patches() {
-    let (_, dir_a, dir_b) = mk_tmp_repo_pair();
+    let (dir, dir_a, dir_b) = mk_tmp_repo_pair();
     
     let toto_path = &dir_a.join("toto");
     {
@@ -909,6 +910,7 @@ fn pull_30_patches() {
     pull_all(&dir_a, &dir_b).unwrap();
     println!("checking a vs b");
     assert!(files_eq(&toto_path, &dir_b.join("toto")));
+    mem::drop(dir);
 }
 
 
