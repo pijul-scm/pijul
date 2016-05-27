@@ -795,12 +795,12 @@ fn add_edit_remove_pull() {
 }
 
 #[test]
-fn pull_merge() {
+fn pull_merge_symmetric() {
     let (tmp_dir, dir_a, dir_b) = mk_tmp_repo_pair();
 
     let toto_path = &dir_a.join("toto");
 
-    let _ = create_file_random_content(toto_path);
+    let _ = create_file_random_content(toto_path, "A toto >");
 
     let _ = add_one_file(&dir_a, toto_path).unwrap();
 
@@ -808,13 +808,17 @@ fn pull_merge() {
 
     let titi_path = &dir_b.join("titi");
 
-    let _ = create_file_random_content(titi_path);
+    let _ = create_file_random_content(titi_path, "B titi >");
 
     let _ = add_one_file(&dir_b, titi_path).unwrap();
 
     let _ = record_all(&dir_b, Some("add titi")).unwrap();
 
     pull_all(&dir_a, &dir_b).unwrap();
+    pull_all(&dir_b, &dir_a).unwrap();
+
+    assert!(files_eq(&toto_path, &dir_b.join("toto")));
+    assert!(files_eq(&titi_path, &dir_a.join("titi")));
 }
 
 #[test]
