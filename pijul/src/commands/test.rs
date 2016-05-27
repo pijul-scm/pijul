@@ -199,15 +199,9 @@ fn in_empty_dir_nothing_to_record() {
 fn with_changes_sth_to_record() {
     let dir = mk_tmp_repo();
     let fpath = &dir.path().join("toto");
-    {
-        let text0 = random_text();
-        let mut file = fs::File::create(&fpath).unwrap();
-        for line in text0.iter() {
-            file.write_all(line.as_bytes()).unwrap();
-        }
-    }
 
-    let add_params = add::Params { repository : Some(&dir.path()), touched_files : vec![&fpath] };
+    let _ = create_file_random_content(fpath, "toto > ");
+
     match add_one_file(&dir.path(), &fpath).unwrap() {
         Some(()) => (),
         None => panic!("no file added"),
@@ -270,73 +264,32 @@ fn no_remove_without_add() {
 
 #[test]
 fn add_record_pull_stop() {
-    env_logger::init().unwrap_or(());
-    let dir = tempdir::TempDir::new("pijul").unwrap();
-    let dir_a = &dir.path().join("a");
-    let dir_b = &dir.path().join("b");
-    std::mem::forget(dir);
-    fs::create_dir(dir_a).unwrap();
-    fs::create_dir(dir_b).unwrap();
-    let init_params_a = init::Params {
-        location: &dir_a,
-        allow_nested: false,
-    };
-    let init_params_b = init::Params {
-        location: &dir_b,
-        allow_nested: false,
-    };
-    init::run(&init_params_a).unwrap();
-    init::run(&init_params_b).unwrap();
+    let (dir, dir_a, dir_b) = mk_tmp_repo_pair();
+
     let fpath = &dir_a.join("toto");
+    let text0 = create_file_random_content(&fpath, "toto >");
 
-    let text0 = random_text();
-    {
-        let mut file = fs::File::create(&fpath).unwrap();
-        for line in text0.iter() {
-            file.write_all(line.as_bytes()).unwrap();
-        }
-    }
-
-    let add_params = add::Params {
-        repository: Some(&dir_a),
-        touched_files: vec![&fpath],
-    };
-    match add::run(&add_params).unwrap() {
+    match add_one_file(&dir_a, &fpath).unwrap() {
         Some(()) => (),
         None => panic!("no file added"),
     };
-    let record_params = record::Params {
-        repository: Some(&dir_a),
-        yes_to_all: true,
-        authors: Some(vec![]),
-        patch_name: Some("nothing"),
-    };
-    match record::run(&record_params).unwrap() {
+
+    match record_all(&dir_a, Some("add toto")).unwrap() {
         None => panic!("file add is not going to be recorded"),
         Some(()) => (),
     }
-    let pull_params = pull::Params {
-        repository: Some(&dir_b),
-        remote_id: Some(dir_a.to_str().unwrap()),
-        set_default: false,
-        port: None,
-        yes_to_all: true,
-    };
-    pull::run(&pull_params).unwrap();
+
+    pull_all(&dir_a, &dir_b).unwrap();
     let fpath_b = &dir_b.join("toto");
     let metadata = fs::metadata(&fpath_b).unwrap();
     assert!(metadata.is_file());
     assert!(file_eq(&fpath_b, &text0));
 }
 
-fn file_eq(path: &std::path::Path, text: &[String]) -> bool {
+fn file_eq_str(path: &std::path::Path, fulltext: &str) -> bool {
     let mut f = fs::File::open(&path).unwrap();
     let mut s = String::new();
     f.read_to_string(&mut s).unwrap();
-    let mut fulltext = String::new();
-    for line in text.iter() {
-        fulltext.push_str(&line);
-    }
     if fulltext == s {
         true
     } else {
@@ -344,6 +297,23 @@ fn file_eq(path: &std::path::Path, text: &[String]) -> bool {
         false
     }
 }
+
+
+fn file_eq(path: &std::path::Path, text: &[String]) -> bool {
+    let mut fulltext = String::new();
+    for line in text.iter() {
+        fulltext.push_str(&line);
+    }
+    file_eq_str(path, &fulltext)
+}
+
+fn files_eq(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let mut a = fs::File::open(&a).unwrap();
+    let mut s = String::new();
+    a.read_to_string(&mut s).unwrap();
+    file_eq_str(b, &s)
+}
+
 
 #[test]
 fn add_record_pull_edit_record_pull() {
@@ -386,7 +356,7 @@ fn add_record_pull_edit_record_pull_(empty_file: bool, really_edit: bool) {
     let text0 = if empty_file {
         Vec::new()
     } else {
-        random_text()
+        random_text("toto > ")
     };
     {
         let mut file = fs::File::create(&fpath).unwrap();
@@ -509,7 +479,7 @@ fn move_to_file_editing() {
     move_to_file_(true)
 }
 
-fn random_text() -> Vec<String> {
+fn random_text(prefix: &str) -> Vec<String> {
     let mut text = Vec::new();
     for _ in 0..20 {
         let mut s: String = rand::thread_rng()
@@ -517,13 +487,14 @@ fn random_text() -> Vec<String> {
                                 .take(20)
                                 .collect();
         s.push('\n');
+        s = prefix.to_string() + &s;
         text.push(s)
     }
     text
 }
 
-fn create_file_random_content(path: &std::path::Path) -> Vec<String> {
-    let text0 = random_text();
+fn create_file_random_content(path: &std::path::Path, prefix: &str) -> Vec<String> {
+    let text0 = random_text(prefix);
     {
         let mut file = fs::File::create(&path).unwrap();
         for line in text0.iter() {
@@ -534,48 +505,14 @@ fn create_file_random_content(path: &std::path::Path) -> Vec<String> {
 }
 
 fn move_to_file_(edit_file: bool) {
-    env_logger::init().unwrap_or(());
-    let dir = tempdir::TempDir::new("pijul").unwrap();
-    let dir_a = dir.path().join("a");
-    let dir_b = dir.path().join("b");
-    std::mem::forget(dir);
-    fs::create_dir(&dir_a).unwrap();
-    fs::create_dir(&dir_b).unwrap();
-    let init_params_a = init::Params {
-        location: &dir_a,
-        allow_nested: false,
-    };
-    let init_params_b = init::Params {
-        location: &dir_b,
-        allow_nested: false,
-    };
-    init::run(&init_params_a).unwrap();
-    init::run(&init_params_b).unwrap();
+    let (dir, dir_a, dir_b) = mk_tmp_repo_pair();
+
     let toto_path = &dir_a.join("toto");
 
-    let text0 = create_file_random_content(&toto_path);
-    println!("Checking {:?}", toto_path);
-    {
-        let metadata = fs::metadata(toto_path);
-        println!("metadata {:?}", metadata.is_ok());
-    }
+    let text0 = create_file_random_content(&toto_path, "");
 
-
-    let add_params = add::Params {
-        repository: Some(&dir_a),
-        touched_files: vec![&toto_path],
-    };
-    match add::run(&add_params).unwrap() {
-        Some(()) => (),
-        None => panic!("no file added"),
-    };
-    let record_params = record::Params {
-        repository: Some(&dir_a),
-        yes_to_all: true,
-        authors: Some(vec![]),
-        patch_name: Some("file add"),
-    };
-    match record::run(&record_params).unwrap() {
+    add_one_file(&dir_a, &toto_path).unwrap();
+    match record_all(&dir_a, Some("add toto")).unwrap() {
         None => panic!("file add is not going to be recorded"),
         Some(()) => (),
     };
@@ -591,6 +528,7 @@ fn move_to_file_(edit_file: bool) {
     mv::run(&mv_params).unwrap();
 
     println!("moved successfully");
+
     let text1 = if edit_file {
         edit(&text0, 0, 20)
     } else {
@@ -605,25 +543,14 @@ fn move_to_file_(edit_file: bool) {
             file.write_all(line.as_bytes()).unwrap();
         }
     }
-    let record_params = record::Params {
-        repository: Some(&dir_a),
-        yes_to_all: true,
-        authors: Some(vec![]),
-        patch_name: Some("edition"),
-    };
 
-    match record::run(&record_params).unwrap() {
+    match record_all(&dir_a, Some("edition")).unwrap() {
         None if text0 != text1 => panic!("file edition is not going to be recorded"),
         _ => (),
     };
-    println!("record command finished");
 
     println!("Checking the contents of {:?}", &dir_a);
     let paths = fs::read_dir(&dir_a).unwrap();
-
-    for path in paths {
-        println!("Name: {:?}", path.unwrap().path())
-    }
 
     let pull_params = pull::Params {
         repository: Some(&dir_b),
@@ -632,16 +559,9 @@ fn move_to_file_(edit_file: bool) {
         port: None,
         yes_to_all: true,
     };
-    pull::run(&pull_params).unwrap();
-    println!("pull command finished");
+    pull_all(&dir_a, &dir_b).unwrap();
 
     let fpath_b = dir_b.join("titi");
-
-    let paths = fs::read_dir(&dir_b).unwrap();
-
-    for path in paths {
-        println!("Name: {:?}", path.unwrap().path())
-    }
 
     {
         let mut f = fs::File::open(&fpath_b).unwrap();
@@ -657,6 +577,8 @@ fn move_to_file_(edit_file: bool) {
     println!("Checking {:?}", &fpath_b);
     let metadata = fs::metadata(fpath_b).unwrap();
     assert!(metadata.is_file());
+
+    println!("done working in {:?}", dir.path());
 }
 
 #[test]
@@ -687,7 +609,7 @@ fn move_to_dir_editing_(empty_file: bool, edit_file: bool) {
     let text0 = if empty_file {
         Vec::new()
     } else {
-        random_text()
+        random_text("toto > ")
     };
     {
         let mut file = fs::File::create(&toto_path).unwrap();
@@ -807,7 +729,7 @@ fn add_edit_remove_pull() {
 
     let toto_path = &dir_a.join("toto");
 
-    create_file_random_content(&toto_path);
+    create_file_random_content(&toto_path, "A");
 
     let add_params = add::Params {
         repository: Some(&dir_a),
@@ -850,6 +772,7 @@ fn add_edit_remove_pull() {
         authors: Some(vec![]),
         patch_name: Some("file remove"),
     };
+    debug!("recording file remove!");
     match record::run(&record_params).unwrap() {
         None => panic!("file remove is not going to be recorded"),
         Some(()) => (),
@@ -912,39 +835,20 @@ fn add_record_edit_record() {
     };
     println!("added");
 
-    let text0 = random_text();
-    {
-        let mut file = fs::File::create(&fpath).unwrap();
-        for line in text0.iter() {
-            file.write_all(line.as_bytes()).unwrap();
-        }
-    };
+    let text0 = create_file_random_content(&fpath, "");
 
     match record_all(&dir.path(), Some("")).unwrap() {
         None => panic!("file filling will not be recorded"),
         Some(()) => ()
     }
 
-
-    let text0 = random_text();
-    {
-        let mut file = fs::File::create(&fpath).unwrap();
-        for line in text0.iter() {
-            file.write_all(line.as_bytes()).unwrap();
-        }
-    };
-
+    create_file_random_content(&fpath, "");
+    
     match record_all(&dir.path(), Some("")).unwrap() {
         None => panic!("file editing will not be recorded"),
         Some(()) => ()
     }
-
-
-    {
-        let mut file = fs::File::create(&fpath).unwrap();
-    }
-
-
+    fs::File::create(&fpath).unwrap();
     match record_all(&dir.path(), Some("")).unwrap() {
         None => panic!("file emptying will not be recorded"),
         Some(()) => ()
