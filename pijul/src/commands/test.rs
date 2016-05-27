@@ -70,8 +70,8 @@ fn record_all(repo: &std::path::Path, name: Option<&str>) -> Result<Option<()>, 
 fn pull_all(from: &std::path::Path, to: &std::path::Path) -> Result<(), error::Error> {
 
     let pull_params = pull::Params {
-        repository: Some(from),
-        remote_id: Some(to.to_str().unwrap()),
+        repository: Some(to),
+        remote_id: Some(from.to_str().unwrap()),
         set_default: true,
         port: None,
         yes_to_all: true,
