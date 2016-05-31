@@ -33,6 +33,7 @@ use std;
 use std::fs;
 use std::ptr::copy_nonoverlapping;
 
+
 // Used between functions of unsafe_output_repository (Rust does not allow enum inside the class)
 enum Tree {
     Move {
@@ -108,7 +109,7 @@ pub fn retrieve_paths<'name, 'a, 'b, T>(branch: &'a Branch<'name, 'a, 'b, T>,
 }
 
 /// Returns the path's inode
-pub fn follow_path<T>(db_tree: &Db<T>, path: &[&[u8]]) -> Result<Option<Vec<u8>>, Error> {
+pub fn follow_path<T>(db_tree:&Db<T>, path:&[&[u8]])->Result<Option<Inode>,Error> {
     // follow in tree, return inode
     let mut buf = vec![0;INODE_SIZE];
     for p in path {
@@ -126,7 +127,8 @@ pub fn follow_path<T>(db_tree: &Db<T>, path: &[&[u8]]) -> Result<Option<Vec<u8>>
             }
         }
     }
-    Ok(Some(buf))
+    debug_assert!(buf.len() == INODE_SIZE);
+    Ok(Some(Inode::from_slice(&buf)))
 }
 
 /// Returns the node's properties

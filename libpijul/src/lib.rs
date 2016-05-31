@@ -128,7 +128,7 @@ impl<'env,T> backend::Transaction<'env,T> {
     // (would need mutable + immutable transactions from the backend
     // module).
 
-    pub fn follow_path(&self, path:&[&[u8]])->Result<Option<Vec<u8>>,Error> {
+    pub fn follow_path(&self, path:&[&[u8]])->Result<Option<Inode>,Error> {
         let db_tree = self.db_tree();
         output::follow_path(&db_tree, path)
     }
@@ -138,6 +138,9 @@ impl<'env,T> backend::Transaction<'env,T> {
     }
     pub fn list_files(&self) -> Result<Vec<PathBuf>, Error> {
         file_operations::list_files(self)
+    }
+    pub fn list_files_in_dir(&self, dir_inode:&Inode) -> Result<Vec<(String, Inode)>, Error> {
+        file_operations::list_files_in_dir(self, dir_inode)
     }
 
     pub fn retrieve_paths(&self,branch_name:&str,key:&[u8], forward:bool) -> Vec<(Vec<u8>, Vec<u8>)> {

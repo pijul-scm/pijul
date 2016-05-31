@@ -26,7 +26,7 @@ use std;
 use std::path::{Path,PathBuf};
 use rustc_serialize::hex::ToHex;
 use std::iter::{Iterator};
-
+use std::str::from_utf8_unchecked;
 /// An Inode is a handle to a file; it is attached to a Line.
 #[derive(Copy, Clone, Debug)]
 pub struct Inode { contents: [u8; INODE_SIZE] }
@@ -300,4 +300,24 @@ pub fn list_files<T>(repository:&Transaction<T>)->Result<Vec<PathBuf>, Error> {
     let mut pathbuf=PathBuf::new();
     try!(collect(repository,ROOT_INODE.as_ref(), &mut pathbuf, &[], &mut files));
     Ok(files)
+}
+
+pub fn list_files_in_dir<T>(repository:&Transaction<T>, inode:&Inode)->Result<Vec<(String,Inode)>, Error> {
+    let mut result = Vec::new();
+    let db_tree = repository.db_tree();
+    let db_inodes = repository.db_inodes();
+    for (k,v) in db_tree.iter(inode.as_ref(), None) {
+        let add= match db_inodes.get(&k[0..INODE_SIZE]) {
+            Some(node) => node[0]<2,
+            None=> true,
+        };
+        if add {
+            result.push((
+                // Actually safe, if invariants on the database are correct
+                unsafe { from_utf8_unchecked(&k[INODE_SIZE..]) }.to_string(),
+                Inode::from_slice(v)
+            ))
+        }
+    }
+    Ok(result)
 }
