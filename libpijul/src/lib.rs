@@ -139,7 +139,7 @@ impl<'env,T> backend::Transaction<'env,T> {
     pub fn list_files(&self) -> Result<Vec<PathBuf>, Error> {
         file_operations::list_files(self)
     }
-    pub fn list_files_in_dir(&self, dir_inode:&Inode) -> Result<Vec<(String, Inode)>, Error> {
+    pub fn list_files_in_dir(&self, dir_inode:&Inode) -> Result<Vec<(String, bool, Option<Vec<u8>>, Inode)>, Error> {
         file_operations::list_files_in_dir(self, dir_inode)
     }
 

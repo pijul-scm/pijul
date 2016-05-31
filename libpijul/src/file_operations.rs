@@ -302,19 +302,23 @@ pub fn list_files<T>(repository:&Transaction<T>)->Result<Vec<PathBuf>, Error> {
     Ok(files)
 }
 
-pub fn list_files_in_dir<T>(repository:&Transaction<T>, inode:&Inode)->Result<Vec<(String,Inode)>, Error> {
+
+// Returns internal keys -- we have no type for that yet.
+pub fn list_files_in_dir<T>(repository:&Transaction<T>, inode:&Inode)
+                            ->Result<Vec<(String, bool, Option<Vec<u8>>, Inode)>, Error> {
     let mut result = Vec::new();
     let db_tree = repository.db_tree();
     let db_inodes = repository.db_inodes();
-    for (k,v) in db_tree.iter(inode.as_ref(), None) {
-        let add= match db_inodes.get(&k[0..INODE_SIZE]) {
-            Some(node) => node[0]<2,
-            None=> true,
-        };
-        if add {
+    for (k,v) in db_tree.iter(inode.as_ref(), None).take_while(|&(k,_)| &k[0..INODE_SIZE] == inode.as_ref()) {
+        let node = db_inodes.get(&k[0..INODE_SIZE]);
+        let add = if let Some(node) = node { node[0] == 0 } else { true };
+        if add && k.len() > INODE_SIZE {
+            let is_dir = db_tree.get(v.as_ref()).is_some();
             result.push((
                 // Actually safe, if invariants on the database are correct
                 unsafe { from_utf8_unchecked(&k[INODE_SIZE..]) }.to_string(),
+                is_dir,
+                node.map(|node| (&node[3..]).to_vec()),
                 Inode::from_slice(v)
             ))
         }
