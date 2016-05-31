@@ -26,7 +26,7 @@ use std::path::Path;
 use super::get_wd;
 
 pub fn invocation() -> StaticSubcommand {
-    return 
+    return
         SubCommand::with_name("ls")
         .about("list tracked files")
         .arg(Arg::with_name("dir")

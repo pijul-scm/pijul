@@ -269,10 +269,13 @@ pub fn remove_file<T>(repository:&mut Transaction<T>, path:&std::path::Path) -> 
 
 pub fn list_files<T>(repository:&Transaction<T>)->Result<Vec<PathBuf>, Error> {
     fn collect<T>(repo:&Transaction<T>,key:&[u8],pb:&Path, basename:&[u8],files:&mut Vec<PathBuf>)->Result<(),Error> {
-        //println!("collecting {:?},{:?}",to_hex(key),std::str::from_utf8_unchecked(basename));
+        debug!("collecting {:?},{:?}",key,std::str::from_utf8(basename));
         let db_inodes = repo.db_inodes();
         let add= match db_inodes.get(key) {
-            Some(node) => node[0]<2,
+            Some(node) => {
+                debug!("node = {:?}", node);
+                node[0]<2
+            },
             None=> true,
         };
         if add {
@@ -281,8 +284,10 @@ pub fn list_files<T>(repository:&Transaction<T>)->Result<Vec<PathBuf>, Error> {
             let next_pb_=next_pb.clone();
             if basename.len()>0 { files.push(next_pb) }
             let db_tree = repo.db_tree();
+            debug!("starting iterator, key={:?}", key);
             for (k,v) in db_tree.iter(key, None) {
-                if v.len()>0 && k == key {
+                debug!("iter: {:?} {:?}", k, v);
+                if v.len()>0 && &k[0..INODE_SIZE] == key {
                     try!(collect(repo,v,next_pb_.as_path(),&k[INODE_SIZE..],files));
                 } else {
                     break
