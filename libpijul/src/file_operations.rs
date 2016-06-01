@@ -28,7 +28,7 @@ use rustc_serialize::hex::ToHex;
 use std::iter::{Iterator};
 use std::str::from_utf8_unchecked;
 /// An Inode is a handle to a file; it is attached to a Line.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Inode { contents: [u8; INODE_SIZE] }
 
 impl ToHex for Inode {
@@ -305,7 +305,7 @@ pub fn list_files<T>(repository:&Transaction<T>)->Result<Vec<PathBuf>, Error> {
 
 // Returns internal keys -- we have no type for that yet.
 pub fn list_files_in_dir<T>(repository:&Transaction<T>, inode:&Inode)
-                            ->Result<Vec<(String, bool, Option<Vec<u8>>, Inode)>, Error> {
+                            ->Result<Vec<(String, Option<Vec<u8>>, Inode)>, Error> {
     let mut result = Vec::new();
     let db_tree = repository.db_tree();
     let db_inodes = repository.db_inodes();
@@ -313,15 +313,18 @@ pub fn list_files_in_dir<T>(repository:&Transaction<T>, inode:&Inode)
         let node = db_inodes.get(&k[0..INODE_SIZE]);
         let add = if let Some(node) = node { node[0] == 0 } else { true };
         if add && k.len() > INODE_SIZE {
-            let is_dir = db_tree.get(v.as_ref()).is_some();
             result.push((
                 // Actually safe, if invariants on the database are correct
                 unsafe { from_utf8_unchecked(&k[INODE_SIZE..]) }.to_string(),
-                is_dir,
                 node.map(|node| (&node[3..]).to_vec()),
                 Inode::from_slice(v)
             ))
         }
     }
     Ok(result)
+}
+
+pub fn is_directory<T>(repository:&Transaction<T>, inode:&Inode) -> bool {
+    let db_tree = repository.db_tree();
+    inode == &ROOT_INODE || db_tree.get(inode.as_ref()).is_some()
 }

@@ -139,8 +139,11 @@ impl<'env,T> backend::Transaction<'env,T> {
     pub fn list_files(&self) -> Result<Vec<PathBuf>, Error> {
         file_operations::list_files(self)
     }
-    pub fn list_files_in_dir(&self, dir_inode:&Inode) -> Result<Vec<(String, bool, Option<Vec<u8>>, Inode)>, Error> {
+    pub fn list_files_in_dir(&self, dir_inode:&Inode) -> Result<Vec<(String, Option<Vec<u8>>, Inode)>, Error> {
         file_operations::list_files_in_dir(self, dir_inode)
+    }
+    pub fn is_directory(&self, inode:&Inode) -> bool {
+        file_operations::is_directory(self, inode)
     }
 
     pub fn retrieve_paths(&self,branch_name:&str,key:&[u8], forward:bool) -> Vec<(Vec<u8>, Vec<u8>)> {
