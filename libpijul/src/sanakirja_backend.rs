@@ -232,6 +232,14 @@ pub mod backend {
             }
         }
 
+        #[cfg(debug_assertions)]
+        fn debug_db(&self,txn:&sanakirja::MutTxn<T>, db0:&sanakirja::Db) {
+            txn.debug(&[db0], "/tmp/dump_debugging", false, true);
+        }
+        #[cfg(not(debug_assertions))]
+        fn debug_db(&self,_:&sanakirja::MutTxn<T>, _:&sanakirja::Db) {
+        }
+
         pub fn dump<W:std::io::Write>(&self, mut w:W) -> Result<(), Error> {
             debug!("dumping repository");
             let databases = [(Root::TREE, &self.db_tree),
@@ -251,7 +259,8 @@ pub mod backend {
                 try!(write!(w,"\n--------\ndatabase {:?}\n\n", name));
                 if *name == Root::NODES {
                     let db0 = unsafe { &*i.get() };
-                    txn.debug(&[&db0], "/tmp/dump_debugging", false, true);
+
+                    self.debug_db(&txn, &db0);
                     for (k,mut v) in txn.iter(unsafe {&*i.get()}, b"", None) {
                         try!(write!(w, "{:?} {:?}\n", k.to_hex(), v_.to_hex()));
                         let db = unsafe { sanakirja::Db::from_value(v.next().unwrap()) };
