@@ -18,7 +18,7 @@ use super::error::Error;
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
     let paths =
         match args.values_of("files") {
-            Some(l) => l.iter().map(|&p| { Path::new(p) }).collect(),
+            Some(l) => l.map(|p| { Path::new(p) }).collect(),
             None => vec!()
         };
     let repository = args.value_of("repository").and_then(|x| {Some(Path::new(x))});

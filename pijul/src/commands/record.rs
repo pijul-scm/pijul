@@ -76,7 +76,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 {
     Params { repository : args.value_of("repository").and_then(|x| { Some(Path::new(x)) }),
              yes_to_all : args.is_present("all"),
-             authors : args.values_of("author"),
+             authors : args.values_of("author").map(|x| x.collect()),
              patch_name : args.value_of("message")
     }
 }

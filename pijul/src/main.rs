@@ -55,12 +55,10 @@ fn main() {
     env_logger::init().unwrap();
     let time0=time::precise_time_s();
     let version=crate_version!();
-    let app = clap_app!(
-        pijul =>
-            (version: &version[..])
-            (author: "Pierre-Étienne Meunier and Florent Becker")
-            (about: "Version Control: fast, distributed, easy to use; pick any three")
-            );
+    let app = clap::App::new("pijul")
+        .version(&version[..])
+        .author("Pierre-Étienne Meunier and Florent Becker")
+        .about("Version Control: fast, distributed, easy to use; pick any three");
     let app = app.subcommands(commands::all_command_invocations());
 
     let args = app.get_matches();

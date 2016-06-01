@@ -18,7 +18,7 @@
 */
 extern crate clap;
 
-pub type StaticSubcommand = clap::App<'static, 'static, 'static, 'static, 'static, 'static>;
+pub type StaticSubcommand = clap::App<'static, 'static>;
 
 mod fs_operation;
 mod remote;

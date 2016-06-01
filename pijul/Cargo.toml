@@ -9,7 +9,7 @@ documentation = "https://pijul.org/doc/libpijul/index.html"
 
 
 [dependencies]
-clap = "1.5"
+clap = "2.5"
 rust-crypto = "0.2"
 regex="0.1"
 rand= "0.3"

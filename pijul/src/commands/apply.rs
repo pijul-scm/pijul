@@ -59,7 +59,7 @@ pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a>
 {
     Params {
         repository : Path::new(args.value_of("repository").unwrap_or(".")),
-        hex_hash : args.values_of("patch").unwrap()
+        hex_hash : args.values_of("patch").map(|x| x.collect()).unwrap_or(Vec::new())
     }
 }
 
