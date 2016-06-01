@@ -4,7 +4,6 @@ description = "A patch-based distributed version control system, easy to use and
 version = "0.3.0"
 authors = ["Pierre-Étienne Meunier","Florent Becker"]
 license = "AGPL-3.0"
-build = "build.rs"
 homepage = "https://pijul.org/"
 documentation = "https://pijul.org/documentation"
 
