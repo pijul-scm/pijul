@@ -24,10 +24,11 @@ use std::path::{PathBuf, Path};
 use std::fs::{rename, metadata};
 
 extern crate libpijul;
-use self::libpijul::fs_representation::{pristine_dir, find_repo_root, repo_path};
+use self::libpijul::fs_representation::{pristine_dir, find_repo_root};
 use self::libpijul::Repository;
 
 use super::get_wd;
+use std;
 
 pub fn invocation() -> StaticSubcommand {
     return 
@@ -60,13 +61,29 @@ pub struct Params<'a> {
 pub fn parse_args<'a>(args: &'a ArgMatches) -> Params<'a> {
     let repository = args.value_of("repository").and_then(|x| {Some(Path::new(x))});
     let wd = get_wd(repository).unwrap();
+    debug!("wd = {:?}", wd);
     let repo_root = find_repo_root(&wd).unwrap();
+    debug!("repo_root = {:?}", repo_root);
     let mut repo_paths = Vec::new();
     for fname in args.values_of("files").unwrap() {
-        let p = Path::new(fname);
-        let r = repo_path(&repo_root, p).unwrap();
-        repo_paths.push(r);
+        debug!("fname: {:?}", fname);
+        // if fname is absolute, erases current_dir.
+        let mut path = std::env::current_dir().unwrap();
+        path.push(fname);
+        debug!("path = {:?}", path);
+        let path =
+            if let Ok(f) = std::fs::canonicalize(&path) {
+                f
+            } else {
+                std::fs::canonicalize(&path.parent().unwrap()).unwrap().join(&path.file_name().unwrap())
+            };
+        debug!("path = {:?}", path);
+        let path = path.strip_prefix(&repo_root).unwrap();
+        debug!("path = {:?}", path);
+
+        repo_paths.push(path.to_path_buf());
     }
+    debug!("parse_args: done");
     let repo_paths = repo_paths;
     let (dest, origs) = repo_paths.split_last().unwrap();
     let target_path = repo_root.join(&dest);
